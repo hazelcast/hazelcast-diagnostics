@@ -206,7 +206,7 @@ public class Machine {
         return endMs;
     }
 
-    public Iterator<Map.Entry<Long, String>> getItems(int type, long startMs, long endMs) {
+    public Iterator<Map.Entry<Long, String>> between(int type, long startMs, long endMs) {
         return new IteratorImpl(type, startMs, endMs);
     }
 

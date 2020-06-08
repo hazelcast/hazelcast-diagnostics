@@ -17,6 +17,12 @@
             <artifactId>jide-oss</artifactId>
             <version>3.6.18</version>
         </dependency>
+
+        <dependency>
+            <groupId>jfree</groupId>
+            <artifactId>jfreechart</artifactId>
+            <version>1.0.13</version>
+        </dependency>
     </dependencies>
 
 </project>

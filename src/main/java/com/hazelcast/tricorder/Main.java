@@ -19,11 +19,9 @@ public class Main {
 
         mainWindow.getJFrame().setVisible(true);
 
-        Iterator<Map.Entry<Long, String>> s = server.getItems(Machine.TYPE_INVOCATION_PROFILER, Long.MIN_VALUE, Long.MAX_VALUE);
-        while (s.hasNext()) {
-            System.out.println(s.next().getValue());
-        }
+//        Iterator<Map.Entry<Long, String>> s = server.between(Machine.TYPE_INVOCATION_PROFILER, Long.MIN_VALUE, Long.MAX_VALUE);
+//        while (s.hasNext()) {
+//            System.out.println(s.next().getValue());
+//        }
     }
-
-
 }

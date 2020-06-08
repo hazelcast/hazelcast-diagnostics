@@ -1,20 +1,31 @@
 package com.hazelcast.tricorder;
 
 import com.jidesoft.swing.RangeSlider;
+import org.jfree.chart.ChartFactory;
+import org.jfree.chart.ChartPanel;
+import org.jfree.chart.JFreeChart;
+import org.jfree.chart.plot.PlotOrientation;
+import org.jfree.data.category.DefaultCategoryDataset;
+import org.jfree.data.function.Function2D;
+import org.jfree.data.function.NormalDistributionFunction2D;
+import org.jfree.data.general.DatasetUtilities;
+import org.jfree.data.xy.XYDataset;
 
 import javax.swing.*;
-import javax.swing.event.ChangeEvent;
-import javax.swing.event.ChangeListener;
 import java.awt.*;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 
 public class MainWindow {
     private final RangeSlider rangeSlider;
     private JFrame window;
-    private List<Machine> machines = new ArrayList<Machine>();
+    private List<Machine> machines = new ArrayList<>();
     private JTextPane propertiesTextPane;
     private JTextPane buildInfoTextPane;
+    private JFreeChart invocationChart;
 
     public JFrame getJFrame() {
         return window;
@@ -35,8 +46,65 @@ public class MainWindow {
         System.out.println(machine.startMillis());
         System.out.println(machine.endMillis());
 
-        propertiesTextPane.setText(machine.getItems(Machine.TYPE_SYSTEM_PROPERTIES, 0, Long.MAX_VALUE).next().getValue());
-        buildInfoTextPane.setText(machine.getItems(Machine.TYPE_BUILD_INFO, 0, Long.MAX_VALUE).next().getValue());
+        updateSystemProperties(machine);
+        updateBuildInfo(machine);
+
+        Iterator<Map.Entry<Long, String>> between = machine.between(Machine.TYPE_INVOCATION_PROFILER, 0, Long.MAX_VALUE);
+        for (; ; ) {
+            if (!between.hasNext()) {
+                return;
+            }
+            String invocationProfileData = between.next().getValue();
+            int start = invocationProfileData.indexOf("com.hazelcast.cache.impl.operation.CacheGetOperation[");
+            if (start == -1) {
+                continue;
+            }
+            int end = invocationProfileData.indexOf("]]", start);
+            //System.out.println("start:" + start + " end:" + end);
+            String s = invocationProfileData.substring(start, end);
+            String[] distribution = s.substring(s.indexOf("latency-distribution[") + "latency-distribution[".length() + 1).split("\\n");
+
+            final DefaultCategoryDataset dataset = new DefaultCategoryDataset();
+
+            for (String dist : distribution) {
+                dist = dist.trim();
+                int indexEquals = dist.indexOf("=");
+                long value = Long.parseLong(dist.substring(indexEquals + 1).replace(",", ""));
+                String key = dist.substring(0, indexEquals);
+                dataset.addValue(value, key, key);
+            }
+            // invocationChart.set.
+            System.out.println(Arrays.asList(distribution));
+            break;
+        }
+    }
+
+    private void updateBuildInfo(Machine machine) {
+        String[] lines = machine.between(Machine.TYPE_BUILD_INFO, 0, Long.MAX_VALUE).next().getValue().split("\\n");
+        StringBuffer sb = new StringBuffer();
+        for (String line: lines) {
+            int indexEquals = line.indexOf('=');
+            if (indexEquals == -1) {
+                continue;
+            }
+
+            sb.append(line.trim().replace("]","")).append("\n");
+        }
+        buildInfoTextPane.setText(sb.toString());
+    }
+
+    private void updateSystemProperties(Machine machine) {
+        String[] lines = machine.between(Machine.TYPE_SYSTEM_PROPERTIES, 0, Long.MAX_VALUE).next().getValue().split("\\n");
+        StringBuffer sb = new StringBuffer();
+        for (String line: lines) {
+            int indexEquals = line.indexOf('=');
+            if (indexEquals == -1) {
+                continue;
+            }
+
+            sb.append(line.trim().replace("]","")).append("\n");
+        }
+        propertiesTextPane.setText(sb.toString());
     }
 
     public MainWindow() {
@@ -74,14 +142,8 @@ public class MainWindow {
 
     private RangeSlider newRangeSlider() {
         RangeSlider rangeSlider = new RangeSlider();
-        rangeSlider.addChangeListener(new ChangeListener() {
-            @Override
-            public void stateChanged(ChangeEvent e) {
-                System.out.println(e);
-            }
-        });
+        rangeSlider.addChangeListener(e -> System.out.println(e));
         rangeSlider.setRangeDraggable(true);
-        //     JPanel timePanel = new JPanel();
         return rangeSlider;
     }
 
@@ -103,8 +165,7 @@ public class MainWindow {
         JComponent panel5 = new JPanel();
         tabbedPane.addTab("Invocations", null, panel5);
 
-        JComponent panel6 = new JPanel();
-        tabbedPane.addTab("Invocation Profiler", null, panel6);
+        tabbedPane.addTab("Invocation Profiler", null, newInvocationProfilerPane());
 
         JComponent panel7 = new JPanel();
         tabbedPane.addTab("Operation profiler", null, panel7);
@@ -118,6 +179,22 @@ public class MainWindow {
         JComponent panel10 = new JPanel();
         tabbedPane.addTab("Slow Operations", null, panel10);
         return tabbedPane;
+    }
+
+    private Component newInvocationProfilerPane() {
+        Function2D normal = new NormalDistributionFunction2D(0.0, 1.0);
+        XYDataset dataset = DatasetUtilities.sampleFunction2D(normal, -5.0, 5.0, 100, "Normal");
+        invocationChart = ChartFactory.createXYLineChart(
+                "XY Series Demo",
+                "X",
+                "Y",
+                dataset,
+                PlotOrientation.VERTICAL,
+                true,
+                true,
+                false);
+        ChartPanel chartPanel = new ChartPanel(invocationChart);
+        return chartPanel;
     }
 
     private Component newBuildInfoPane() {
