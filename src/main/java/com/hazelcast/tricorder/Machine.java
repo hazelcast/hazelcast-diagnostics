@@ -35,8 +35,8 @@ public class Machine {
 
     private File directory;
     private List<DiagnosticsFile> diagnosticsFiles;
-    private long fromMillis = Integer.MAX_VALUE;
-    private long toMillis = Integer.MIN_VALUE;
+    private long startMs = Long.MAX_VALUE;
+    private long endMs = Long.MIN_VALUE;
 
     public File getDirectory() {
         return directory;
@@ -49,7 +49,7 @@ public class Machine {
     public void analyze() {
         try {
             diagnosticsFiles = diagnosticsFiles();
-           // System.out.println(diagnosticsFiles);
+            // System.out.println(diagnosticsFiles);
 
             for (DiagnosticsFile diagnosticsFile : diagnosticsFiles) {
                 analyze(diagnosticsFile);
@@ -101,6 +101,19 @@ public class Machine {
                     depth--;
                     if (depth == 0) {
                         analyze(sb, metadata);
+                        if (metadata.timestamp > file.endMs) {
+                            file.endMs = metadata.timestamp;
+                        }
+                        if (metadata.timestamp > endMs) {
+                            endMs = metadata.timestamp;
+                        }
+                        if (metadata.timestamp < file.startMs) {
+                            file.startMs = metadata.timestamp;
+                        }
+                        if (metadata.timestamp < startMs) {
+                            startMs = metadata.timestamp;
+                        }
+
                         DiagnosticsIndexEntry fragment = new DiagnosticsIndexEntry();
                         fragment.offset = startOffset;
                         fragment.length = (offset - startOffset) + 1;
@@ -175,7 +188,7 @@ public class Machine {
     }
 
     private List<DiagnosticsFile> diagnosticsFiles() {
-        List<DiagnosticsFile> files = new ArrayList<DiagnosticsFile>();
+        List<DiagnosticsFile> files = new ArrayList<>();
         for (File file : directory.listFiles()) {
             String name = file.getName();
             if (name.startsWith("diagnostics-")) {
@@ -186,11 +199,11 @@ public class Machine {
     }
 
     public long startMillis() {
-        return 0;
+        return startMs;
     }
 
     public long endMillis() {
-        return 0;
+        return endMs;
     }
 
     public Iterator<Map.Entry<Long, String>> getItems(int type, long startMs, long endMs) {
@@ -232,7 +245,7 @@ public class Machine {
                 }
 
                 diagnosticsFile = diagnosticsFileIterator.next();
-                iterator = diagnosticsFile.indices[type].treeMap.subMap(startMs,true,endMs,true).entrySet().iterator();
+                iterator = diagnosticsFile.indices[type].treeMap.subMap(startMs, true, endMs, true).entrySet().iterator();
             }
         }
 
@@ -251,6 +264,8 @@ public class Machine {
         private final DiagnosticsIndex[] indices = new DiagnosticsIndex[TYPES];
         private final File file;
         private final RandomAccessFile randomAccessFile;
+        private long startMs = Long.MIN_VALUE;
+        private long endMs = Long.MAX_VALUE;
 
         public DiagnosticsFile(File file) {
             this.file = file;
