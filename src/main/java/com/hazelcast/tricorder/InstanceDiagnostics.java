@@ -191,11 +191,11 @@ public class InstanceDiagnostics {
         return files;
     }
 
-    public long startMillis() {
+    public long startMs() {
         return startMs;
     }
 
-    public long endMillis() {
+    public long endMs() {
         return endMs;
     }
 

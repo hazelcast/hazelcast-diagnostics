@@ -3,6 +3,8 @@ package com.hazelcast.tricorder;
 import com.jidesoft.swing.RangeSlider;
 
 import javax.swing.*;
+import javax.swing.event.ChangeEvent;
+import javax.swing.event.ChangeListener;
 import java.awt.*;
 import java.util.ArrayList;
 import java.util.List;
@@ -17,6 +19,9 @@ public class MainWindow {
     private InvocationProfilerPane invocationProfilerPane = new InvocationProfilerPane();
     private MemoryPane memoryPane = new MemoryPane();
     private CpuUtilizationPane cpuUtilizationPane = new CpuUtilizationPane();
+    private long durationMs;
+    private long startMs;
+
     public JFrame getJFrame() {
         return window;
     }
@@ -24,22 +29,27 @@ public class MainWindow {
     public void add(InstanceDiagnostics instanceDiagnostics) {
         machines.add(instanceDiagnostics);
 
+        this.startMs = instanceDiagnostics.startMs();
+        this.durationMs = instanceDiagnostics.endMs() - startMs;
         BoundedRangeModel model = rangeSlider.getModel();
-        model.setMinimum((int) instanceDiagnostics.startMillis());
-        model.setMaximum((int) instanceDiagnostics.endMillis());
-        model.setValue((int) instanceDiagnostics.startMillis());
-        model.setExtent((int) (instanceDiagnostics.endMillis() - instanceDiagnostics.startMillis()));
+        model.setMinimum(0);
+        model.setMaximum((int) durationMs);
+        model.setValue(0);
+        model.setExtent((int) durationMs);
         // model.setValueIsAdjusting(true);
         //  rangeSlider.setValue();
 
-        System.out.println(instanceDiagnostics.startMillis());
-        System.out.println(instanceDiagnostics.endMillis());
+        System.out.println(instanceDiagnostics.startMs());
+        System.out.println(instanceDiagnostics.endMs());
 
         systemPropertiesPane.setDiagnostics(instanceDiagnostics);
         buildInfoPane.setInstanceDiagnostics(instanceDiagnostics);
         invocationProfilerPane.setInstanceDiagnostics(instanceDiagnostics);
         memoryPane.setInstanceDiagnostics(instanceDiagnostics);
+        memoryPane.update();
+
         cpuUtilizationPane.setInstanceDiagnostics(instanceDiagnostics);
+        cpuUtilizationPane.update();
     }
 
     public MainWindow() {
@@ -65,7 +75,20 @@ public class MainWindow {
 
     private RangeSlider newRangeSlider() {
         RangeSlider rangeSlider = new RangeSlider();
-        rangeSlider.addChangeListener(e -> System.out.println(e));
+        rangeSlider.addChangeListener(new ChangeListener() {
+            @Override
+            public void stateChanged(ChangeEvent e) {
+                long begin = rangeSlider.getLowValue() + startMs;
+                long end = rangeSlider.getHighValue() + startMs;
+
+               // System.out.println(begin + " " + end);
+                cpuUtilizationPane.setRange(begin, end);
+                cpuUtilizationPane.update();
+
+                memoryPane.setRange(begin, end);
+                memoryPane.update();
+            }
+        });
         rangeSlider.setRangeDraggable(true);
         return rangeSlider;
     }

@@ -18,6 +18,9 @@ public class CpuUtilizationPane {
     private final JFreeChart invocationChart;
     private final ChartPanel chartPanel;
     private final TimeSeriesCollection collection;
+    private long startMs = Long.MIN_VALUE;
+    private long endMs = Long.MAX_VALUE;
+    private InstanceDiagnostics diagnostics;
 
     public CpuUtilizationPane(){
         collection = new TimeSeriesCollection();
@@ -34,13 +37,26 @@ public class CpuUtilizationPane {
         this.component=chartPanel;
     }
 
-    public void setInstanceDiagnostics(InstanceDiagnostics diagnostics) {
-        collection.removeAllSeries();
 
-        Iterator<Map.Entry<Long, Double>> iterator = diagnostics.doubleMetricsBetween("[metric=os.processCpuLoad]",Long.MIN_VALUE, Long.MAX_VALUE);
+    public void setRange(long fromMs, long toMs){
+        this.startMs = fromMs;
+        this.endMs = toMs;
+    }
+
+    public void setInstanceDiagnostics(InstanceDiagnostics diagnostics) {
+        this.diagnostics = diagnostics;
+    }
+
+    public void update(){
+        collection.removeAllSeries();
+        if(diagnostics==null){
+            return;
+        }
+
+        Iterator<Map.Entry<Long, Double>> iterator = diagnostics.doubleMetricsBetween("[metric=os.processCpuLoad]",startMs, endMs);
 
         if(!iterator.hasNext()){
-            System.out.println("No BuildInfo found in directory: "+diagnostics.getDirectory());
+            System.out.println("'[metric=os.processCpuLoad]' not found in directory: "+diagnostics.getDirectory());
             return;
         }
 
@@ -51,7 +67,7 @@ public class CpuUtilizationPane {
             try {
                 Map.Entry<Long,Double> entry = iterator.next();
                 Double value = entry.getValue();
-                System.out.println(value);
+               // System.out.println(value);
                 series.add(current, value);
                 current = ( Second ) current.next( );
             } catch ( SeriesException e ) {
@@ -59,7 +75,6 @@ public class CpuUtilizationPane {
             }
         }
 
-        collection.removeAllSeries();
         collection.addSeries(series);
     }
 
