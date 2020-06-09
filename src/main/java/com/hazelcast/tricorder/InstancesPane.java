@@ -17,12 +17,10 @@ public class InstancesPane {
 
     private final JPanel component;
 
-    private final MainWindow window;
     private final InstanceListModel listModel;
 
     public InstancesPane(MainWindow window) {
-        this.window = window;
-        this.listModel = new InstanceListModel();
+        this.listModel = new InstanceListModel(window);
 
         JPanel panel = new JPanel(new BorderLayout(), true);
 
@@ -103,11 +101,13 @@ public class InstancesPane {
         return component;
     }
 
-    private class InstanceListModel extends AbstractListModel<String> {
+    private static class InstanceListModel extends AbstractListModel<String> {
 
+        private final MainWindow window;
         private final List<File> instances;
 
-        public InstanceListModel() {
+        public InstanceListModel(MainWindow window) {
+            this.window = window;
             this.instances = new ArrayList<>();
         }
 
