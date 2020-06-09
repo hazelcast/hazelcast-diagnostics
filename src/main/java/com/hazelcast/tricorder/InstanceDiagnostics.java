@@ -168,7 +168,7 @@ public class InstanceDiagnostics {
             int indexFirstSquareBracket = sb.indexOf("[");
             String key = sb.substring(indexFirstSquareBracket + 1, indexLastEquals);
 
-            System.out.println(key);
+          //  System.out.println(key);
             availableMetrics.add(key);
 
             DiagnosticsIndex index = file.metricsIndices.get(key);
