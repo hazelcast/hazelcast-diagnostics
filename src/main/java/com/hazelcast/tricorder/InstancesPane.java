@@ -5,22 +5,24 @@ import javax.swing.filechooser.FileFilter;
 import java.awt.*;
 import java.io.File;
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
 
 public class InstancesPane {
 
     private static final String FILE_CHOOSER_DIALOG_TITLE = "Choose instance directory";
     private static final String FILE_CHOOSER_FILTER_TEXT = "Instance directory";
-    private static final String ADD_INSTANCE_BUTTON_LABEL = "Add instance";
-    private static final String REMOVE_INSTANCE_LABEL = "Remove instance";
+    private static final String ADD_INSTANCE_BUTTON_LABEL = "Add";
+    private static final String REMOVE_INSTANCE_LABEL = "Remove";
 
     private final JPanel component;
 
     private final MainWindow window;
-    private final DefaultListModel<File> listModel;
+    private final InstanceListModel listModel;
 
     public InstancesPane(MainWindow window) {
         this.window = window;
-        this.listModel = new DefaultListModel<>();
+        this.listModel = new InstanceListModel();
 
         JPanel panel = new JPanel(new BorderLayout(), true);
 
@@ -28,7 +30,7 @@ public class InstancesPane {
         buttonsPanel.add(createAddInstanceButton(buttonsPanel));
         panel.add(buttonsPanel, BorderLayout.NORTH);
 
-        JList<File> instancesList = new JList<>(listModel);
+        JList<String> instancesList = new JList<>(listModel);
         instancesList.setComponentPopupMenu(createInstanceListMenu(instancesList));
         panel.add(instancesList, BorderLayout.CENTER);
 
@@ -61,7 +63,7 @@ public class InstancesPane {
             if (returnVal == JFileChooser.APPROVE_OPTION) {
                 File[] directories = fc.getSelectedFiles();
                 for (File directory : directories) {
-                    addDirectory(directory);
+                    listModel.addElement(directory);
                 }
             }
         });
@@ -69,13 +71,13 @@ public class InstancesPane {
         return addInstanceButton;
     }
 
-    private JPopupMenu createInstanceListMenu(JList<File> list) {
+    private JPopupMenu createInstanceListMenu(JList<String> list) {
         return new JPopupMenu() {
             {
                 JMenuItem removeItem = new JMenuItem(REMOVE_INSTANCE_LABEL);
                 removeItem.addActionListener(e -> {
                     if (list.getSelectedIndex() >= 0) {
-                        removeDirectory(listModel.remove(list.getSelectedIndex()));
+                        listModel.removeElement(list.getSelectedIndex());
                     }
                 });
                 add(removeItem);
@@ -92,33 +94,59 @@ public class InstancesPane {
         };
     }
 
+    @Deprecated
     void addDirectory(File directory) {
-        try {
-            File canonicalDirectory = directory.getCanonicalFile();
+        listModel.addElement(directory);
+    }
 
-            if (!listModel.contains(canonicalDirectory)) {
-                listModel.addElement(canonicalDirectory);
+    public JComponent getComponent() {
+        return component;
+    }
+
+    private class InstanceListModel extends AbstractListModel<String> {
+
+        private final List<File> instances;
+
+        public InstanceListModel() {
+            this.instances = new ArrayList<>();
+        }
+
+        void addElement(File directory) {
+            File canonicalDirectory = canonicalize(directory);
+
+            if (!instances.contains(canonicalDirectory)) {
+                instances.add(canonicalDirectory);
+                fireIntervalAdded(this, instances.size(), instances.size());
 
                 InstanceDiagnostics instance = new InstanceDiagnostics(canonicalDirectory);
                 instance.analyze();
                 window.add(instance);
             }
-        } catch (IOException e) {
-            throw new RuntimeException(e);
         }
-    }
 
-    void removeDirectory(File directory) {
-        try {
-            File canonicalDirectory = directory.getCanonicalFile();
+        void removeElement(int i) {
+            File directory = instances.remove(i);
+            fireIntervalRemoved(this, instances.size(), instances.size());
 
-            window.remove(canonicalDirectory);
-        } catch (IOException e) {
-            throw new RuntimeException(e);
+            window.remove(directory);
         }
-    }
 
-    public JComponent getComponent() {
-        return component;
+        private File canonicalize(File file) {
+            try {
+                return file.getCanonicalFile();
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+        }
+
+        @Override
+        public int getSize() {
+            return instances.size();
+        }
+
+        @Override
+        public String getElementAt(int i) {
+            return instances.get(i).getName();
+        }
     }
 }
