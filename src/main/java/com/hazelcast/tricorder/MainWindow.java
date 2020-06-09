@@ -16,7 +16,7 @@ public class MainWindow {
     private InstancesPane machinesPane = new InstancesPane();
     private InvocationProfilerPane invocationProfilerPane = new InvocationProfilerPane();
     private MemoryPane memoryPane = new MemoryPane();
-
+    private CpuUtilizationPane cpuUtilizationPane = new CpuUtilizationPane();
     public JFrame getJFrame() {
         return window;
     }
@@ -39,6 +39,7 @@ public class MainWindow {
         buildInfoPane.setInstanceDiagnostics(instanceDiagnostics);
         invocationProfilerPane.setInstanceDiagnostics(instanceDiagnostics);
         memoryPane.setInstanceDiagnostics(instanceDiagnostics);
+        cpuUtilizationPane.setInstanceDiagnostics(instanceDiagnostics);
     }
 
     public MainWindow() {
@@ -79,6 +80,8 @@ public class MainWindow {
         tabbedPane.addTab("Metrics", null, panel1);
 
         tabbedPane.addTab("Memory", null, memoryPane.getComponent());
+
+        tabbedPane.addTab("CPU", null, cpuUtilizationPane.getComponent());
 
         tabbedPane.addTab("Build Info", null, buildInfoPane.getComponent());
 

@@ -164,7 +164,7 @@ public class InstanceDiagnostics {
         if (type == TYPE_METRIC) {
             int indexLastEquals = sb.lastIndexOf("=");
             int indexFirstSquareBracket = sb.indexOf("[");
-            String key = sb.substring(indexFirstSquareBracket+1, indexLastEquals);
+            String key = sb.substring(indexFirstSquareBracket + 1, indexLastEquals);
 
             System.out.println(key);
             availableMetrics.add(key);
@@ -203,23 +203,29 @@ public class InstanceDiagnostics {
         return new IteratorImpl(type, startMs, endMs);
     }
 
-    public Iterator<Map.Entry<Long, String>> metricsbetween(String metricName, long startMs, long endMs) {
-        return new MetricsIterator(metricName, startMs, endMs);
+    public Iterator<Map.Entry<Long, Long>> longMetricsBetween(String metricName, long startMs, long endMs) {
+        return (Iterator) new LongMetricsIterator(metricName, startMs, endMs, true);
     }
 
-    private class MetricsIterator implements Iterator<Map.Entry<Long, String>> {
+    public Iterator<Map.Entry<Long, Double>> doubleMetricsBetween(String metricName, long startMs, long endMs) {
+        return (Iterator) new LongMetricsIterator(metricName, startMs, endMs, false);
+    }
+
+    private class LongMetricsIterator implements Iterator<Map.Entry<Long, Number>> {
         private final String name;
         private final long startMs;
         private final long endMs;
-        private Map.Entry<Long, String> entry;
+        private final boolean isLong;
+        private Map.Entry<Long, Number> entry;
         private Iterator<Map.Entry<Long, DiagnosticsIndexEntry>> iterator;
         private Iterator<DiagnosticsFile> diagnosticsFileIterator = diagnosticsFiles.iterator();
         private DiagnosticsFile diagnosticsFile;
 
-        public MetricsIterator(String name, long startMs, long endMs) {
+        public LongMetricsIterator(String name, long startMs, long endMs, boolean isLong) {
             this.name = name;
             this.startMs = startMs;
             this.endMs = endMs;
+            this.isLong = isLong;
         }
 
         @Override
@@ -232,8 +238,16 @@ public class InstanceDiagnostics {
                 if (iterator != null && iterator.hasNext()) {
                     Map.Entry<Long, DiagnosticsIndexEntry> e = iterator.next();
                     DiagnosticsIndexEntry indexEntry = e.getValue();
-                    String value = diagnosticsFile.load(indexEntry.offset, indexEntry.length);
-                    entry = new AbstractMap.SimpleEntry<>(e.getKey(), value);
+                    String s = diagnosticsFile.load(indexEntry.offset, indexEntry.length);
+                    int indexOfLastEquals = s.lastIndexOf('=');
+                    String value = s.substring(indexOfLastEquals + 1).replace("]", "");
+                    Number n;
+                    if(isLong) {
+                        n = Long.parseLong(value);
+                    }else {
+                        n = Double.parseDouble(value);
+                    }
+                    entry = new AbstractMap.SimpleEntry<>(e.getKey(), n);
                     return true;
                 }
 
@@ -247,9 +261,9 @@ public class InstanceDiagnostics {
         }
 
         @Override
-        public Map.Entry<Long, String> next() {
+        public Map.Entry<Long, Number> next() {
             if (hasNext()) {
-                Map.Entry<Long, String> tmp = entry;
+                Map.Entry<Long, Number> tmp = entry;
                 entry = null;
                 return tmp;
             }
