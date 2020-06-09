@@ -14,6 +14,8 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.SortedMap;
+import java.util.TreeMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -74,28 +76,51 @@ public class InvocationProfilerPane {
         }
     }
 
-    @SuppressWarnings("unchecked")
     private void updateWithProfiles(String startProfileStr, String endProfileStr) throws ParseException {
-        Map<String, Object> startProfile = parseProfile(startProfileStr);
-        Map<String, Object> endProfile = parseProfile(endProfileStr);
-
-        Iterator<String> it = endProfile.keySet().iterator();
-        if (!it.hasNext()) {
-            return;
+        Map<String, SortedMap<Long, Long>> startLatencies = serviceToLatencyProfile(parseProfile(startProfileStr));
+        Map<String, SortedMap<Long, Long>> endLatencies = serviceToLatencyProfile(parseProfile(endProfileStr));
+        for (Entry<String, SortedMap<Long, Long>> serviceAndProfile : endLatencies.entrySet()) {
+            String service = serviceAndProfile.getKey();
+            SortedMap<Long, Long> profileAtStart = startLatencies.get(service);
+            if (profileAtStart == null) {
+                continue;
+            }
+            for (Entry<Long, Long> latAndCount : serviceAndProfile.getValue().entrySet()) {
+                Long latency = latAndCount.getKey();
+                Long countAtStart = profileAtStart.get(latency);
+                if (countAtStart == null) {
+                    continue;
+                }
+                latAndCount.setValue(latAndCount.getValue() - countAtStart);
+            }
         }
-        String service = it.next();
-        Map<String, Object> profile = (Map<String, Object>) endProfile.get(service);
-        Map<String, String> latencyDistribution = (Map<String, String>) profile.get("latency-distribution");
-        System.out.format("%s: %s%n", service, latencyDistribution);
 
         dataset.clear();
-        for (Entry<String, String> dataPoint : latencyDistribution.entrySet()) {
-            String bracket = dataPoint.getKey();
-            Long latency = Long.parseLong(bracket.substring(0, bracket.indexOf('.')));
-            long count = Long.parseLong(dataPoint.getValue());
-            dataset.addValue(count, latency, latency);
+        for (Entry<String, SortedMap<Long, Long>> serviceAndProfile : endLatencies.entrySet()) {
+            String service = serviceAndProfile.getKey();
+            SortedMap<Long, Long> profile = serviceAndProfile.getValue();
+            for (Entry<Long, Long> latAndCount : profile.entrySet()) {
+                dataset.addValue(latAndCount.getValue(), service, latAndCount.getKey());
+            }
         }
+    }
 
+    @SuppressWarnings("unchecked")
+    private static Map<String, SortedMap<Long, Long>> serviceToLatencyProfile(Map<String, Object> invocationProfile) {
+        Map<String, SortedMap<Long, Long>> result = new HashMap<>();
+        for (Entry<String, Object> e : invocationProfile.entrySet()) {
+            SortedMap<Long, Long> latencyProfile = new TreeMap<>();
+            result.put(e.getKey(), latencyProfile);
+            Map<String, Object> profile = (Map<String, Object>) e.getValue();
+            Map<String, String> latencyProfileStrs = (Map<String, String>) profile.get("latency-distribution");
+            for (Entry<String, String> dataPoint : latencyProfileStrs.entrySet()) {
+                String bracket = dataPoint.getKey();
+                Long latency = Long.parseLong(bracket.substring(0, bracket.indexOf('.')));
+                Long count = Long.parseLong(dataPoint.getValue().replace(",", ""));
+                latencyProfile.put(latency, count);
+            }
+        }
+        return result;
     }
 
     private static Map<String, Object> parseProfile(String profileStr) throws ParseException {
