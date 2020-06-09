@@ -11,19 +11,23 @@ import org.jfree.data.xy.XYDataset;
 
 import javax.swing.*;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.Iterator;
 import java.util.Map;
+import java.util.Map.Entry;
 
 public class InvocationProfilerPane {
 
 
-    private final JFreeChart invocationChart;
     private final ChartPanel pane;
+    private long startMs = Long.MIN_VALUE;
+    private long endMs = Long.MAX_VALUE;
+    private Collection<InstanceDiagnostics> instanceDiagnosticsColl;
 
     public InvocationProfilerPane() {
         Function2D normal = new NormalDistributionFunction2D(0.0, 1.0);
         XYDataset dataset = org.jfree.data.general.DatasetUtils.sampleFunction2D(normal, -5.0, 5.0, 100, "Normal");
-        invocationChart = ChartFactory.createXYLineChart(
+        JFreeChart invocationChart = ChartFactory.createXYLineChart(
                 "XY Series Demo",
                 "X",
                 "Y",
@@ -32,25 +36,47 @@ public class InvocationProfilerPane {
                 true,
                 true,
                 false);
-        ChartPanel chartPanel = new ChartPanel(invocationChart);
-        this.pane = chartPanel;
+        this.pane = new ChartPanel(invocationChart);
     }
 
-    public void setInstanceDiagnostics(InstanceDiagnostics instanceDiagnostics) {
-        Iterator<Map.Entry<Long, String>> between = instanceDiagnostics.between(InstanceDiagnostics.TYPE_INVOCATION_PROFILER, 0, Long.MAX_VALUE);
-        for (; ; ) {
-            if (!between.hasNext()) {
-                return;
+    public void setInstanceDiagnostics(Collection<InstanceDiagnostics> instanceDiagnostics) {
+        this.instanceDiagnosticsColl = instanceDiagnostics;
+    }
+
+    public void setRange(long startMs, long endMs) {
+        this.startMs = startMs;
+        this.endMs = endMs;
+    }
+
+    public void update() {
+        for (int i = 0; i < 100; i++) {
+            System.out.println();
+        }
+        for (InstanceDiagnostics profile : instanceDiagnosticsColl) {
+            Iterator<Map.Entry<Long, String>> iter = profile
+                    .between(InstanceDiagnostics.TYPE_INVOCATION_PROFILER, 0, Long.MAX_VALUE);
+            if (!iter.hasNext()) {
+                continue;
             }
-            String invocationProfileData = between.next().getValue();
-            int start = invocationProfileData.indexOf("com.hazelcast.cache.impl.operation.CacheGetOperation[");
+            String startProfile = iter.next().getValue();
+            String endProfile = null;
+
+            while (iter.hasNext()) {
+                endProfile = iter.next().getValue();
+            }
+            if (endProfile == null) {
+                continue;
+            }
+            System.out.format("Invocation profile data: %s%n", endProfile);
+            int start = endProfile.indexOf("com.hazelcast.cache.impl.operation.CacheGetOperation[");
             if (start == -1) {
                 continue;
             }
-            int end = invocationProfileData.indexOf("]]", start);
-            //System.out.println("start:" + start + " end:" + end);
-            String s = invocationProfileData.substring(start, end);
-            String[] distribution = s.substring(s.indexOf("latency-distribution[") + "latency-distribution[".length() + 1).split("\\n");
+            int end = endProfile.indexOf("]]", start);
+            String s = endProfile.substring(start, end);
+            String[] distribution = s
+                    .substring(s.indexOf("latency-distribution[") + "latency-distribution[".length() + 1)
+                    .split("\\n");
 
             final DefaultCategoryDataset dataset = new DefaultCategoryDataset();
 
@@ -61,8 +87,6 @@ public class InvocationProfilerPane {
                 String key = dist.substring(0, indexEquals);
                 dataset.addValue(value, key, key);
             }
-            // invocationChart.set.
-            System.out.println(Arrays.asList(distribution));
             break;
         }
     }
