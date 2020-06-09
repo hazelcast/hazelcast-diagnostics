@@ -62,7 +62,7 @@ public class MainWindow {
     public MainWindow() {
         window = new JFrame();
         Dimension dim = Toolkit.getDefaultToolkit().getScreenSize();
-        window.setSize(1024, 768);
+        window.setSize(1200, 900);
         window.setLocation(dim.width / 2 - window.getSize().width / 2, dim.height / 2 - window.getSize().height / 2);
         window.setLocationRelativeTo(null);
         window.setDefaultCloseOperation(WindowConstants.EXIT_ON_CLOSE);
@@ -98,9 +98,13 @@ public class MainWindow {
             operationsPlane.update();
         });
 
-        mainPanel.add(timeSelectorPane.getComponent(), BorderLayout.NORTH);
+        JPanel analysisPanel= new JPanel();
+        analysisPanel.setLayout(new BorderLayout());
+        analysisPanel.add(timeSelectorPane.getComponent(), BorderLayout.NORTH);
+        analysisPanel.add(tabbedPane, BorderLayout.CENTER);
+
         mainPanel.add(machinesPane.getComponent(), BorderLayout.WEST);
-        mainPanel.add(tabbedPane, BorderLayout.CENTER);
+        mainPanel.add(analysisPanel, BorderLayout.CENTER);
 
         window.setContentPane(mainPanel);
     }
@@ -120,7 +124,6 @@ public class MainWindow {
         tabbedPane.addTab("Operations", null, operationsPlane.getComponent());
         tabbedPane.addTab("Operation profiler", null, new JPanel());
         tabbedPane.addTab("Slow operation thread sampler", null, new JPanel());
-        tabbedPane.addTab("Slow Operations", null, new JPanel());
         tabbedPane.addTab("Slow Operations", null, new JPanel());
         return tabbedPane;
     }
