@@ -4,12 +4,14 @@ import javax.swing.*;
 import javax.swing.filechooser.FileFilter;
 import java.awt.*;
 import java.io.File;
+import java.io.IOException;
 
 public class InstancesPane {
 
     private static final String FILE_CHOOSER_DIALOG_TITLE = "Choose instance directory";
     private static final String FILE_CHOOSER_FILTER_TEXT = "Instance directory";
     private static final String ADD_INSTANCE_BUTTON_LABEL = "Add instance directories";
+    private static final String REMOVE_INSTANCE_BUTTON_LABEL = "Remove instance directories";
 
     private final JPanel component;
 
@@ -47,28 +49,52 @@ public class InstancesPane {
         addInstanceButton.addActionListener(e -> {
             int returnVal = fc.showOpenDialog(panel);
             if (returnVal == JFileChooser.APPROVE_OPTION) {
-                File[] files = fc.getSelectedFiles();
-                for (File file : files) {
-                    if (!listModel.contains(file)) {
-                        addFile(file);
-                    }
+                File[] directories = fc.getSelectedFiles();
+                for (File directory : directories) {
+                    addDirectory(directory);
                 }
+            }
+        });
+
+        JButton removeInstanceButton = new JButton();
+        removeInstanceButton.setText(REMOVE_INSTANCE_BUTTON_LABEL);
+        removeInstanceButton.addActionListener(e -> {
+            if (list.getSelectedIndex() >= 0) {
+                removeDirectory(listModel.remove(list.getSelectedIndex()));
             }
         });
 
         panel.setLayout(new BorderLayout());
         panel.add(list, BorderLayout.CENTER);
         panel.add(addInstanceButton, BorderLayout.WEST);
+        panel.add(removeInstanceButton, BorderLayout.EAST);
         this.component = panel;
     }
 
-    @Deprecated
-    void addFile(File file) {
-        listModel.addElement(file);
+    void addDirectory(File directory) {
+        try {
+            File canonicalDirectory = directory.getCanonicalFile();
 
-        InstanceDiagnostics instance = new InstanceDiagnostics(file);
-        instance.analyze();
-        window.add(instance);
+            if (!listModel.contains(canonicalDirectory)) {
+                listModel.addElement(canonicalDirectory);
+
+                InstanceDiagnostics instance = new InstanceDiagnostics(canonicalDirectory);
+                instance.analyze();
+                window.add(instance);
+            }
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    void removeDirectory(File directory) {
+        try {
+            File canonicalDirectory = directory.getCanonicalFile();
+
+            window.remove(canonicalDirectory);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
     }
 
     public JComponent getComponent() {

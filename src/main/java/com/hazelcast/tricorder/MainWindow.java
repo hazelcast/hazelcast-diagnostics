@@ -42,6 +42,24 @@ public class MainWindow {
         metricsPane.update();
     }
 
+    public void remove(File directory) {
+        machines.remove(directory);
+
+        timeSelectorPane.setInstanceDiagnostics(machines.values());
+        //systemPropertiesPane.setDiagnostics(instanceDiagnostics);
+        //buildInfoPane.setInstanceDiagnostics(instanceDiagnostics);
+        //invocationProfilerPane.setInstanceDiagnostics(instanceDiagnostics);
+
+        memoryPane.setInstanceDiagnostics(machines.values());
+        memoryPane.update();
+
+        cpuUtilizationPane.setInstanceDiagnostics(machines.values());
+        cpuUtilizationPane.update();
+
+        metricsPane.setInstanceDiagnostics(machines.values());
+        metricsPane.update();
+    }
+
     public MainWindow() {
         window = new JFrame();
         Dimension dim = Toolkit.getDefaultToolkit().getScreenSize();
@@ -51,8 +69,8 @@ public class MainWindow {
         window.setDefaultCloseOperation(WindowConstants.EXIT_ON_CLOSE);
 
         machinesPane = new InstancesPane(this);
-        machinesPane.addFile(new File("data/member"));
-        machinesPane.addFile(new File("data/litemember"));
+        machinesPane.addDirectory(new File("data/member"));
+        machinesPane.addDirectory(new File("data/litemember"));
 
         buildMenu(window);
 
