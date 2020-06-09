@@ -2,15 +2,18 @@ package com.hazelcast.tricorder;
 
 import javax.swing.*;
 import java.awt.*;
-import java.util.ArrayList;
-import java.util.List;
+import java.io.File;
+import java.util.HashMap;
+import java.util.Map;
 
 public class MainWindow {
+
     private JFrame window;
-    private List<InstanceDiagnostics> machines = new ArrayList<>();
+    private Map<File, InstanceDiagnostics> machines = new HashMap<>();
+
     private SystemPropertiesPane systemPropertiesPane = new SystemPropertiesPane();
     private BuildInfoPane buildInfoPane = new BuildInfoPane();
-    private InstancesPane machinesPane = new InstancesPane();
+    private InstancesPane machinesPane;
     private InvocationProfilerPane invocationProfilerPane = new InvocationProfilerPane();
     private MemoryPane memoryPane = new MemoryPane();
     private CpuUtilizationPane cpuUtilizationPane = new CpuUtilizationPane();
@@ -24,26 +27,50 @@ public class MainWindow {
     }
 
     public void add(InstanceDiagnostics instanceDiagnostics) {
-        machines.add(instanceDiagnostics);
+        machines.put(instanceDiagnostics.getDirectory(), instanceDiagnostics);
 
-        timeSelectorPane.setInstanceDiagnostics(machines);
+        timeSelectorPane.setInstanceDiagnostics(machines.values());
         systemPropertiesPane.setDiagnostics(instanceDiagnostics);
         buildInfoPane.setInstanceDiagnostics(instanceDiagnostics);
         invocationProfilerPane.setInstanceDiagnostics(instanceDiagnostics);
 
-        memoryPane.setInstanceDiagnostics(machines);
+        memoryPane.setInstanceDiagnostics(machines.values());
         memoryPane.update();
 
-        cpuUtilizationPane.setInstanceDiagnostics(machines);
+        cpuUtilizationPane.setInstanceDiagnostics(machines.values());
         cpuUtilizationPane.update();
 
-        metricsPane.setInstanceDiagnostics(machines);
+        metricsPane.setInstanceDiagnostics(machines.values());
         metricsPane.update();
 
-        invocationsPlane.setInstanceDiagnostics(machines);
+        invocationsPlane.setInstanceDiagnostics(machines.values());
         invocationsPlane.update();
 
-        operationsPlane.setInstanceDiagnostics(machines);
+        operationsPlane.setInstanceDiagnostics(machines.values());
+        operationsPlane.update();
+    }
+
+    public void remove(File directory) {
+        machines.remove(directory);
+
+        timeSelectorPane.setInstanceDiagnostics(machines.values());
+        //systemPropertiesPane.setDiagnostics(instanceDiagnostics);
+        //buildInfoPane.setInstanceDiagnostics(instanceDiagnostics);
+        //invocationProfilerPane.setInstanceDiagnostics(instanceDiagnostics);
+
+        memoryPane.setInstanceDiagnostics(machines.values());
+        memoryPane.update();
+
+        cpuUtilizationPane.setInstanceDiagnostics(machines.values());
+        cpuUtilizationPane.update();
+
+        metricsPane.setInstanceDiagnostics(machines.values());
+        metricsPane.update();
+
+        invocationsPlane.setInstanceDiagnostics(machines.values());
+        invocationsPlane.update();
+
+        operationsPlane.setInstanceDiagnostics(machines.values());
         operationsPlane.update();
     }
 
@@ -54,6 +81,10 @@ public class MainWindow {
         window.setLocation(dim.width / 2 - window.getSize().width / 2, dim.height / 2 - window.getSize().height / 2);
         window.setLocationRelativeTo(null);
         window.setDefaultCloseOperation(WindowConstants.EXIT_ON_CLOSE);
+
+        machinesPane = new InstancesPane(this);
+        machinesPane.addDirectory(new File("data/member"));
+        machinesPane.addDirectory(new File("data/litemember"));
 
         buildMenu(window);
 

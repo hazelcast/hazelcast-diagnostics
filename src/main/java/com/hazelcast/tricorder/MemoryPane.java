@@ -10,11 +10,9 @@ import org.jfree.data.time.TimeSeries;
 import org.jfree.data.time.TimeSeriesCollection;
 
 import javax.swing.*;
+import java.util.Collection;
 import java.util.Iterator;
-import java.util.LinkedHashSet;
-import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
 public class MemoryPane {
 
@@ -22,7 +20,7 @@ public class MemoryPane {
     private final JFreeChart invocationChart;
     private final ChartPanel chartPanel;
     private final TimeSeriesCollection collection;
-    private List<InstanceDiagnostics> diagnosticsList;
+    private Collection<InstanceDiagnostics> diagnosticsList;
     private long startMs = Long.MIN_VALUE;
     private long endMs = Long.MAX_VALUE;
 
@@ -46,7 +44,7 @@ public class MemoryPane {
         this.endMs = toMs;
     }
 
-    public void setInstanceDiagnostics(List<InstanceDiagnostics> diagnosticsList) {
+    public void setInstanceDiagnostics(Collection<InstanceDiagnostics> diagnosticsList) {
         this.diagnosticsList = diagnosticsList;
     }
 

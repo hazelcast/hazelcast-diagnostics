@@ -10,9 +10,9 @@ import org.jfree.data.time.TimeSeries;
 import org.jfree.data.time.TimeSeriesCollection;
 
 import javax.swing.*;
+import java.util.Collection;
 import java.util.Iterator;
 import java.util.LinkedList;
-import java.util.List;
 import java.util.Map;
 
 public class CpuUtilizationPane {
@@ -22,7 +22,7 @@ public class CpuUtilizationPane {
     private final TimeSeriesCollection collection;
     private long startMs = Long.MIN_VALUE;
     private long endMs = Long.MAX_VALUE;
-    private List<InstanceDiagnostics> diagnosticsList = new LinkedList<>();
+    private Collection<InstanceDiagnostics> diagnosticsList = new LinkedList<>();
 
     public CpuUtilizationPane() {
         collection = new TimeSeriesCollection();
@@ -44,7 +44,7 @@ public class CpuUtilizationPane {
         this.endMs = toMs;
     }
 
-    public void setInstanceDiagnostics(List<InstanceDiagnostics> diagnosticsList) {
+    public void setInstanceDiagnostics(Collection<InstanceDiagnostics> diagnosticsList) {
         this.diagnosticsList = diagnosticsList;
     }
 

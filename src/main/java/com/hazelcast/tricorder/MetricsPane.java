@@ -11,13 +11,11 @@ import org.jfree.data.time.TimeSeriesCollection;
 
 import javax.swing.*;
 import java.awt.*;
-import java.awt.event.ActionEvent;
-import java.awt.event.ActionListener;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Collection;
 import java.util.Iterator;
 import java.util.LinkedHashSet;
-import java.util.List;
 import java.util.Map;
 
 public class MetricsPane {
@@ -29,7 +27,7 @@ public class MetricsPane {
     private final JFreeChart invocationChart;
     private final ChartPanel chartPanel;
     private final TimeSeriesCollection collection;
-    private List<InstanceDiagnostics> diagnosticsList;
+    private Collection<InstanceDiagnostics> diagnosticsList;
     private long startMs = Long.MIN_VALUE;
     private long endMs = Long.MAX_VALUE;
     private String activeMetric;
@@ -71,7 +69,7 @@ public class MetricsPane {
         this.endMs = toMs;
     }
 
-    public void setInstanceDiagnostics(List<InstanceDiagnostics> diagnosticsList) {
+    public void setInstanceDiagnostics(Collection<InstanceDiagnostics> diagnosticsList) {
         this.diagnosticsList = diagnosticsList;
 
         this.metricsNames.clear();
@@ -79,7 +77,7 @@ public class MetricsPane {
             metricsNames.addAll(diagnostics.getAvailableMetrics());
         }
 
-        List<String> metrics = new ArrayList<>(metricsNames);
+        java.util.List<String> metrics = new ArrayList<>(metricsNames);
         Collections.sort(metrics);
 
         for (String metricName : metrics) {

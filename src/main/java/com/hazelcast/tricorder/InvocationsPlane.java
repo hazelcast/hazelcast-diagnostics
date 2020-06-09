@@ -10,8 +10,8 @@ import org.jfree.data.time.TimeSeries;
 import org.jfree.data.time.TimeSeriesCollection;
 
 import javax.swing.*;
+import java.util.Collection;
 import java.util.Iterator;
-import java.util.List;
 import java.util.Map;
 
 public class InvocationsPlane {
@@ -20,7 +20,7 @@ public class InvocationsPlane {
     private final JFreeChart invocationChart;
     private final ChartPanel chartPanel;
     private final TimeSeriesCollection collection;
-    private List<InstanceDiagnostics> diagnosticsList;
+    private Collection<InstanceDiagnostics> diagnosticsList;
     private long startMs = Long.MIN_VALUE;
     private long endMs = Long.MAX_VALUE;
 
@@ -44,7 +44,7 @@ public class InvocationsPlane {
         this.endMs = toMs;
     }
 
-    public void setInstanceDiagnostics(List<InstanceDiagnostics> diagnosticsList) {
+    public void setInstanceDiagnostics(Collection<InstanceDiagnostics> diagnosticsList) {
         this.diagnosticsList = diagnosticsList;
     }
 
@@ -71,13 +71,13 @@ public class InvocationsPlane {
                     long currentMs = entry.getKey();
 
                     long count = entry.getValue();
-                    long delta = count-previousCount;
+                    long delta = count - previousCount;
                     long durationMs = currentMs - previousMs;
                     double throughput = (delta * 1000d) / durationMs;
                     series.add(current, throughput);
                     current = (Second) current.next();
                     previousMs = currentMs;
-                    previousCount=count;
+                    previousCount = count;
                 } catch (SeriesException e) {
                     System.err.println("Error adding to series");
                 }
