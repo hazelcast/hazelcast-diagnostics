@@ -38,6 +38,8 @@ public class MetricsPane {
 
     public MetricsPane() {
         this.comboBox = new JComboBox<>();
+        this.comboBox.grabFocus();
+        AutoCompletion.enable(comboBox);
         this.comboBox.addActionListener(e -> {
             activeMetric = (String) comboBox.getSelectedItem();
             update();
