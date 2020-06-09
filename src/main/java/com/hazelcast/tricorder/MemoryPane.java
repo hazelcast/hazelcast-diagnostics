@@ -4,13 +4,9 @@ import org.jfree.chart.ChartFactory;
 import org.jfree.chart.ChartPanel;
 import org.jfree.chart.JFreeChart;
 import org.jfree.chart.axis.DateAxis;
-import org.jfree.chart.plot.PlotOrientation;
 import org.jfree.chart.plot.XYPlot;
 import org.jfree.data.general.SeriesException;
 import org.jfree.data.time.FixedMillisecond;
-import org.jfree.data.time.Millisecond;
-import org.jfree.data.time.RegularTimePeriod;
-import org.jfree.data.time.Second;
 import org.jfree.data.time.TimeSeries;
 import org.jfree.data.time.TimeSeriesCollection;
 
@@ -23,7 +19,7 @@ import java.util.Map;
 public class MemoryPane {
 
     private final JPanel component;
-    private final JFreeChart invocationChart;
+    private final JFreeChart chart;
     private final ChartPanel chartPanel;
     private final TimeSeriesCollection collection;
     private Collection<InstanceDiagnostics> diagnosticsList;
@@ -32,7 +28,7 @@ public class MemoryPane {
 
     public MemoryPane() {
         collection = new TimeSeriesCollection();
-        invocationChart = ChartFactory.createTimeSeriesChart(
+        chart = ChartFactory.createTimeSeriesChart(
                 "Memory Usage",
                 "Time",
                 "Memory Usage",
@@ -40,7 +36,7 @@ public class MemoryPane {
                 true,
                 true,
                 false);
-        this.chartPanel = new ChartPanel(invocationChart);
+        this.chartPanel = new ChartPanel(chart);
         XYPlot plot = (XYPlot)chartPanel.getChart().getPlot();
         DateAxis axis = (DateAxis)plot.getDomainAxis();
         axis.setDateFormatOverride(new SimpleDateFormat("HH:mm:ss"));
