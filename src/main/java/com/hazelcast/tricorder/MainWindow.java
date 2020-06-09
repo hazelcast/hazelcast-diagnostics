@@ -63,7 +63,7 @@ public class MainWindow {
     public MainWindow() {
         window = new JFrame();
         Dimension dim = Toolkit.getDefaultToolkit().getScreenSize();
-        window.setSize(1200, 900);
+        window.setSize(1440, 900);
         window.setLocation(dim.width / 2 - window.getSize().width / 2, dim.height / 2 - window.getSize().height / 2);
         window.setLocationRelativeTo(null);
         window.setDefaultCloseOperation(WindowConstants.EXIT_ON_CLOSE);
@@ -75,8 +75,6 @@ public class MainWindow {
         buildMenu(window);
 
         JTabbedPane tabbedPane = newTabbedPane();
-        JPanel mainPanel = new JPanel();
-        mainPanel.setLayout(new BorderLayout());
 
         timeSelectorPane.addChangeListener(e -> {
             long begin = timeSelectorPane.getStartMs();
@@ -101,24 +99,25 @@ public class MainWindow {
             operationsPlane.update();
         });
 
+
         JPanel analysisPanel= new JPanel();
         analysisPanel.setLayout(new BorderLayout());
         analysisPanel.add(timeSelectorPane.getComponent(), BorderLayout.NORTH);
         analysisPanel.add(tabbedPane, BorderLayout.CENTER);
 
-        mainPanel.add(machinesPane.getComponent(), BorderLayout.WEST);
-        mainPanel.add(analysisPanel, BorderLayout.CENTER);
+        JSplitPane splitPane = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, machinesPane.getComponent(), analysisPanel);
+        splitPane.setDividerLocation(250);
 
-        window.setContentPane(mainPanel);
+
+        window.setContentPane(splitPane);
     }
 
     private JTabbedPane newTabbedPane() {
         JTabbedPane tabbedPane = new JTabbedPane();
         tabbedPane.setTabPlacement(JTabbedPane.BOTTOM);
-
-        tabbedPane.addTab("Metrics", null, metricsPane.getComponent());
         tabbedPane.addTab("Memory", null, memoryPane.getComponent());
         tabbedPane.addTab("CPU", null, cpuUtilizationPane.getComponent());
+        tabbedPane.addTab("Metrics", null, metricsPane.getComponent());
         tabbedPane.addTab("Build Info", null, buildInfoPane.getComponent());
         tabbedPane.addTab("System properties", null, systemPropertiesPane.getComponent());
         tabbedPane.addTab("Slow Operations", null, new JPanel());
