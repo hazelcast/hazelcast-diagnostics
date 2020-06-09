@@ -13,6 +13,9 @@ import org.jfree.data.xy.XYDataset;
 
 import javax.swing.*;
 import java.awt.*;
+import java.awt.event.ActionEvent;
+import java.awt.event.ActionListener;
+import java.io.File;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Iterator;
@@ -185,7 +188,36 @@ public class MainWindow {
     }
 
     private Component newMachinesPanel() {
-        return new JPanel();
+        JPanel panel = new JPanel();
+
+        final JFileChooser fc = new JFileChooser();
+        fc.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
+        fc.setMultiSelectionEnabled(true);
+
+        JList list = new JList();
+        DefaultListModel listModel = new DefaultListModel();
+        list.setModel(listModel);
+        JButton button = new JButton();
+        button.setText("Add directories");
+        button.addActionListener(new ActionListener() {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                int returnVal = fc.showOpenDialog(panel);
+                if (returnVal == JFileChooser.APPROVE_OPTION) {
+                    File[] files = fc.getSelectedFiles();
+                    for(File file: files){
+                        if(!listModel.contains(file)){
+                            listModel.addElement(file);
+                        }
+                    }
+                }
+            }
+        });
+
+        panel.setLayout(new BorderLayout());
+        panel.add(list, BorderLayout.CENTER);
+        panel.add(button, BorderLayout.WEST);
+        return panel;
     }
 
     private Component newInvocationProfilerPane() {
