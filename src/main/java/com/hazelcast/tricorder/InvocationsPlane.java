@@ -3,13 +3,17 @@ package com.hazelcast.tricorder;
 import org.jfree.chart.ChartFactory;
 import org.jfree.chart.ChartPanel;
 import org.jfree.chart.JFreeChart;
+import org.jfree.chart.axis.DateAxis;
 import org.jfree.chart.plot.PlotOrientation;
+import org.jfree.chart.plot.XYPlot;
 import org.jfree.data.general.SeriesException;
+import org.jfree.data.time.FixedMillisecond;
 import org.jfree.data.time.Second;
 import org.jfree.data.time.TimeSeries;
 import org.jfree.data.time.TimeSeriesCollection;
 
 import javax.swing.*;
+import java.text.SimpleDateFormat;
 import java.util.Collection;
 import java.util.Iterator;
 import java.util.Map;
@@ -25,17 +29,19 @@ public class InvocationsPlane {
     private long endMs = Long.MAX_VALUE;
 
     public InvocationsPlane() {
-        this.collection = new TimeSeriesCollection();
-        this.invocationChart = ChartFactory.createXYLineChart(
-                "Invocation/s",
-                "X",
-                "Y",
+        collection = new TimeSeriesCollection();
+        invocationChart = ChartFactory.createTimeSeriesChart(
+                "Invocation Throughput",
+                "Time",
+                "Throughput",
                 collection,
-                PlotOrientation.VERTICAL,
                 true,
                 true,
                 false);
         this.chartPanel = new ChartPanel(invocationChart);
+        XYPlot plot = (XYPlot)chartPanel.getChart().getPlot();
+        DateAxis axis = (DateAxis)plot.getDomainAxis();
+        axis.setDateFormatOverride(new SimpleDateFormat("HH:mm:ss"));
         this.component = chartPanel;
     }
 
@@ -62,7 +68,6 @@ public class InvocationsPlane {
             }
 
             TimeSeries series = new TimeSeries(diagnostics.getDirectory().getName());
-            Second current = new Second();
             long previousMs = 0;
             long previousCount = 0;
             while (iterator.hasNext()) {
@@ -74,8 +79,7 @@ public class InvocationsPlane {
                     long delta = count - previousCount;
                     long durationMs = currentMs - previousMs;
                     double throughput = (delta * 1000d) / durationMs;
-                    series.add(current, throughput);
-                    current = (Second) current.next();
+                    series.add(new FixedMillisecond(currentMs), throughput);
                     previousMs = currentMs;
                     previousCount = count;
                 } catch (SeriesException e) {

@@ -121,9 +121,9 @@ public class MainWindow {
         tabbedPane.addTab("Build Info", null, buildInfoPane.getComponent());
         tabbedPane.addTab("System properties", null, systemPropertiesPane.getComponent());
         tabbedPane.addTab("Slow Operations", null, new JPanel());
-        tabbedPane.addTab("Invocations", null, invocationsPlane.getComponent());
+        tabbedPane.addTab("Invocation Throughput", null, invocationsPlane.getComponent());
         tabbedPane.addTab("Invocation Profiler", null, invocationProfilerPane.getComponent());
-        tabbedPane.addTab("Operations", null, operationsPlane.getComponent());
+        tabbedPane.addTab("Operations Throughput", null, operationsPlane.getComponent());
         tabbedPane.addTab("Operation profiler", null, new JPanel());
         tabbedPane.addTab("Slow operation thread sampler", null, new JPanel());
         tabbedPane.addTab("Slow Operations", null, new JPanel());

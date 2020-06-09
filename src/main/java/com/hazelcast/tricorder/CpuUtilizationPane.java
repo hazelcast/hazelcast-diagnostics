@@ -3,13 +3,17 @@ package com.hazelcast.tricorder;
 import org.jfree.chart.ChartFactory;
 import org.jfree.chart.ChartPanel;
 import org.jfree.chart.JFreeChart;
+import org.jfree.chart.axis.DateAxis;
 import org.jfree.chart.plot.PlotOrientation;
+import org.jfree.chart.plot.XYPlot;
 import org.jfree.data.general.SeriesException;
+import org.jfree.data.time.FixedMillisecond;
 import org.jfree.data.time.Second;
 import org.jfree.data.time.TimeSeries;
 import org.jfree.data.time.TimeSeriesCollection;
 
 import javax.swing.*;
+import java.text.SimpleDateFormat;
 import java.util.Collection;
 import java.util.Iterator;
 import java.util.LinkedList;
@@ -26,16 +30,18 @@ public class CpuUtilizationPane {
 
     public CpuUtilizationPane() {
         collection = new TimeSeriesCollection();
-        invocationChart = ChartFactory.createXYLineChart(
+        invocationChart = ChartFactory.createTimeSeriesChart(
                 "CPU Utilization",
-                "X",
-                "Y",
+                "Time",
+                "Utilization",
                 collection,
-                PlotOrientation.VERTICAL,
                 true,
                 true,
                 false);
         this.chartPanel = new ChartPanel(invocationChart);
+        XYPlot plot = (XYPlot)chartPanel.getChart().getPlot();
+        DateAxis axis = (DateAxis)plot.getDomainAxis();
+        axis.setDateFormatOverride(new SimpleDateFormat("HH:mm:ss"));
         this.component = chartPanel;
     }
 
@@ -50,6 +56,7 @@ public class CpuUtilizationPane {
 
     public void update() {
         collection.removeAllSeries();
+
         if (diagnosticsList.isEmpty()) {
             return;
         }
@@ -62,15 +69,14 @@ public class CpuUtilizationPane {
             }
 
             final TimeSeries series = new TimeSeries(diagnostics.getDirectory().getName());
-            Second current = new Second();
 
             while (iterator.hasNext()) {
                 try {
                     Map.Entry<Long, Double> entry = iterator.next();
+                    long ms = entry.getKey();
                     Double value = entry.getValue();
                     // System.out.println(value);
-                    series.add(current, value);
-                    current = (Second) current.next();
+                    series.add(new FixedMillisecond(ms), value);
                 } catch (SeriesException e) {
                     System.err.println("Error adding to series");
                 }
