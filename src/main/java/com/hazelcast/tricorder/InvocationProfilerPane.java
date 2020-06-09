@@ -4,6 +4,7 @@ import org.jfree.chart.ChartFactory;
 import org.jfree.chart.ChartPanel;
 import org.jfree.chart.JFreeChart;
 import org.jfree.chart.plot.PlotOrientation;
+import org.jfree.data.category.CategoryDataset;
 import org.jfree.data.category.DefaultCategoryDataset;
 
 import javax.swing.*;
@@ -14,8 +15,10 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.Set;
 import java.util.SortedMap;
 import java.util.TreeMap;
+import java.util.TreeSet;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -30,9 +33,9 @@ public class InvocationProfilerPane {
 
     public InvocationProfilerPane() {
         JFreeChart latencyChart = ChartFactory.createBarChart(
-                "XY Series Demo",
-                "X",
-                "Y",
+                "Operation Latency Profile",
+                "Latency",
+                "Count",
                 dataset,
                 PlotOrientation.VERTICAL,
                 true,
@@ -77,36 +80,42 @@ public class InvocationProfilerPane {
     }
 
     private void updateWithProfiles(String startProfileStr, String endProfileStr) throws ParseException {
-        Map<String, SortedMap<Long, Long>> startLatencies = serviceToLatencyProfile(parseProfile(startProfileStr));
-        Map<String, SortedMap<Long, Long>> endLatencies = serviceToLatencyProfile(parseProfile(endProfileStr));
-        for (Entry<String, SortedMap<Long, Long>> serviceAndProfile : endLatencies.entrySet()) {
-            String service = serviceAndProfile.getKey();
-            SortedMap<Long, Long> profileAtStart = startLatencies.get(service);
-            if (profileAtStart == null) {
-                continue;
-            }
-            for (Entry<Long, Long> latAndCount : serviceAndProfile.getValue().entrySet()) {
-                Long latency = latAndCount.getKey();
-                Long countAtStart = profileAtStart.get(latency);
-                if (countAtStart == null) {
-                    continue;
-                }
-                latAndCount.setValue(latAndCount.getValue() - countAtStart);
-            }
-        }
-
-        dataset.clear();
-        for (Entry<String, SortedMap<Long, Long>> serviceAndProfile : endLatencies.entrySet()) {
-            String service = serviceAndProfile.getKey();
-            SortedMap<Long, Long> profile = serviceAndProfile.getValue();
+        Map<String, SortedMap<Long, Long>> startLatencies = operationToLatencyProfile(parseProfile(startProfileStr));
+        Map<String, SortedMap<Long, Long>> endLatencies = operationToLatencyProfile(parseProfile(endProfileStr));
+        subtractStartFromEnd(startLatencies, endLatencies);
+        workaroundToSortXAxis(endLatencies);
+        for (Entry<String, SortedMap<Long, Long>> operationAndProfile : endLatencies.entrySet()) {
+            String operation = operationAndProfile.getKey();
+            operation = operation.substring(operation.lastIndexOf('.') + 1);
+            SortedMap<Long, Long> profile = operationAndProfile.getValue();
             for (Entry<Long, Long> latAndCount : profile.entrySet()) {
-                dataset.addValue(latAndCount.getValue(), service, latAndCount.getKey());
+                dataset.addValue(latAndCount.getValue(), operation, latAndCount.getKey());
             }
         }
     }
 
+    private void workaroundToSortXAxis(Map<String, SortedMap<Long, Long>> endLatencies) {
+        Set<Long> latencyKeys = allLatencyKeys(endLatencies);
+        String someOperation = endLatencies.keySet().iterator().next();
+        dataset.clear();
+        for (Long latency : latencyKeys) {
+            dataset.addValue(0, someOperation, latency);
+        }
+    }
+
+    private Set<Long> allLatencyKeys(Map<String, SortedMap<Long, Long>> endLatencies) {
+        Set<Long> latencyKeys = new TreeSet<>();
+        for (Entry<String, SortedMap<Long, Long>> operationAndProfile : endLatencies.entrySet()) {
+            SortedMap<Long, Long> profile = operationAndProfile.getValue();
+            for (Entry<Long, Long> latAndCount : profile.entrySet()) {
+                latencyKeys.add(latAndCount.getKey());
+            }
+        }
+        return latencyKeys;
+    }
+
     @SuppressWarnings("unchecked")
-    private static Map<String, SortedMap<Long, Long>> serviceToLatencyProfile(Map<String, Object> invocationProfile) {
+    private static Map<String, SortedMap<Long, Long>> operationToLatencyProfile(Map<String, Object> invocationProfile) {
         Map<String, SortedMap<Long, Long>> result = new HashMap<>();
         for (Entry<String, Object> e : invocationProfile.entrySet()) {
             SortedMap<Long, Long> latencyProfile = new TreeMap<>();
@@ -129,6 +138,27 @@ public class InvocationProfilerPane {
             throw new ParseException("Didn't find start of profile, '" + INVOCATION_PROFILE_MARKER + "'", 0);
         }
         return new MetricsParser(profileStr, markerStart + INVOCATION_PROFILE_MARKER.length() - 1).parseMap();
+    }
+
+    private void subtractStartFromEnd(
+            Map<String, SortedMap<Long, Long>> startLatencies,
+            Map<String, SortedMap<Long, Long>> endLatencies
+    ) {
+        for (Entry<String, SortedMap<Long, Long>> operationAndProfile : endLatencies.entrySet()) {
+            String operation = operationAndProfile.getKey();
+            SortedMap<Long, Long> profileAtStart = startLatencies.get(operation);
+            if (profileAtStart == null) {
+                continue;
+            }
+            for (Entry<Long, Long> latAndCount : operationAndProfile.getValue().entrySet()) {
+                Long latency = latAndCount.getKey();
+                Long countAtStart = profileAtStart.get(latency);
+                if (countAtStart == null) {
+                    continue;
+                }
+                latAndCount.setValue(latAndCount.getValue() - countAtStart);
+            }
+        }
     }
 
     private static class MetricsParser {
