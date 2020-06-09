@@ -31,6 +31,7 @@ public class MainWindow {
 
         this.startMs = instanceDiagnostics.startMs();
         this.durationMs = instanceDiagnostics.endMs() - startMs;
+
         BoundedRangeModel model = rangeSlider.getModel();
         model.setMinimum(0);
         model.setMaximum((int) durationMs);
@@ -45,10 +46,11 @@ public class MainWindow {
         systemPropertiesPane.setDiagnostics(instanceDiagnostics);
         buildInfoPane.setInstanceDiagnostics(instanceDiagnostics);
         invocationProfilerPane.setInstanceDiagnostics(instanceDiagnostics);
-        memoryPane.setInstanceDiagnostics(instanceDiagnostics);
+
+        memoryPane.setInstanceDiagnostics(machines);
         memoryPane.update();
 
-        cpuUtilizationPane.setInstanceDiagnostics(instanceDiagnostics);
+        cpuUtilizationPane.setInstanceDiagnostics(machines);
         cpuUtilizationPane.update();
     }
 
@@ -59,7 +61,6 @@ public class MainWindow {
         window.setLocation(dim.width / 2 - window.getSize().width / 2, dim.height / 2 - window.getSize().height / 2);
         window.setLocationRelativeTo(null);
         window.setDefaultCloseOperation(WindowConstants.EXIT_ON_CLOSE);
-
 
         buildMenu(window);
 
@@ -81,7 +82,7 @@ public class MainWindow {
                 long begin = rangeSlider.getLowValue() + startMs;
                 long end = rangeSlider.getHighValue() + startMs;
 
-               // System.out.println(begin + " " + end);
+                // System.out.println(begin + " " + end);
                 cpuUtilizationPane.setRange(begin, end);
                 cpuUtilizationPane.update();
 
@@ -98,37 +99,18 @@ public class MainWindow {
         tabbedPane.setTabPlacement(JTabbedPane.BOTTOM);
 
         tabbedPane.addTab("Machines", null, machinesPane.getComponent());
-
-        JComponent panel1 = new JPanel();
-        tabbedPane.addTab("Metrics", null, panel1);
-
+        tabbedPane.addTab("Metrics", null, new JPanel());
         tabbedPane.addTab("Memory", null, memoryPane.getComponent());
-
         tabbedPane.addTab("CPU", null, cpuUtilizationPane.getComponent());
-
         tabbedPane.addTab("Build Info", null, buildInfoPane.getComponent());
-
         tabbedPane.addTab("System properties", null, systemPropertiesPane.getComponent());
-
-        JComponent panel4 = new JPanel();
-        tabbedPane.addTab("Slow Operations", null, panel4);
-
-        JComponent panel5 = new JPanel();
-        tabbedPane.addTab("Invocations", null, panel5);
-
+        tabbedPane.addTab("Slow Operations", null, new JPanel());
+        tabbedPane.addTab("Invocations", null, new JPanel());
         tabbedPane.addTab("Invocation Profiler", null, invocationProfilerPane.getComponent());
-
-        JComponent panel7 = new JPanel();
-        tabbedPane.addTab("Operation profiler", null, panel7);
-
-        JComponent panel8 = new JPanel();
-        tabbedPane.addTab("Slow operation thread sampler", null, panel8);
-
-        JComponent panel9 = new JPanel();
-        tabbedPane.addTab("Slow Operations", null, panel9);
-
-        JComponent panel10 = new JPanel();
-        tabbedPane.addTab("Slow Operations", null, panel10);
+        tabbedPane.addTab("Operation profiler", null, new JPanel());
+        tabbedPane.addTab("Slow operation thread sampler", null, new JPanel());
+        tabbedPane.addTab("Slow Operations", null, new JPanel());
+        tabbedPane.addTab("Slow Operations", null, new JPanel());
         return tabbedPane;
     }
 

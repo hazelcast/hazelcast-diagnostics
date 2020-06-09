@@ -1,0 +1,130 @@
+Jun 03, 2020 8:16:29 AM com.hazelcast.config.AbstractXmlConfigHelper
+WARNING: Name of the hazelcast schema location[http://www.hazelcast.com/schema/config/hazelcast-config-4.0.xsd] is incorrect, using default
+Jun 03, 2020 8:16:29 AM com.hazelcast.instance.AddressPicker
+INFO: [LOCAL] [workers] [4.1-SNAPSHOT] Interfaces is disabled, trying to pick one address from TCP-IP config addresses: [10.0.0.109, 10.0.0.4]
+Jun 03, 2020 8:16:29 AM com.hazelcast.instance.AddressPicker
+INFO: [LOCAL] [workers] [4.1-SNAPSHOT] Prefer IPv4 stack is true, prefer IPv6 addresses is false
+Jun 03, 2020 8:16:29 AM com.hazelcast.instance.AddressPicker
+INFO: [LOCAL] [workers] [4.1-SNAPSHOT] Picked [10.0.0.109]:5701, using socket ServerSocket[addr=/0:0:0:0:0:0:0:0,localport=5701], bind any local is true
+Jun 03, 2020 8:16:29 AM com.hazelcast.system
+INFO: [10.0.0.109]:5701 [workers] [4.1-SNAPSHOT] Hazelcast 4.1-SNAPSHOT (20200603 - ae06724) starting at [10.0.0.109]:5701
+Jun 03, 2020 8:16:29 AM com.hazelcast.system
+INFO: [10.0.0.109]:5701 [workers] [4.1-SNAPSHOT] Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
+Jun 03, 2020 8:16:30 AM com.hazelcast.spi.impl.operationservice.impl.BackpressureRegulator
+INFO: [10.0.0.109]:5701 [workers] [4.1-SNAPSHOT] Backpressure is disabled
+Jun 03, 2020 8:16:30 AM com.hazelcast.instance.impl.Node
+INFO: [10.0.0.109]:5701 [workers] [4.1-SNAPSHOT] Creating TcpIpJoiner
+Jun 03, 2020 8:16:30 AM com.hazelcast.cp.CPSubsystem
+WARNING: [10.0.0.109]:5701 [workers] [4.1-SNAPSHOT] CP Subsystem is not enabled. CP data structures will operate in UNSAFE mode! Please note that UNSAFE mode will not provide strong consistency guarantees.
+Jun 03, 2020 8:16:30 AM com.hazelcast.spi.impl.operationexecutor.impl.OperationExecutorImpl
+INFO: [10.0.0.109]:5701 [workers] [4.1-SNAPSHOT] Starting 36 partition threads and 19 generic threads (1 dedicated for priority tasks)
+Jun 03, 2020 8:16:30 AM com.hazelcast.internal.diagnostics.Diagnostics
+INFO: [10.0.0.109]:5701 [workers] [4.1-SNAPSHOT] Diagnostics started
+Jun 03, 2020 8:16:30 AM com.hazelcast.internal.diagnostics.BuildInfoPlugin
+INFO: [10.0.0.109]:5701 [workers] [4.1-SNAPSHOT] Plugin:active
+Jun 03, 2020 8:16:30 AM com.hazelcast.internal.diagnostics.SystemPropertiesPlugin
+INFO: [10.0.0.109]:5701 [workers] [4.1-SNAPSHOT] Plugin:active
+Jun 03, 2020 8:16:30 AM com.hazelcast.internal.diagnostics.ConfigPropertiesPlugin
+INFO: [10.0.0.109]:5701 [workers] [4.1-SNAPSHOT] Plugin:active
+Jun 03, 2020 8:16:30 AM com.hazelcast.internal.diagnostics.MetricsPlugin
+INFO: [10.0.0.109]:5701 [workers] [4.1-SNAPSHOT] Plugin:active, period-millis:5000
+Jun 03, 2020 8:16:30 AM com.hazelcast.internal.diagnostics.SlowOperationPlugin
+INFO: [10.0.0.109]:5701 [workers] [4.1-SNAPSHOT] Plugin:active, period-millis:60000
+Jun 03, 2020 8:16:30 AM com.hazelcast.internal.diagnostics.PendingInvocationsPlugin
+INFO: [10.0.0.109]:5701 [workers] [4.1-SNAPSHOT] Plugin:active: period-millis:5000 threshold-millis:5000
+Jun 03, 2020 8:16:30 AM com.hazelcast.internal.diagnostics.PendingInvocationsPlugin
+INFO: [10.0.0.109]:5701 [workers] [4.1-SNAPSHOT] Plugin:active: period-millis:5000
+Jun 03, 2020 8:16:30 AM com.hazelcast.internal.diagnostics.OperationProfilerPlugin
+INFO: [10.0.0.109]:5701 [workers] [4.1-SNAPSHOT] Plugin:active, period-millis:5000
+Jun 03, 2020 8:16:30 AM com.hazelcast.internal.diagnostics.MemberHazelcastInstanceInfoPlugin
+INFO: [10.0.0.109]:5701 [workers] [4.1-SNAPSHOT] Plugin:active, period-millis:60000
+Jun 03, 2020 8:16:30 AM com.hazelcast.internal.diagnostics.SystemLogPlugin
+INFO: [10.0.0.109]:5701 [workers] [4.1-SNAPSHOT] Plugin:active: logPartitions:false
+Jun 03, 2020 8:16:30 AM com.hazelcast.internal.diagnostics.MemberHazelcastInstanceInfoPlugin
+INFO: [10.0.0.109]:5701 [workers] [4.1-SNAPSHOT] Plugin:active, period-millis:10000
+Jun 03, 2020 8:16:30 AM com.hazelcast.internal.diagnostics.OperationHeartbeatPlugin
+INFO: [10.0.0.109]:5701 [workers] [4.1-SNAPSHOT] Plugin:active: period-millis:10000 max-deviation:33%
+Jun 03, 2020 8:16:30 AM com.hazelcast.internal.diagnostics.OperationThreadSamplerPlugin
+INFO: [10.0.0.109]:5701 [workers] [4.1-SNAPSHOT] Plugin:active: period-millis:30000 sampler-period-millis:100
+Jun 03, 2020 8:16:30 AM com.hazelcast.core.LifecycleService
+INFO: [10.0.0.109]:5701 [workers] [4.1-SNAPSHOT] [10.0.0.109]:5701 is STARTING
+Jun 03, 2020 8:16:30 AM com.hazelcast.internal.server.tcp.TcpServerConnector
+INFO: [10.0.0.109]:5701 [workers] [4.1-SNAPSHOT] Connecting to /10.0.0.4:5701, timeout: 10000, bind-any: true
+Jun 03, 2020 8:16:30 AM com.hazelcast.internal.server.tcp.TcpServerConnector
+INFO: [10.0.0.109]:5701 [workers] [4.1-SNAPSHOT] Could not connect to: /10.0.0.4:5701. Reason: SocketException[Connection refused to address /10.0.0.4:5701]
+Jun 03, 2020 8:16:30 AM com.hazelcast.internal.cluster.impl.TcpIpJoiner
+INFO: [10.0.0.109]:5701 [workers] [4.1-SNAPSHOT] [10.0.0.4]:5701 is added to the blacklist.
+Jun 03, 2020 8:16:31 AM com.hazelcast.internal.cluster.ClusterService
+INFO: [10.0.0.109]:5701 [workers] [4.1-SNAPSHOT] 
+
+Members {size:1, ver:1} [
+	Member [10.0.0.109]:5701 - 8c7499c5-894e-4ede-a22d-0dd7c91560e7 this
+]
+
+Jun 03, 2020 8:16:31 AM com.hazelcast.core.LifecycleService
+INFO: [10.0.0.109]:5701 [workers] [4.1-SNAPSHOT] [10.0.0.109]:5701 is STARTED
+Jun 03, 2020 8:16:31 AM com.hazelcast.internal.partition.impl.PartitionStateManager
+INFO: [10.0.0.109]:5701 [workers] [4.1-SNAPSHOT] Initializing cluster partition table arrangement...
+Jun 03, 2020 8:16:33 AM com.hazelcast.internal.server.tcp.TcpServerConnection
+INFO: [10.0.0.109]:5701 [workers] [4.1-SNAPSHOT] Initialized new cluster connection between /10.0.0.109:5701 and /10.0.0.4:52285
+Jun 03, 2020 8:16:39 AM com.hazelcast.internal.cluster.ClusterService
+INFO: [10.0.0.109]:5701 [workers] [4.1-SNAPSHOT] 
+
+Members {size:2, ver:2} [
+	Member [10.0.0.109]:5701 - 8c7499c5-894e-4ede-a22d-0dd7c91560e7 this
+	Member [10.0.0.4]:5701 - 4542185c-fe8b-4e8d-b0a3-b6eb2ba4742e lite
+]
+
+Jun 03, 2020 8:16:39 AM com.hazelcast.internal.partition.impl.MigrationManager
+INFO: [10.0.0.109]:5701 [workers] [4.1-SNAPSHOT] Partition balance is ok, no need to repartition.
+Jun 03, 2020 8:16:42 AM com.hazelcast.cache.impl.CacheService
+INFO: [10.0.0.109]:5701 [workers] [4.1-SNAPSHOT] Added cache config: CacheConfig{name='cache', managerPrefix='/hz/', inMemoryFormat=BINARY, backupCount=1, hotRestart=HotRestartConfig{enabled=false, fsync=false}, wanReplicationRef=null}
+Jun 03, 2020 8:17:54 AM com.hazelcast.internal.server.tcp.TcpServerConnection
+INFO: [10.0.0.109]:5701 [workers] [4.1-SNAPSHOT] Connection[id=1, /10.0.0.109:5701->/10.0.0.4:52285, qualifier=null, endpoint=[10.0.0.4]:5701, alive=false, connectionType=MEMBER] closed. Reason: Connection closed by the other side
+Jun 03, 2020 8:17:54 AM com.hazelcast.internal.server.tcp.TcpServerConnector
+INFO: [10.0.0.109]:5701 [workers] [4.1-SNAPSHOT] Connecting to /10.0.0.4:5701, timeout: 10000, bind-any: true
+Jun 03, 2020 8:17:54 AM com.hazelcast.internal.server.tcp.TcpServerConnector
+INFO: [10.0.0.109]:5701 [workers] [4.1-SNAPSHOT] Could not connect to: /10.0.0.4:5701. Reason: SocketException[Connection refused to address /10.0.0.4:5701]
+Jun 03, 2020 8:17:54 AM com.hazelcast.internal.server.tcp.TcpServerConnector
+INFO: [10.0.0.109]:5701 [workers] [4.1-SNAPSHOT] Connecting to /10.0.0.4:5701, timeout: 10000, bind-any: true
+Jun 03, 2020 8:17:54 AM com.hazelcast.internal.server.tcp.TcpServerConnector
+INFO: [10.0.0.109]:5701 [workers] [4.1-SNAPSHOT] Could not connect to: /10.0.0.4:5701. Reason: SocketException[Connection refused to address /10.0.0.4:5701]
+Jun 03, 2020 8:17:54 AM com.hazelcast.internal.server.tcp.TcpServerConnector
+INFO: [10.0.0.109]:5701 [workers] [4.1-SNAPSHOT] Connecting to /10.0.0.4:5701, timeout: 10000, bind-any: true
+Jun 03, 2020 8:17:54 AM com.hazelcast.internal.server.tcp.TcpServerConnector
+INFO: [10.0.0.109]:5701 [workers] [4.1-SNAPSHOT] Could not connect to: /10.0.0.4:5701. Reason: SocketException[Connection refused to address /10.0.0.4:5701]
+Jun 03, 2020 8:17:54 AM com.hazelcast.internal.server.tcp.TcpServerConnector
+INFO: [10.0.0.109]:5701 [workers] [4.1-SNAPSHOT] Connecting to /10.0.0.4:5701, timeout: 10000, bind-any: true
+Jun 03, 2020 8:17:54 AM com.hazelcast.internal.server.tcp.TcpServerConnector
+INFO: [10.0.0.109]:5701 [workers] [4.1-SNAPSHOT] Could not connect to: /10.0.0.4:5701. Reason: SocketException[Connection refused to address /10.0.0.4:5701]
+Jun 03, 2020 8:17:54 AM com.hazelcast.internal.server.tcp.TcpServerConnectionErrorHandler
+WARNING: [10.0.0.109]:5701 [workers] [4.1-SNAPSHOT] Removing connection to endpoint [10.0.0.4]:5701 Cause => java.net.SocketException {Connection refused to address /10.0.0.4:5701}, Error-Count: 5
+Jun 03, 2020 8:17:54 AM com.hazelcast.internal.cluster.impl.MembershipManager
+INFO: [10.0.0.109]:5701 [workers] [4.1-SNAPSHOT] Removing Member [10.0.0.4]:5701 - 4542185c-fe8b-4e8d-b0a3-b6eb2ba4742e lite
+Jun 03, 2020 8:17:54 AM com.hazelcast.internal.cluster.ClusterService
+INFO: [10.0.0.109]:5701 [workers] [4.1-SNAPSHOT] 
+
+Members {size:1, ver:3} [
+	Member [10.0.0.109]:5701 - 8c7499c5-894e-4ede-a22d-0dd7c91560e7 this
+]
+
+Jun 03, 2020 8:17:54 AM com.hazelcast.transaction.TransactionManagerService
+INFO: [10.0.0.109]:5701 [workers] [4.1-SNAPSHOT] Committing/rolling-back live transactions of [10.0.0.4]:5701, UUID: 4542185c-fe8b-4e8d-b0a3-b6eb2ba4742e
+Jun 03, 2020 8:17:54 AM com.hazelcast.internal.partition.impl.MigrationManager
+INFO: [10.0.0.109]:5701 [workers] [4.1-SNAPSHOT] Partition balance is ok, no need to repartition.
+Jun 03, 2020 8:17:59 AM com.hazelcast.core.LifecycleService
+INFO: [10.0.0.109]:5701 [workers] [4.1-SNAPSHOT] [10.0.0.109]:5701 is SHUTTING_DOWN
+Jun 03, 2020 8:17:59 AM com.hazelcast.internal.partition.impl.MigrationManager
+INFO: [10.0.0.109]:5701 [workers] [4.1-SNAPSHOT] Shutdown request of Member [10.0.0.109]:5701 - 8c7499c5-894e-4ede-a22d-0dd7c91560e7 this is handled
+Jun 03, 2020 8:17:59 AM com.hazelcast.instance.impl.Node
+INFO: [10.0.0.109]:5701 [workers] [4.1-SNAPSHOT] Shutting down connection manager...
+Jun 03, 2020 8:17:59 AM com.hazelcast.instance.impl.Node
+INFO: [10.0.0.109]:5701 [workers] [4.1-SNAPSHOT] Shutting down node engine...
+Jun 03, 2020 8:17:59 AM com.hazelcast.cache.impl.CacheService
+INFO: [10.0.0.109]:5701 [workers] [4.1-SNAPSHOT] Removed cache config: CacheConfig{name='cache', managerPrefix='/hz/', inMemoryFormat=BINARY, backupCount=1, hotRestart=HotRestartConfig{enabled=false, fsync=false}, wanReplicationRef=null}
+Jun 03, 2020 8:17:59 AM com.hazelcast.instance.impl.NodeExtension
+INFO: [10.0.0.109]:5701 [workers] [4.1-SNAPSHOT] Destroying node NodeExtension.
+Jun 03, 2020 8:17:59 AM com.hazelcast.instance.impl.Node
+INFO: [10.0.0.109]:5701 [workers] [4.1-SNAPSHOT] Hazelcast Shutdown is completed in 18 ms.
+Jun 03, 2020 8:17:59 AM com.hazelcast.core.LifecycleService
+INFO: [10.0.0.109]:5701 [workers] [4.1-SNAPSHOT] [10.0.0.109]:5701 is SHUTDOWN

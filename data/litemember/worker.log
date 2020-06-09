@@ -1,0 +1,205 @@
+INFO  2020-06-03 08:16:32,343 [main] com.hazelcast.simulator.worker.Worker: Hazelcast Simulator Worker
+INFO  2020-06-03 08:16:32,345 [main] com.hazelcast.simulator.worker.Worker: Version: 0.12-SNAPSHOT, Commit: 3af896e, Build Time: 12.05.2020 @ 11:13:05 EEST
+INFO  2020-06-03 08:16:32,347 [main] com.hazelcast.simulator.worker.Worker: SIMULATOR_HOME: /home/simulator/hazelcast-simulator-0.12-SNAPSHOT
+
+INFO  2020-06-03 08:16:32,349 [main] com.hazelcast.simulator.vendors.VendorDriver: Loading vendor-driver [hazelcast4]
+INFO  2020-06-03 08:16:32,394 [main] com.hazelcast.simulator.worker.Worker: --------------------------------------------------------------------------------------------
+INFO  2020-06-03 08:16:32,394 [main] com.hazelcast.simulator.worker.Worker: --------------------------- Hazelcast Worker #A2_W1 (litemember) ---------------------------
+INFO  2020-06-03 08:16:32,394 [main] com.hazelcast.simulator.worker.Worker: --------------------------------------------------------------------------------------------
+INFO  2020-06-03 08:16:32,394 [main] com.hazelcast.simulator.worker.Worker: java.class.path=/home/simulator/hazelcast-simulator-0.12-SNAPSHOT/workers/2020-06-03__11_13_44/lib/*:/home/simulator/hazelcast-simulator-0.12-SNAPSHOT/workers/2020-06-03__11_13_44/A2_W1-3.80.130.125-litemember/upload/*:/home/simulator/hazelcast-simulator-0.12-SNAPSHOT/user-lib/*:/home/simulator/hazelcast-simulator-0.12-SNAPSHOT/lib/simulator-0.12-SNAPSHOT.jar:/home/simulator/hazelcast-simulator-0.12-SNAPSHOT/lib/activemq-broker-5.15.11.jar:/home/simulator/hazelcast-simulator-0.12-SNAPSHOT/lib/activemq-client-5.15.11.jar:/home/simulator/hazelcast-simulator-0.12-SNAPSHOT/lib/geronimo-jms_1.1_spec-1.1.1.jar:/home/simulator/hazelcast-simulator-0.12-SNAPSHOT/lib/geronimo-j2ee-management_1.1_spec-1.0.1.jar:/home/simulator/hazelcast-simulator-0.12-SNAPSHOT/lib/slf4j-api-1.7.25.jar:/home/simulator/hazelcast-simulator-0.12-SNAPSHOT/lib/hawtbuf-1.11.jar:/home/simulator/hazelcast-simulator-0.12-SNAPSHOT/lib/affinity-3.2.2.jar:/home/simulator/hazelcast-simulator-0.12-SNAPSHOT/lib/jna-4.2.1.jar:/home/simulator/hazelcast-simulator-0.12-SNAPSHOT/lib/jna-platform-4.2.1.jar:/home/simulator/hazelcast-simulator-0.12-SNAPSHOT/lib/cache-api-1.0.0.jar:/home/simulator/hazelcast-simulator-0.12-SNAPSHOT/lib/commons-codec-1.10.jar:/home/simulator/hazelcast-simulator-0.12-SNAPSHOT/lib/commons-lang3-3.4.jar:/home/simulator/hazelcast-simulator-0.12-SNAPSHOT/lib/freemarker-2.3.29.jar:/home/simulator/hazelcast-simulator-0.12-SNAPSHOT/lib/gson-2.6.2.jar:/home/simulator/hazelcast-simulator-0.12-SNAPSHOT/lib/HdrHistogram-2.1.12.jar:/home/simulator/hazelcast-simulator-0.12-SNAPSHOT/lib/jopt-simple-4.9.jar:/home/simulator/hazelcast-simulator-0.12-SNAPSHOT/lib/junit-4.12.jar:/home/simulator/hazelcast-simulator-0.12-SNAPSHOT/lib/log4j-1.2.17.jar:/home/simulator/hazelcast-simulator-0.12-SNAPSHOT/lib/slf4j-log4j12-1.7.21.jar:/home/simulator/hazelcast-simulator-0.12-SNAPSHOT/vendor-lib/maven-4.1-SNAPSHOT/hazelcast-4.1-SNAPSHOT.jar:/home/simulator/hazelcast-simulator-0.12-SNAPSHOT/drivers/driver-hazelcast4/driver-hazelcast4-0.12-SNAPSHOT.jar:/home/simulator/hazelcast-simulator-0.12-SNAPSHOT/drivers/driver-hazelcast4/hazelcast-4.0.jar:/home/simulator/hazelcast-simulator-0.12-SNAPSHOT/drivers/driver-hazelcast4/netty-buffer-4.1.43.Final.jar:/home/simulator/hazelcast-simulator-0.12-SNAPSHOT/drivers/driver-hazelcast4/netty-codec-4.1.43.Final.jar:/home/simulator/hazelcast-simulator-0.12-SNAPSHOT/drivers/driver-hazelcast4/netty-common-4.1.43.Final.jar:/home/simulator/hazelcast-simulator-0.12-SNAPSHOT/drivers/driver-hazelcast4/netty-handler-4.1.43.Final.jar:/home/simulator/hazelcast-simulator-0.12-SNAPSHOT/drivers/driver-hazelcast4/netty-resolver-4.1.43.Final.jar:/home/simulator/hazelcast-simulator-0.12-SNAPSHOT/drivers/driver-hazelcast4/netty-tcnative-boringssl-static-2.0.27.Final.jar:/home/simulator/hazelcast-simulator-0.12-SNAPSHOT/drivers/driver-hazelcast4/netty-transport-4.1.43.Final.jar:/home/simulator/hazelcast-simulator-0.12-SNAPSHOT/drivers/driver-hazelcast4/netty-transport-native-epoll-4.1.28.Final-linux-x86_64.jar:/home/simulator/hazelcast-simulator-0.12-SNAPSHOT/drivers/driver-hazelcast4/netty-transport-native-epoll-4.1.28.Final.jar:/home/simulator/hazelcast-simulator-0.12-SNAPSHOT/drivers/driver-hazelcast4/netty-transport-native-unix-common-4.1.28.Final.jar
+INFO  2020-06-03 08:16:32,394 [main] com.hazelcast.simulator.worker.Worker: java.home=/home/simulator/jdk1.8.0_161/jre
+INFO  2020-06-03 08:16:32,395 [main] com.hazelcast.simulator.worker.Worker: java.vendor=Oracle Corporation
+INFO  2020-06-03 08:16:32,395 [main] com.hazelcast.simulator.worker.Worker: java.vendor.url=http://java.oracle.com/
+INFO  2020-06-03 08:16:32,395 [main] com.hazelcast.simulator.worker.Worker: sun.java.command=com.hazelcast.simulator.worker.Worker
+INFO  2020-06-03 08:16:32,395 [main] com.hazelcast.simulator.worker.Worker: java.version=1.8.0_161
+INFO  2020-06-03 08:16:32,395 [main] com.hazelcast.simulator.worker.Worker: os.arch=amd64
+INFO  2020-06-03 08:16:32,395 [main] com.hazelcast.simulator.worker.Worker: os.name=Linux
+INFO  2020-06-03 08:16:32,395 [main] com.hazelcast.simulator.worker.Worker: os.version=4.14.173-137.229.amzn2.x86_64
+INFO  2020-06-03 08:16:32,395 [main] com.hazelcast.simulator.worker.Worker: user.dir=/home/simulator/hazelcast-simulator-0.12-SNAPSHOT/workers/2020-06-03__11_13_44/A2_W1-3.80.130.125-litemember
+INFO  2020-06-03 08:16:32,395 [main] com.hazelcast.simulator.worker.Worker: user.home=/home/simulator/
+INFO  2020-06-03 08:16:32,395 [main] com.hazelcast.simulator.worker.Worker: user.name=simulator
+INFO  2020-06-03 08:16:32,395 [main] com.hazelcast.simulator.worker.Worker: SIMULATOR_HOME=null
+INFO  2020-06-03 08:16:32,395 [main] com.hazelcast.simulator.worker.Worker: hazelcast.logging.type=null
+INFO  2020-06-03 08:16:32,396 [main] com.hazelcast.simulator.worker.Worker: jvm.args=-Xms4g -Xmx4g -Dhazelcast.diagnostics.enabled=true -Dhazelcast.diagnostics.metric.level=mandatory -Dhazelcast.diagnostics.metrics.period.seconds=5 -Dhazelcast.diagnostics.max.rolled.file.size.mb=1000 -Dhazelcast.diagnostics.operationthreadsamples.period.seconds=30 -Dhazelcast.diagnostics.operationthreadsamples.includeName=true -XX:OnOutOfMemoryError="touch;-9;worker.oome" -Dlog4j.configuration=file:log4j.xml 
+INFO  2020-06-03 08:16:32,397 [main] com.hazelcast.simulator.worker.Worker: process ID: 2754
+INFO  2020-06-03 08:16:32,397 [main] com.hazelcast.simulator.worker.Worker: Public address: 3.80.130.125
+INFO  2020-06-03 08:16:32,397 [main] com.hazelcast.simulator.protocol.Server: Starting server [tcp://10.0.0.4:9000] on topic [workers]
+INFO  2020-06-03 08:16:32,570 [ActiveMQ Task-1] org.apache.activemq.transport.failover.FailoverTransport: Successfully connected to tcp://10.0.0.4:9000
+INFO  2020-06-03 08:16:32,586 [main] com.hazelcast.simulator.protocol.Server: Using messageSelector [target='A2_W1']
+INFO  2020-06-03 08:16:32,597 [main] com.hazelcast.simulator.protocol.Server: Successfully started server for A2_W1
+INFO  2020-06-03 08:16:32,598 [main] com.hazelcast.simulator.worker.performance.PerformanceMonitor: PerformanceMonitor enabled with interval: 1 seconds
+INFO  2020-06-03 08:16:32,598 [main] com.hazelcast.simulator.hazelcast4.Hazelcast4Driver: litemember HazelcastInstance starting
+INFO  2020-06-03 08:16:40,464 [main] com.hazelcast.simulator.hazelcast4.Hazelcast4Driver: litemember HazelcastInstance started
+INFO  2020-06-03 08:16:40,464 [main] com.hazelcast.simulator.hazelcast4.Hazelcast4Driver: Waiting for partition warmup
+INFO  2020-06-03 08:16:40,464 [main] com.hazelcast.simulator.hazelcast4.Hazelcast4Driver: Partitions are warmed up successfully
+INFO  2020-06-03 08:16:40,464 [main] com.hazelcast.simulator.hazelcast4.Hazelcast4Driver: Warmed up partitions
+INFO  2020-06-03 08:16:40,465 [main] com.hazelcast.simulator.worker.Worker: ------------------------------------------------------------------------------------------
+INFO  2020-06-03 08:16:40,465 [main] com.hazelcast.simulator.worker.Worker: --------------------------- Successfully started Worker #A2_W1 ---------------------------
+INFO  2020-06-03 08:16:40,465 [main] com.hazelcast.simulator.worker.Worker: ------------------------------------------------------------------------------------------
+INFO  2020-06-03 08:16:41,399 [Thread-0] com.hazelcast.simulator.worker.testcontainer.TestManager: --------------------------- Initializing test LongStringCacheTest ---------------------------
+TestCase{
+    id=LongStringCacheTest,
+    class=com.hazelcast.simulator.hz.cache.LongStringCacheTest,
+    getProb=1,
+    keyDomain=100_000,
+    maxValueLength=1_000,
+    minValueLength=1_000,
+    name=cache,
+    putProb=0,
+    threadCount=64,
+    valueCount=1
+}
+INFO  2020-06-03 08:16:41,412 [Thread-0] com.hazelcast.simulator.worker.testcontainer.TimeStepRunStrategy: executionGroup [] using interval: 0 class=com.hazelcast.simulator.worker.metronome.EmptyMetronome
+INFO  2020-06-03 08:16:42,155 [Thread-6] com.hazelcast.simulator.worker.testcontainer.TestManager: --------------------------- Starting setup of LongStringCacheTest ---------------------------
+INFO  2020-06-03 08:16:42,191 [Thread-6] com.hazelcast.simulator.worker.testcontainer.TestManager: --------------------------- setup of LongStringCacheTest SUCCEEDED --------------------------- 
+INFO  2020-06-03 08:16:43,158 [Thread-7] com.hazelcast.simulator.worker.testcontainer.TestManager: --------------------------- Starting local prepare of LongStringCacheTest ---------------------------
+INFO  2020-06-03 08:16:43,158 [Thread-7] com.hazelcast.simulator.worker.testcontainer.TestManager: --------------------------- local prepare of LongStringCacheTest SUCCEEDED --------------------------- 
+INFO  2020-06-03 08:16:44,171 [Thread-8] com.hazelcast.simulator.worker.testcontainer.TestManager: --------------------------- Starting global prepare of LongStringCacheTest ---------------------------
+INFO  2020-06-03 08:16:44,173 [Thread-8] com.hazelcast.simulator.worker.loadsupport.AbstractAsyncStreamer: At: 0
+INFO  2020-06-03 08:16:44,832 [Thread-8] com.hazelcast.simulator.worker.testcontainer.TestManager: --------------------------- global prepare of LongStringCacheTest SUCCEEDED --------------------------- 
+INFO  2020-06-03 08:16:45,162 [Thread-9] com.hazelcast.simulator.worker.testcontainer.TestManager: --------------------------- Starting run of LongStringCacheTest ---------------------------
+INFO  2020-06-03 08:16:45,163 [Thread-9] com.hazelcast.simulator.worker.testcontainer.TimeStepRunStrategy: Spawning 64 worker threads for running LongStringCacheTest
+INFO  2020-06-03 08:16:45,170 [LongStringCacheTest-timestepThread-1] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-1 started
+INFO  2020-06-03 08:16:45,170 [LongStringCacheTest-timestepThread-2] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-2 started
+INFO  2020-06-03 08:16:45,171 [LongStringCacheTest-timestepThread-5] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-5 started
+INFO  2020-06-03 08:16:45,170 [LongStringCacheTest-timestepThread-3] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-3 started
+INFO  2020-06-03 08:16:45,171 [LongStringCacheTest-timestepThread-4] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-4 started
+INFO  2020-06-03 08:16:45,172 [LongStringCacheTest-timestepThread-7] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-7 started
+INFO  2020-06-03 08:16:45,172 [LongStringCacheTest-timestepThread-6] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-6 started
+INFO  2020-06-03 08:16:45,172 [LongStringCacheTest-timestepThread-10] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-10 started
+INFO  2020-06-03 08:16:45,172 [LongStringCacheTest-timestepThread-11] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-11 started
+INFO  2020-06-03 08:16:45,172 [LongStringCacheTest-timestepThread-9] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-9 started
+INFO  2020-06-03 08:16:45,172 [LongStringCacheTest-timestepThread-12] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-12 started
+INFO  2020-06-03 08:16:45,172 [LongStringCacheTest-timestepThread-13] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-13 started
+INFO  2020-06-03 08:16:45,172 [LongStringCacheTest-timestepThread-14] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-14 started
+INFO  2020-06-03 08:16:45,173 [LongStringCacheTest-timestepThread-15] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-15 started
+INFO  2020-06-03 08:16:45,173 [LongStringCacheTest-timestepThread-8] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-8 started
+INFO  2020-06-03 08:16:45,173 [LongStringCacheTest-timestepThread-16] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-16 started
+INFO  2020-06-03 08:16:45,173 [LongStringCacheTest-timestepThread-17] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-17 started
+INFO  2020-06-03 08:16:45,173 [LongStringCacheTest-timestepThread-18] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-18 started
+INFO  2020-06-03 08:16:45,174 [LongStringCacheTest-timestepThread-28] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-28 started
+INFO  2020-06-03 08:16:45,174 [LongStringCacheTest-timestepThread-27] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-27 started
+INFO  2020-06-03 08:16:45,174 [LongStringCacheTest-timestepThread-26] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-26 started
+INFO  2020-06-03 08:16:45,174 [LongStringCacheTest-timestepThread-25] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-25 started
+INFO  2020-06-03 08:16:45,174 [LongStringCacheTest-timestepThread-24] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-24 started
+INFO  2020-06-03 08:16:45,174 [LongStringCacheTest-timestepThread-23] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-23 started
+INFO  2020-06-03 08:16:45,174 [LongStringCacheTest-timestepThread-22] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-22 started
+INFO  2020-06-03 08:16:45,174 [LongStringCacheTest-timestepThread-21] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-21 started
+INFO  2020-06-03 08:16:45,174 [LongStringCacheTest-timestepThread-20] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-20 started
+INFO  2020-06-03 08:16:45,174 [LongStringCacheTest-timestepThread-19] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-19 started
+INFO  2020-06-03 08:16:45,176 [LongStringCacheTest-timestepThread-33] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-33 started
+INFO  2020-06-03 08:16:45,176 [LongStringCacheTest-timestepThread-32] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-32 started
+INFO  2020-06-03 08:16:45,176 [LongStringCacheTest-timestepThread-34] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-34 started
+INFO  2020-06-03 08:16:45,175 [LongStringCacheTest-timestepThread-31] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-31 started
+INFO  2020-06-03 08:16:45,175 [LongStringCacheTest-timestepThread-30] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-30 started
+INFO  2020-06-03 08:16:45,175 [LongStringCacheTest-timestepThread-29] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-29 started
+INFO  2020-06-03 08:16:45,176 [LongStringCacheTest-timestepThread-36] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-36 started
+INFO  2020-06-03 08:16:45,176 [LongStringCacheTest-timestepThread-35] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-35 started
+INFO  2020-06-03 08:16:45,177 [LongStringCacheTest-timestepThread-37] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-37 started
+INFO  2020-06-03 08:16:45,177 [LongStringCacheTest-timestepThread-38] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-38 started
+INFO  2020-06-03 08:16:45,177 [LongStringCacheTest-timestepThread-39] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-39 started
+INFO  2020-06-03 08:16:45,177 [LongStringCacheTest-timestepThread-40] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-40 started
+INFO  2020-06-03 08:16:45,177 [LongStringCacheTest-timestepThread-41] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-41 started
+INFO  2020-06-03 08:16:45,178 [LongStringCacheTest-timestepThread-44] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-44 started
+INFO  2020-06-03 08:16:45,178 [LongStringCacheTest-timestepThread-46] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-46 started
+INFO  2020-06-03 08:16:45,178 [LongStringCacheTest-timestepThread-42] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-42 started
+INFO  2020-06-03 08:16:45,178 [LongStringCacheTest-timestepThread-47] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-47 started
+INFO  2020-06-03 08:16:45,178 [LongStringCacheTest-timestepThread-48] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-48 started
+INFO  2020-06-03 08:16:45,178 [LongStringCacheTest-timestepThread-43] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-43 started
+INFO  2020-06-03 08:16:45,178 [LongStringCacheTest-timestepThread-49] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-49 started
+INFO  2020-06-03 08:16:45,178 [LongStringCacheTest-timestepThread-50] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-50 started
+INFO  2020-06-03 08:16:45,178 [LongStringCacheTest-timestepThread-51] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-51 started
+INFO  2020-06-03 08:16:45,178 [LongStringCacheTest-timestepThread-45] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-45 started
+INFO  2020-06-03 08:16:45,178 [LongStringCacheTest-timestepThread-52] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-52 started
+INFO  2020-06-03 08:16:45,179 [LongStringCacheTest-timestepThread-53] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-53 started
+INFO  2020-06-03 08:16:45,179 [LongStringCacheTest-timestepThread-54] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-54 started
+INFO  2020-06-03 08:16:45,179 [LongStringCacheTest-timestepThread-55] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-55 started
+INFO  2020-06-03 08:16:45,179 [LongStringCacheTest-timestepThread-56] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-56 started
+INFO  2020-06-03 08:16:45,180 [LongStringCacheTest-timestepThread-59] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-59 started
+INFO  2020-06-03 08:16:45,180 [LongStringCacheTest-timestepThread-57] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-57 started
+INFO  2020-06-03 08:16:45,180 [LongStringCacheTest-timestepThread-60] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-60 started
+INFO  2020-06-03 08:16:45,180 [LongStringCacheTest-timestepThread-58] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-58 started
+INFO  2020-06-03 08:16:45,180 [LongStringCacheTest-timestepThread-61] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-61 started
+INFO  2020-06-03 08:16:45,180 [LongStringCacheTest-timestepThread-62] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-62 started
+INFO  2020-06-03 08:16:45,180 [LongStringCacheTest-timestepThread-63] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-63 started
+INFO  2020-06-03 08:16:45,180 [LongStringCacheTest-timestepThread-64] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-64 started
+INFO  2020-06-03 08:17:46,159 [Thread-0] com.hazelcast.simulator.worker.testcontainer.TestManager: --------------------------- Stopping LongStringCacheTest ---------------------------
+INFO  2020-06-03 08:17:46,159 [LongStringCacheTest-timestepThread-39] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-39 completed normally
+INFO  2020-06-03 08:17:46,159 [LongStringCacheTest-timestepThread-45] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-45 completed normally
+INFO  2020-06-03 08:17:46,159 [LongStringCacheTest-timestepThread-29] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-29 completed normally
+INFO  2020-06-03 08:17:46,159 [LongStringCacheTest-timestepThread-57] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-57 completed normally
+INFO  2020-06-03 08:17:46,159 [LongStringCacheTest-timestepThread-42] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-42 completed normally
+INFO  2020-06-03 08:17:46,160 [LongStringCacheTest-timestepThread-5] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-5 completed normally
+INFO  2020-06-03 08:17:46,160 [LongStringCacheTest-timestepThread-41] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-41 completed normally
+INFO  2020-06-03 08:17:46,160 [LongStringCacheTest-timestepThread-59] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-59 completed normally
+INFO  2020-06-03 08:17:46,160 [LongStringCacheTest-timestepThread-51] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-51 completed normally
+INFO  2020-06-03 08:17:46,160 [LongStringCacheTest-timestepThread-11] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-11 completed normally
+INFO  2020-06-03 08:17:46,159 [LongStringCacheTest-timestepThread-53] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-53 completed normally
+INFO  2020-06-03 08:17:46,159 [LongStringCacheTest-timestepThread-6] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-6 completed normally
+INFO  2020-06-03 08:17:46,159 [LongStringCacheTest-timestepThread-55] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-55 completed normally
+INFO  2020-06-03 08:17:46,159 [LongStringCacheTest-timestepThread-21] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-21 completed normally
+INFO  2020-06-03 08:17:46,159 [LongStringCacheTest-timestepThread-61] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-61 completed normally
+INFO  2020-06-03 08:17:46,159 [LongStringCacheTest-timestepThread-43] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-43 completed normally
+INFO  2020-06-03 08:17:46,159 [LongStringCacheTest-timestepThread-7] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-7 completed normally
+INFO  2020-06-03 08:17:46,159 [LongStringCacheTest-timestepThread-16] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-16 completed normally
+INFO  2020-06-03 08:17:46,159 [LongStringCacheTest-timestepThread-31] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-31 completed normally
+INFO  2020-06-03 08:17:46,159 [LongStringCacheTest-timestepThread-32] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-32 completed normally
+INFO  2020-06-03 08:17:46,159 [LongStringCacheTest-timestepThread-22] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-22 completed normally
+INFO  2020-06-03 08:17:46,159 [LongStringCacheTest-timestepThread-3] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-3 completed normally
+INFO  2020-06-03 08:17:46,159 [LongStringCacheTest-timestepThread-36] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-36 completed normally
+INFO  2020-06-03 08:17:46,159 [LongStringCacheTest-timestepThread-13] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-13 completed normally
+INFO  2020-06-03 08:17:46,159 [LongStringCacheTest-timestepThread-26] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-26 completed normally
+INFO  2020-06-03 08:17:46,159 [LongStringCacheTest-timestepThread-20] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-20 completed normally
+INFO  2020-06-03 08:17:46,159 [LongStringCacheTest-timestepThread-58] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-58 completed normally
+INFO  2020-06-03 08:17:46,159 [LongStringCacheTest-timestepThread-62] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-62 completed normally
+INFO  2020-06-03 08:17:46,159 [LongStringCacheTest-timestepThread-12] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-12 completed normally
+INFO  2020-06-03 08:17:46,159 [LongStringCacheTest-timestepThread-4] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-4 completed normally
+INFO  2020-06-03 08:17:46,159 [LongStringCacheTest-timestepThread-44] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-44 completed normally
+INFO  2020-06-03 08:17:46,159 [LongStringCacheTest-timestepThread-49] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-49 completed normally
+INFO  2020-06-03 08:17:46,159 [LongStringCacheTest-timestepThread-27] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-27 completed normally
+INFO  2020-06-03 08:17:46,159 [LongStringCacheTest-timestepThread-48] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-48 completed normally
+INFO  2020-06-03 08:17:46,159 [LongStringCacheTest-timestepThread-54] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-54 completed normally
+INFO  2020-06-03 08:17:46,159 [LongStringCacheTest-timestepThread-9] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-9 completed normally
+INFO  2020-06-03 08:17:46,159 [LongStringCacheTest-timestepThread-14] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-14 completed normally
+INFO  2020-06-03 08:17:46,159 [LongStringCacheTest-timestepThread-38] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-38 completed normally
+INFO  2020-06-03 08:17:46,159 [LongStringCacheTest-timestepThread-60] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-60 completed normally
+INFO  2020-06-03 08:17:46,159 [LongStringCacheTest-timestepThread-40] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-40 completed normally
+INFO  2020-06-03 08:17:46,159 [LongStringCacheTest-timestepThread-17] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-17 completed normally
+INFO  2020-06-03 08:17:46,159 [LongStringCacheTest-timestepThread-63] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-63 completed normally
+INFO  2020-06-03 08:17:46,159 [LongStringCacheTest-timestepThread-34] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-34 completed normally
+INFO  2020-06-03 08:17:46,159 [LongStringCacheTest-timestepThread-50] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-50 completed normally
+INFO  2020-06-03 08:17:46,159 [LongStringCacheTest-timestepThread-24] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-24 completed normally
+INFO  2020-06-03 08:17:46,159 [LongStringCacheTest-timestepThread-2] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-2 completed normally
+INFO  2020-06-03 08:17:46,160 [LongStringCacheTest-timestepThread-19] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-19 completed normally
+INFO  2020-06-03 08:17:46,159 [LongStringCacheTest-timestepThread-10] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-10 completed normally
+INFO  2020-06-03 08:17:46,160 [LongStringCacheTest-timestepThread-56] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-56 completed normally
+INFO  2020-06-03 08:17:46,160 [LongStringCacheTest-timestepThread-64] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-64 completed normally
+INFO  2020-06-03 08:17:46,160 [LongStringCacheTest-timestepThread-33] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-33 completed normally
+INFO  2020-06-03 08:17:46,160 [LongStringCacheTest-timestepThread-25] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-25 completed normally
+INFO  2020-06-03 08:17:46,160 [LongStringCacheTest-timestepThread-1] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-1 completed normally
+INFO  2020-06-03 08:17:46,160 [LongStringCacheTest-timestepThread-28] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-28 completed normally
+INFO  2020-06-03 08:17:46,160 [LongStringCacheTest-timestepThread-8] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-8 completed normally
+INFO  2020-06-03 08:17:46,160 [LongStringCacheTest-timestepThread-30] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-30 completed normally
+INFO  2020-06-03 08:17:46,160 [LongStringCacheTest-timestepThread-37] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-37 completed normally
+INFO  2020-06-03 08:17:46,160 [LongStringCacheTest-timestepThread-35] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-35 completed normally
+INFO  2020-06-03 08:17:46,160 [LongStringCacheTest-timestepThread-15] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-15 completed normally
+INFO  2020-06-03 08:17:46,160 [LongStringCacheTest-timestepThread-23] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-23 completed normally
+INFO  2020-06-03 08:17:46,160 [LongStringCacheTest-timestepThread-46] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-46 completed normally
+INFO  2020-06-03 08:17:46,160 [LongStringCacheTest-timestepThread-47] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-47 completed normally
+INFO  2020-06-03 08:17:46,160 [LongStringCacheTest-timestepThread-18] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-18 completed normally
+INFO  2020-06-03 08:17:46,159 [LongStringCacheTest-timestepThread-52] LongStringCacheTestRunnerLongStringCacheTest: LongStringCacheTest-timestepThread-52 completed normally
+INFO  2020-06-03 08:17:46,162 [Thread-9] com.hazelcast.simulator.worker.testcontainer.TestManager: --------------------------- run of LongStringCacheTest SUCCEEDED --------------------------- 
+INFO  2020-06-03 08:17:49,171 [Thread-23] com.hazelcast.simulator.worker.testcontainer.TestManager: --------------------------- Starting global verify of LongStringCacheTest ---------------------------
+INFO  2020-06-03 08:17:49,171 [Thread-23] com.hazelcast.simulator.worker.testcontainer.TestManager: --------------------------- global verify of LongStringCacheTest SUCCEEDED --------------------------- 
+INFO  2020-06-03 08:17:50,163 [Thread-24] com.hazelcast.simulator.worker.testcontainer.TestManager: --------------------------- Starting local verify of LongStringCacheTest ---------------------------
+INFO  2020-06-03 08:17:50,163 [Thread-24] com.hazelcast.simulator.worker.testcontainer.TestManager: --------------------------- local verify of LongStringCacheTest SUCCEEDED --------------------------- 
+INFO  2020-06-03 08:17:51,159 [Thread-26] com.hazelcast.simulator.worker.testcontainer.TestManager: --------------------------- Starting global tear down of LongStringCacheTest ---------------------------
+INFO  2020-06-03 08:17:51,159 [Thread-26] com.hazelcast.simulator.worker.testcontainer.TestManager: --------------------------- global tear down of LongStringCacheTest SUCCEEDED --------------------------- 
+INFO  2020-06-03 08:17:52,169 [Thread-27] com.hazelcast.simulator.worker.testcontainer.TestManager: --------------------------- Starting local tear down of LongStringCacheTest ---------------------------
+INFO  2020-06-03 08:17:52,169 [Thread-27] com.hazelcast.simulator.worker.testcontainer.TestManager: --------------------------- local tear down of LongStringCacheTest SUCCEEDED --------------------------- 
+WARN  2020-06-03 08:17:54,375 [Thread-0] com.hazelcast.simulator.worker.Worker: Terminating worker
+INFO  2020-06-03 08:17:54,386 [Thread-0] com.hazelcast.simulator.protocol.Server: Server Stopped
+INFO  2020-06-03 08:17:54,387 [Thread-0] com.hazelcast.simulator.protocol.Server: ServerThread finished
+INFO  2020-06-03 08:17:54,387 [WorkerShutdownThread] com.hazelcast.simulator.hazelcast4.Hazelcast4Driver: Stopping HazelcastInstance...
+INFO  2020-06-03 08:17:54,404 [WorkerShutdownThread] com.hazelcast.simulator.worker.performance.PerformanceMonitor: Shutting down WorkerPerformanceMonitor
+INFO  2020-06-03 08:17:54,443 [WorkerShutdownThread] com.hazelcast.simulator.common.ShutdownThread: Stopping log4j...

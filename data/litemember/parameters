@@ -1,0 +1,44 @@
+AGENT_PORT=9000
+AGENT_THREAD_POOL_SIZE=0
+CLIENT_ARGS=-Xms4g -Xmx4g -Dhazelcast.diagnostics.enabled=true            -Dhazelcast.diagnostics.metric.level=mandatory            -Dhazelcast.diagnostics.metrics.period.seconds=5            -Dhazelcast.diagnostics.max.rolled.file.size.mb=1000            -Dhazelcast.diagnostics.operationthreadsamples.period.seconds=30            -Dhazelcast.diagnostics.operationthreadsamples.includeName=true
+CLOUD_PROVIDER=aws-ec2
+COORDINATOR_PORT=0
+EC2_RUN_INSTANCE_ARGS=default
+GIT_BUILD_DIR=~/.hazelcast-build/
+GROUP_NAME=simulator-agent-pveentjer
+HAZELCAST_PORT=5701
+HAZELCAST_PORT_RANGE_SIZE=50
+IMAGE_ID=ami-0323c3dd2da7fb37d
+INSTANCE_TYPE=c5.9xlarge
+JDK_FLAVOR=oracle
+JDK_VERSION=8
+JVM_OPTIONS=-Xms4g -Xmx4g -Dhazelcast.diagnostics.enabled=true            -Dhazelcast.diagnostics.metric.level=mandatory            -Dhazelcast.diagnostics.metrics.period.seconds=5            -Dhazelcast.diagnostics.max.rolled.file.size.mb=1000            -Dhazelcast.diagnostics.operationthreadsamples.period.seconds=30            -Dhazelcast.diagnostics.operationthreadsamples.includeName=true
+MANAGEMENT_CENTER_UPDATE_INTERVAL=30
+MANAGEMENT_CENTER_URL=none
+MEMBER_ARGS=-Xms4G -Xmx4G -Dhazelcast.initial.min.cluster.size=1 -Dhazelcast.diagnostics.enabled=true            -Dhazelcast.diagnostics.metric.level=mandatory            -Dhazelcast.diagnostics.metrics.period.seconds=5            -Dhazelcast.diagnostics.max.rolled.file.size.mb=1000            -Dhazelcast.diagnostics.operationthreadsamples.period.seconds=30            -Dhazelcast.diagnostics.operationthreadsamples.includeName=true
+MEMBER_WORKER_SHUTDOWN_DELAY_SECONDS=5
+PLACEMENT_GROUP=simulator
+PRIVATE_ADDRESS=10.0.0.4
+PUBLIC_ADDRESS=3.80.130.125
+REGION=us-east-1
+SECURITY_GROUP=simulator
+SESSION_ID=2020-06-03__11_13_44
+SIMULATOR_USER=simulator
+SIMULATOR_VERSION=0.12-SNAPSHOT
+SKIP_LOCAL_MAVEN_REPO_LOOKUP=false
+SSH_OPTIONS=-o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+SUBNET_ID=subnet-378d2140
+TEST_COMPLETION_TIMEOUT_SECONDS=300
+VENDOR=hazelcast4
+VERSION_SPEC=maven=4.1-SNAPSHOT
+WAIT_FOR_WORKER_SHUTDOWN_TIMEOUT_SECONDS=120
+WORKER_ADDRESS=A2_W1
+WORKER_DIR_NAME=A2_W1-3.80.130.125-litemember
+WORKER_INDEX=1
+WORKER_ORPHAN_INTERVAL_SECONDS=5
+WORKER_PERFORMANCE_MONITOR_INTERVAL_SECONDS=1
+WORKER_PING_INTERVAL_SECONDS=60
+WORKER_STARTUP_TIMEOUT_SECONDS=60
+WORKER_TYPE=litemember
+agent.pid=2332
+CLASSPATH=/home/simulator/hazelcast-simulator-0.12-SNAPSHOT/workers/2020-06-03__11_13_44/lib/*:/home/simulator/hazelcast-simulator-0.12-SNAPSHOT/workers/2020-06-03__11_13_44/A2_W1-3.80.130.125-litemember/upload/*:/home/simulator/hazelcast-simulator-0.12-SNAPSHOT/user-lib/*:/home/simulator/hazelcast-simulator-0.12-SNAPSHOT/lib/simulator-0.12-SNAPSHOT.jar:/home/simulator/hazelcast-simulator-0.12-SNAPSHOT/lib/activemq-broker-5.15.11.jar:/home/simulator/hazelcast-simulator-0.12-SNAPSHOT/lib/activemq-client-5.15.11.jar:/home/simulator/hazelcast-simulator-0.12-SNAPSHOT/lib/geronimo-jms_1.1_spec-1.1.1.jar:/home/simulator/hazelcast-simulator-0.12-SNAPSHOT/lib/geronimo-j2ee-management_1.1_spec-1.0.1.jar:/home/simulator/hazelcast-simulator-0.12-SNAPSHOT/lib/slf4j-api-1.7.25.jar:/home/simulator/hazelcast-simulator-0.12-SNAPSHOT/lib/hawtbuf-1.11.jar:/home/simulator/hazelcast-simulator-0.12-SNAPSHOT/lib/affinity-3.2.2.jar:/home/simulator/hazelcast-simulator-0.12-SNAPSHOT/lib/jna-4.2.1.jar:/home/simulator/hazelcast-simulator-0.12-SNAPSHOT/lib/jna-platform-4.2.1.jar:/home/simulator/hazelcast-simulator-0.12-SNAPSHOT/lib/cache-api-1.0.0.jar:/home/simulator/hazelcast-simulator-0.12-SNAPSHOT/lib/commons-codec-1.10.jar:/home/simulator/hazelcast-simulator-0.12-SNAPSHOT/lib/commons-lang3-3.4.jar:/home/simulator/hazelcast-simulator-0.12-SNAPSHOT/lib/freemarker-2.3.29.jar:/home/simulator/hazelcast-simulator-0.12-SNAPSHOT/lib/gson-2.6.2.jar:/home/simulator/hazelcast-simulator-0.12-SNAPSHOT/lib/HdrHistogram-2.1.12.jar:/home/simulator/hazelcast-simulator-0.12-SNAPSHOT/lib/jopt-simple-4.9.jar:/home/simulator/hazelcast-simulator-0.12-SNAPSHOT/lib/junit-4.12.jar:/home/simulator/hazelcast-simulator-0.12-SNAPSHOT/lib/log4j-1.2.17.jar:/home/simulator/hazelcast-simulator-0.12-SNAPSHOT/lib/slf4j-log4j12-1.7.21.jar:/home/simulator/hazelcast-simulator-0.12-SNAPSHOT/vendor-lib/maven-4.1-SNAPSHOT/*:/home/simulator/hazelcast-simulator-0.12-SNAPSHOT/drivers/driver-hazelcast4/*

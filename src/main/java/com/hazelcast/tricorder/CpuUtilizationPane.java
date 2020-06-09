@@ -11,6 +11,8 @@ import org.jfree.data.time.TimeSeriesCollection;
 
 import javax.swing.*;
 import java.util.Iterator;
+import java.util.LinkedList;
+import java.util.List;
 import java.util.Map;
 
 public class CpuUtilizationPane {
@@ -20,9 +22,9 @@ public class CpuUtilizationPane {
     private final TimeSeriesCollection collection;
     private long startMs = Long.MIN_VALUE;
     private long endMs = Long.MAX_VALUE;
-    private InstanceDiagnostics diagnostics;
+    private List<InstanceDiagnostics> diagnosticsList = new LinkedList<>();
 
-    public CpuUtilizationPane(){
+    public CpuUtilizationPane() {
         collection = new TimeSeriesCollection();
         invocationChart = ChartFactory.createXYLineChart(
                 "CPU Utilization",
@@ -34,51 +36,51 @@ public class CpuUtilizationPane {
                 true,
                 false);
         this.chartPanel = new ChartPanel(invocationChart);
-        this.component=chartPanel;
+        this.component = chartPanel;
     }
 
-
-    public void setRange(long fromMs, long toMs){
+    public void setRange(long fromMs, long toMs) {
         this.startMs = fromMs;
         this.endMs = toMs;
     }
 
-    public void setInstanceDiagnostics(InstanceDiagnostics diagnostics) {
-        this.diagnostics = diagnostics;
+    public void setInstanceDiagnostics(List<InstanceDiagnostics> diagnosticsList) {
+        this.diagnosticsList = diagnosticsList;
     }
 
-    public void update(){
+    public void update() {
         collection.removeAllSeries();
-        if(diagnostics==null){
+        if (diagnosticsList.isEmpty()) {
             return;
         }
 
-        Iterator<Map.Entry<Long, Double>> iterator = diagnostics.doubleMetricsBetween("[metric=os.processCpuLoad]",startMs, endMs);
+        for (InstanceDiagnostics diagnostics : diagnosticsList) {
+            Iterator<Map.Entry<Long, Double>> iterator = diagnostics.doubleMetricsBetween("[metric=os.processCpuLoad]", startMs, endMs);
 
-        if(!iterator.hasNext()){
-            System.out.println("'[metric=os.processCpuLoad]' not found in directory: "+diagnostics.getDirectory());
-            return;
-        }
-
-        final TimeSeries series = new TimeSeries( "Random Data" );
-        Second current = new Second( );
-
-        while (iterator.hasNext()){
-            try {
-                Map.Entry<Long,Double> entry = iterator.next();
-                Double value = entry.getValue();
-               // System.out.println(value);
-                series.add(current, value);
-                current = ( Second ) current.next( );
-            } catch ( SeriesException e ) {
-                System.err.println("Error adding to series");
+            if (!iterator.hasNext()) {
+                continue;
             }
-        }
 
-        collection.addSeries(series);
+            final TimeSeries series = new TimeSeries(diagnostics.getDirectory().getName());
+            Second current = new Second();
+
+            while (iterator.hasNext()) {
+                try {
+                    Map.Entry<Long, Double> entry = iterator.next();
+                    Double value = entry.getValue();
+                    // System.out.println(value);
+                    series.add(current, value);
+                    current = (Second) current.next();
+                } catch (SeriesException e) {
+                    System.err.println("Error adding to series");
+                }
+            }
+
+            collection.addSeries(series);
+        }
     }
 
-    public JComponent getComponent(){
+    public JComponent getComponent() {
         return component;
     }
 }

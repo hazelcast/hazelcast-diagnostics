@@ -42,12 +42,12 @@ public class InstanceDiagnostics {
     private long endMs = Long.MIN_VALUE;
     private Set<String> availableMetrics = new HashSet<>();
 
-    public File getDirectory() {
-        return directory;
+    public InstanceDiagnostics(File directory){
+        this.directory = directory;
     }
 
-    public void setDirectory(File directory) {
-        this.directory = directory;
+    public File getDirectory() {
+        return directory;
     }
 
     public void analyze() {

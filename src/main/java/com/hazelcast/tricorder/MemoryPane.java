@@ -11,6 +11,7 @@ import org.jfree.data.time.TimeSeriesCollection;
 
 import javax.swing.*;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 
 public class MemoryPane {
@@ -19,15 +20,13 @@ public class MemoryPane {
     private final JFreeChart invocationChart;
     private final ChartPanel chartPanel;
     private final TimeSeriesCollection collection;
-    private InstanceDiagnostics diagnostics;
+    private List<InstanceDiagnostics> diagnosticsList;
     private long startMs = Long.MIN_VALUE;
     private long endMs = Long.MAX_VALUE;
 
     public MemoryPane() {
-//        Function2D normal = new NormalDistributionFunction2D(0.0, 1.0);
-//        XYDataset dataset = DatasetUtils.sampleFunction2D(normal, -5.0, 5.0, 100, "Normal");
-        collection = new TimeSeriesCollection();
-        invocationChart = ChartFactory.createXYLineChart(
+        this.collection = new TimeSeriesCollection();
+        this.invocationChart = ChartFactory.createXYLineChart(
                 "Memory Usage",
                 "X",
                 "Y",
@@ -45,39 +44,38 @@ public class MemoryPane {
         this.endMs = toMs;
     }
 
-    public void setInstanceDiagnostics(InstanceDiagnostics diagnostics) {
-        this.diagnostics = diagnostics;
+    public void setInstanceDiagnostics(List<InstanceDiagnostics> diagnosticsList) {
+        this.diagnosticsList = diagnosticsList;
     }
 
     public void update() {
         collection.removeAllSeries();
-        if (diagnostics == null) {
+        if (diagnosticsList == null) {
             return;
         }
 
-        Iterator<Map.Entry<Long, Long>> iterator = diagnostics.longMetricsBetween("[metric=runtime.usedMemory]", startMs, endMs);
+        for (InstanceDiagnostics diagnostics : diagnosticsList) {
+            Iterator<Map.Entry<Long, Long>> iterator = diagnostics.longMetricsBetween("[metric=runtime.usedMemory]", startMs, endMs);
 
-        if (!iterator.hasNext()) {
-            System.out.println("No [metric=runtime.usedMemory] found in directory: " + diagnostics.getDirectory());
-            return;
-        }
-
-        final TimeSeries series = new TimeSeries("Random Data");
-        Second current = new Second();
-
-        while (iterator.hasNext()) {
-            try {
-                Map.Entry<Long, Long> entry = iterator.next();
-                Long value = entry.getValue();
-                series.add(current, value);
-                current = (Second) current.next();
-            } catch (SeriesException e) {
-                System.err.println("Error adding to series");
+            if (!iterator.hasNext()) {
+                continue;
             }
-        }
 
-        collection.removeAllSeries();
-        collection.addSeries(series);
+            TimeSeries series = new TimeSeries(diagnostics.getDirectory().getName());
+            Second current = new Second();
+
+            while (iterator.hasNext()) {
+                try {
+                    Map.Entry<Long, Long> entry = iterator.next();
+                    Long value = entry.getValue();
+                    series.add(current, value);
+                    current = (Second) current.next();
+                } catch (SeriesException e) {
+                    System.err.println("Error adding to series");
+                }
+            }
+            collection.addSeries(series);
+        }
     }
 
     public JComponent getComponent() {
