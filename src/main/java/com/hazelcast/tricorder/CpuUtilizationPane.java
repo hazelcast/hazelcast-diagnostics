@@ -55,10 +55,6 @@ public class CpuUtilizationPane {
     public void update() {
         collection.removeAllSeries();
 
-        if (diagnosticsList.isEmpty()) {
-            return;
-        }
-
         for (InstanceDiagnostics diagnostics : diagnosticsList) {
             Iterator<Map.Entry<Long, Double>> iterator = diagnostics.doubleMetricsBetween("[metric=os.processCpuLoad]", startMs, endMs);
 

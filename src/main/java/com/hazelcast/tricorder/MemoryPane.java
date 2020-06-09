@@ -12,6 +12,7 @@ import org.jfree.data.time.TimeSeriesCollection;
 
 import javax.swing.*;
 import java.text.SimpleDateFormat;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Iterator;
 import java.util.Map;
@@ -22,7 +23,7 @@ public class MemoryPane {
     private final JFreeChart chart;
     private final ChartPanel chartPanel;
     private final TimeSeriesCollection collection;
-    private Collection<InstanceDiagnostics> diagnosticsList;
+    private Collection<InstanceDiagnostics> diagnosticsList = new ArrayList<>();
     private long startMs = Long.MIN_VALUE;
     private long endMs = Long.MAX_VALUE;
 
@@ -54,9 +55,6 @@ public class MemoryPane {
 
     public void update() {
         collection.removeAllSeries();
-        if (diagnosticsList == null) {
-            return;
-        }
 
         for (InstanceDiagnostics diagnostics : diagnosticsList) {
             Iterator<Map.Entry<Long, Long>> iterator = diagnostics.longMetricsBetween("[metric=runtime.usedMemory]", startMs, endMs);

@@ -30,7 +30,11 @@ public class MainWindow {
 
     public void add(InstanceDiagnostics instanceDiagnostics) {
         machines.put(instanceDiagnostics.getDirectory(), instanceDiagnostics);
+        update();
+    }
 
+    public void remove(File directory) {
+        machines.remove(directory);
         update();
     }
 
@@ -61,11 +65,6 @@ public class MainWindow {
 
         operationsPendingPane.setInstanceDiagnostics(machines.values());
         operationsPendingPane.update();
-    }
-
-    public void remove(File directory) {
-        machines.remove(directory);
-        update();
     }
 
     public MainWindow() {

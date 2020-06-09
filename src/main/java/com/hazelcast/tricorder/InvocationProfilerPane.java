@@ -10,11 +10,10 @@ import org.jfree.data.function.NormalDistributionFunction2D;
 import org.jfree.data.xy.XYDataset;
 
 import javax.swing.*;
-import java.util.Arrays;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Iterator;
 import java.util.Map;
-import java.util.Map.Entry;
 
 public class InvocationProfilerPane {
 
@@ -22,7 +21,7 @@ public class InvocationProfilerPane {
     private final ChartPanel pane;
     private long startMs = Long.MIN_VALUE;
     private long endMs = Long.MAX_VALUE;
-    private Collection<InstanceDiagnostics> instanceDiagnosticsColl;
+    private Collection<InstanceDiagnostics> instanceDiagnosticsColl = new ArrayList<>();
 
     public InvocationProfilerPane() {
         Function2D normal = new NormalDistributionFunction2D(0.0, 1.0);
