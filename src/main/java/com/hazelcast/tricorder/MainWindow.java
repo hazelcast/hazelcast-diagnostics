@@ -21,6 +21,8 @@ public class MainWindow {
     private TimeSelectorPane timeSelectorPane = new TimeSelectorPane();
     private InvocationsPlane invocationsPlane = new InvocationsPlane();
     private OperationsPlane operationsPlane = new OperationsPlane();
+    private PendingPane invocationsPendingPane = new PendingPane("[unit=count,metric=operation.invocations.pending]", "Invocations Pending");
+    private PendingPane operationsPendingPane = new PendingPane("[unit=count,metric=operation.queueSize]", "Operations Pending");
 
     public JFrame getJFrame() {
         return window;
@@ -53,6 +55,12 @@ public class MainWindow {
 
         operationsPlane.setInstanceDiagnostics(machines.values());
         operationsPlane.update();
+
+        invocationsPendingPane.setInstanceDiagnostics(machines.values());
+        invocationsPendingPane.update();
+
+        operationsPendingPane.setInstanceDiagnostics(machines.values());
+        operationsPendingPane.update();
     }
 
     public void remove(File directory) {
@@ -97,10 +105,16 @@ public class MainWindow {
 
             operationsPlane.setRange(begin, end);
             operationsPlane.update();
+
+            invocationsPendingPane.setRange(begin, end);
+            invocationsPendingPane.update();
+
+            operationsPendingPane.setRange(begin, end);
+            operationsPendingPane.update();
         });
 
 
-        JPanel analysisPanel= new JPanel();
+        JPanel analysisPanel = new JPanel();
         analysisPanel.setLayout(new BorderLayout());
         analysisPanel.add(timeSelectorPane.getComponent(), BorderLayout.NORTH);
         analysisPanel.add(tabbedPane, BorderLayout.CENTER);
@@ -123,8 +137,10 @@ public class MainWindow {
         tabbedPane.addTab("Slow Operations", null, new JPanel());
         tabbedPane.addTab("Invocation Throughput", null, invocationsPlane.getComponent());
         tabbedPane.addTab("Invocation Profiler", null, invocationProfilerPane.getComponent());
+        tabbedPane.addTab("Invocation Pending", null, invocationsPendingPane.getComponent());
         tabbedPane.addTab("Operations Throughput", null, operationsPlane.getComponent());
         tabbedPane.addTab("Operation profiler", null, new JPanel());
+        tabbedPane.addTab("Operation Pending", null, operationsPendingPane.getComponent());
         tabbedPane.addTab("Slow operation thread sampler", null, new JPanel());
         tabbedPane.addTab("Slow Operations", null, new JPanel());
         return tabbedPane;
