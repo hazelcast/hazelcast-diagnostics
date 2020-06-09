@@ -10,14 +10,14 @@ public class Main {
 //        client.setDirectory(new File("/java/tests/profiler/2020-06-03__11_13_44/A2_W1-3.80.130.125-litemember/"));
 //        client.analyze();
 
-        InstanceDiagnostics server = new InstanceDiagnostics(new File("data/member"));
+        /*InstanceDiagnostics server = new InstanceDiagnostics(new File("data/member"));
         server.analyze();
 
         InstanceDiagnostics client = new InstanceDiagnostics(new File("data/litemember"));
         client.analyze();
 
         mainWindow.add(server);
-        mainWindow.add(client);
+        mainWindow.add(client);*/
 
         mainWindow.getJFrame().setVisible(true);
 

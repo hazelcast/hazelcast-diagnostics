@@ -10,7 +10,7 @@ public class MainWindow {
     private List<InstanceDiagnostics> machines = new ArrayList<>();
     private SystemPropertiesPane systemPropertiesPane = new SystemPropertiesPane();
     private BuildInfoPane buildInfoPane = new BuildInfoPane();
-    private InstancesPane machinesPane = new InstancesPane();
+    private InstancesPane machinesPane;
     private InvocationProfilerPane invocationProfilerPane = new InvocationProfilerPane();
     private MemoryPane memoryPane = new MemoryPane();
     private CpuUtilizationPane cpuUtilizationPane = new CpuUtilizationPane();
@@ -47,6 +47,7 @@ public class MainWindow {
         window.setLocationRelativeTo(null);
         window.setDefaultCloseOperation(WindowConstants.EXIT_ON_CLOSE);
 
+        machinesPane = new InstancesPane(this);
         buildMenu(window);
 
         JTabbedPane tabbedPane = newTabbedPane();
