@@ -3,6 +3,7 @@ package com.hazelcast.tricorder;
 import javax.swing.*;
 import java.awt.*;
 import java.io.File;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -39,31 +40,34 @@ public class MainWindow {
     }
 
     private void update() {
-        timeSelectorPane.setInstanceDiagnostics(machines.values());
-//        systemPropertiesPane.setDiagnostics(instanceDiagnostics);
-//        buildInfoPane.setInstanceDiagnostics(instanceDiagnostics);
-        invocationProfilerPane.setInstanceDiagnostics(machines.values());
+        Collection<InstanceDiagnostics> machines = this.machines.values();
+
+        timeSelectorPane.setInstanceDiagnostics(machines);
+
+        // systemPropertiesPane.setDiagnostics(instanceDiagnostics);
+        // buildInfoPane.setInstanceDiagnostics(instanceDiagnostics);
+        invocationProfilerPane.setInstanceDiagnostics(machines);
         invocationProfilerPane.update();
 
-        memoryPane.setInstanceDiagnostics(machines.values());
+        memoryPane.setInstanceDiagnostics(machines);
         memoryPane.update();
 
-        cpuUtilizationPane.setInstanceDiagnostics(machines.values());
+        cpuUtilizationPane.setInstanceDiagnostics(machines);
         cpuUtilizationPane.update();
 
-        metricsPane.setInstanceDiagnostics(machines.values());
+        metricsPane.setInstanceDiagnostics(machines);
         metricsPane.update();
 
-        invocationsPlane.setInstanceDiagnostics(machines.values());
+        invocationsPlane.setInstanceDiagnostics(machines);
         invocationsPlane.update();
 
-        operationsPlane.setInstanceDiagnostics(machines.values());
+        operationsPlane.setInstanceDiagnostics(machines);
         operationsPlane.update();
 
-        invocationsPendingPane.setInstanceDiagnostics(machines.values());
+        invocationsPendingPane.setInstanceDiagnostics(machines);
         invocationsPendingPane.update();
 
-        operationsPendingPane.setInstanceDiagnostics(machines.values());
+        operationsPendingPane.setInstanceDiagnostics(machines);
         operationsPendingPane.update();
     }
 

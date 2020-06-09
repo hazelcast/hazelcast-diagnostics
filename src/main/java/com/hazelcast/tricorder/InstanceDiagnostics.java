@@ -53,12 +53,13 @@ public class InstanceDiagnostics {
         return directory;
     }
 
-    public void analyze() {
+    public InstanceDiagnostics analyze() {
         try {
             diagnosticsFiles = diagnosticsFiles();
             for (DiagnosticsFile diagnosticsFile : diagnosticsFiles) {
                 analyze(diagnosticsFile);
             }
+            return this;
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
