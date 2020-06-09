@@ -10,8 +10,8 @@ public class InstancesPane {
 
     private static final String FILE_CHOOSER_DIALOG_TITLE = "Choose instance directory";
     private static final String FILE_CHOOSER_FILTER_TEXT = "Instance directory";
-    private static final String ADD_INSTANCE_BUTTON_LABEL = "Add instance directories";
-    private static final String REMOVE_INSTANCE_BUTTON_LABEL = "Remove instance directories";
+    private static final String ADD_INSTANCE_BUTTON_LABEL = "Add instance";
+    private static final String REMOVE_INSTANCE_LABEL = "Remove instance";
 
     private final JPanel component;
 
@@ -19,8 +19,23 @@ public class InstancesPane {
     private final DefaultListModel<File> listModel;
 
     public InstancesPane(MainWindow window) {
-        JPanel panel = new JPanel();
+        this.window = window;
+        this.listModel = new DefaultListModel<>();
 
+        JPanel panel = new JPanel(new BorderLayout(), true);
+
+        JPanel buttonsPanel = new JPanel();
+        buttonsPanel.add(createAddInstanceButton(buttonsPanel));
+        panel.add(buttonsPanel, BorderLayout.NORTH);
+
+        JList<File> instancesList = new JList<>(listModel);
+        instancesList.setComponentPopupMenu(createInstanceListMenu(instancesList));
+        panel.add(instancesList, BorderLayout.CENTER);
+
+        this.component = panel;
+    }
+
+    private JButton createAddInstanceButton(Component parent) {
         JFileChooser fc = new JFileChooser();
         fc.setDialogTitle(FILE_CHOOSER_DIALOG_TITLE);
         fc.setCurrentDirectory(new File("."));
@@ -39,15 +54,10 @@ public class InstancesPane {
             }
         });
 
-        this.window = window;
-        this.listModel = new DefaultListModel<>();
-        JList<File> list = new JList<>();
-        list.setModel(listModel);
-
         JButton addInstanceButton = new JButton();
         addInstanceButton.setText(ADD_INSTANCE_BUTTON_LABEL);
         addInstanceButton.addActionListener(e -> {
-            int returnVal = fc.showOpenDialog(panel);
+            int returnVal = fc.showOpenDialog(parent);
             if (returnVal == JFileChooser.APPROVE_OPTION) {
                 File[] directories = fc.getSelectedFiles();
                 for (File directory : directories) {
@@ -56,22 +66,30 @@ public class InstancesPane {
             }
         });
 
-        JButton removeInstanceButton = new JButton();
-        removeInstanceButton.setText(REMOVE_INSTANCE_BUTTON_LABEL);
-        removeInstanceButton.addActionListener(e -> {
-            if (list.getSelectedIndex() >= 0) {
-                removeDirectory(listModel.remove(list.getSelectedIndex()));
+        return addInstanceButton;
+    }
+
+    private JPopupMenu createInstanceListMenu(JList<File> list) {
+        return new JPopupMenu() {
+            {
+                JMenuItem removeItem = new JMenuItem(REMOVE_INSTANCE_LABEL);
+                removeItem.addActionListener(e -> {
+                    if (list.getSelectedIndex() >= 0) {
+                        removeDirectory(listModel.remove(list.getSelectedIndex()));
+                    }
+                });
+                add(removeItem);
             }
-        });
 
-        panel.setLayout(new BorderLayout());
-        panel.add(list, BorderLayout.CENTER);
-
-        JPanel buttonPanel = new JPanel();
-        buttonPanel.add(addInstanceButton);
-        buttonPanel.add(removeInstanceButton);
-        panel.add(buttonPanel, BorderLayout.NORTH);
-        this.component = panel;
+            @Override
+            public void show(Component invoker, int x, int y) {
+                int row = list.locationToIndex(new Point(x, y));
+                if (row != -1) {
+                    list.setSelectedIndex(row);
+                }
+                super.show(invoker, x, y);
+            }
+        };
     }
 
     void addDirectory(File directory) {
