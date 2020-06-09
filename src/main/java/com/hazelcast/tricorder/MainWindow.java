@@ -22,7 +22,7 @@ import java.util.Map;
 public class MainWindow {
     private final RangeSlider rangeSlider;
     private JFrame window;
-    private List<Machine> machines = new ArrayList<>();
+    private List<Diagnostics> machines = new ArrayList<>();
     private JTextPane propertiesTextPane;
     private JTextPane buildInfoTextPane;
     private JFreeChart invocationChart;
@@ -31,7 +31,7 @@ public class MainWindow {
         return window;
     }
 
-    public void add(Machine machine) {
+    public void add(Diagnostics machine) {
         machines.add(machine);
 
 
@@ -49,7 +49,7 @@ public class MainWindow {
         updateSystemProperties(machine);
         updateBuildInfo(machine);
 
-        Iterator<Map.Entry<Long, String>> between = machine.between(Machine.TYPE_INVOCATION_PROFILER, 0, Long.MAX_VALUE);
+        Iterator<Map.Entry<Long, String>> between = machine.between(Diagnostics.TYPE_INVOCATION_PROFILER, 0, Long.MAX_VALUE);
         for (; ; ) {
             if (!between.hasNext()) {
                 return;
@@ -79,8 +79,8 @@ public class MainWindow {
         }
     }
 
-    private void updateBuildInfo(Machine machine) {
-        String[] lines = machine.between(Machine.TYPE_BUILD_INFO, 0, Long.MAX_VALUE).next().getValue().split("\\n");
+    private void updateBuildInfo(Diagnostics machine) {
+        String[] lines = machine.between(Diagnostics.TYPE_BUILD_INFO, 0, Long.MAX_VALUE).next().getValue().split("\\n");
         StringBuffer sb = new StringBuffer();
         for (String line: lines) {
             int indexEquals = line.indexOf('=');
@@ -93,8 +93,8 @@ public class MainWindow {
         buildInfoTextPane.setText(sb.toString());
     }
 
-    private void updateSystemProperties(Machine machine) {
-        String[] lines = machine.between(Machine.TYPE_SYSTEM_PROPERTIES, 0, Long.MAX_VALUE).next().getValue().split("\\n");
+    private void updateSystemProperties(Diagnostics machine) {
+        String[] lines = machine.between(Diagnostics.TYPE_SYSTEM_PROPERTIES, 0, Long.MAX_VALUE).next().getValue().split("\\n");
         StringBuffer sb = new StringBuffer();
         for (String line: lines) {
             int indexEquals = line.indexOf('=');
@@ -151,6 +151,9 @@ public class MainWindow {
         JTabbedPane tabbedPane = new JTabbedPane();
         tabbedPane.setTabPlacement(JTabbedPane.BOTTOM);
 
+
+        tabbedPane.addTab("Machines", null, newMachinesPanel());
+
         JComponent panel1 = new JPanel();
         tabbedPane.addTab("Metrics", null, panel1);
 
@@ -179,6 +182,10 @@ public class MainWindow {
         JComponent panel10 = new JPanel();
         tabbedPane.addTab("Slow Operations", null, panel10);
         return tabbedPane;
+    }
+
+    private Component newMachinesPanel() {
+        return new JPanel();
     }
 
     private Component newInvocationProfilerPane() {

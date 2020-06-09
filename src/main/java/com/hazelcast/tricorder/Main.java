@@ -1,8 +1,6 @@
 package com.hazelcast.tricorder;
 
 import java.io.File;
-import java.util.Iterator;
-import java.util.Map;
 
 public class Main {
 
@@ -12,7 +10,7 @@ public class Main {
 //        client.setDirectory(new File("/java/tests/profiler/2020-06-03__11_13_44/A2_W1-3.80.130.125-litemember/"));
 //        client.analyze();
 
-        Machine server = new Machine();
+        Diagnostics server = new Diagnostics();
         server.setDirectory(new File("member"));
         server.analyze();
         mainWindow.add(server);
