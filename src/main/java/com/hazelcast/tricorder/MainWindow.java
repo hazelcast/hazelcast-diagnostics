@@ -29,10 +29,14 @@ public class MainWindow {
     public void add(InstanceDiagnostics instanceDiagnostics) {
         machines.put(instanceDiagnostics.getDirectory(), instanceDiagnostics);
 
+        update();
+    }
+
+    private void update() {
         timeSelectorPane.setInstanceDiagnostics(machines.values());
-        systemPropertiesPane.setDiagnostics(instanceDiagnostics);
-        buildInfoPane.setInstanceDiagnostics(instanceDiagnostics);
-        invocationProfilerPane.setInstanceDiagnostics(instanceDiagnostics);
+//        systemPropertiesPane.setDiagnostics(instanceDiagnostics);
+//        buildInfoPane.setInstanceDiagnostics(instanceDiagnostics);
+//        invocationProfilerPane.setInstanceDiagnostics(instanceDiagnostics);
 
         memoryPane.setInstanceDiagnostics(machines.values());
         memoryPane.update();
@@ -52,26 +56,7 @@ public class MainWindow {
 
     public void remove(File directory) {
         machines.remove(directory);
-
-        timeSelectorPane.setInstanceDiagnostics(machines.values());
-        //systemPropertiesPane.setDiagnostics(instanceDiagnostics);
-        //buildInfoPane.setInstanceDiagnostics(instanceDiagnostics);
-        //invocationProfilerPane.setInstanceDiagnostics(instanceDiagnostics);
-
-        memoryPane.setInstanceDiagnostics(machines.values());
-        memoryPane.update();
-
-        cpuUtilizationPane.setInstanceDiagnostics(machines.values());
-        cpuUtilizationPane.update();
-
-        metricsPane.setInstanceDiagnostics(machines.values());
-        metricsPane.update();
-
-        invocationsPlane.setInstanceDiagnostics(machines.values());
-        invocationsPlane.update();
-
-        operationsPlane.setInstanceDiagnostics(machines.values());
-        operationsPlane.update();
+        update();
     }
 
     public MainWindow() {
@@ -114,6 +99,7 @@ public class MainWindow {
         });
 
         mainPanel.add(timeSelectorPane.getComponent(), BorderLayout.NORTH);
+        mainPanel.add(machinesPane.getComponent(), BorderLayout.WEST);
         mainPanel.add(tabbedPane, BorderLayout.CENTER);
 
         window.setContentPane(mainPanel);
@@ -123,7 +109,6 @@ public class MainWindow {
         JTabbedPane tabbedPane = new JTabbedPane();
         tabbedPane.setTabPlacement(JTabbedPane.BOTTOM);
 
-        tabbedPane.addTab("Machines", null, machinesPane.getComponent());
         tabbedPane.addTab("Metrics", null, metricsPane.getComponent());
         tabbedPane.addTab("Memory", null, memoryPane.getComponent());
         tabbedPane.addTab("CPU", null, cpuUtilizationPane.getComponent());

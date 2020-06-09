@@ -66,8 +66,11 @@ public class InstancesPane {
 
         panel.setLayout(new BorderLayout());
         panel.add(list, BorderLayout.CENTER);
-        panel.add(addInstanceButton, BorderLayout.WEST);
-        panel.add(removeInstanceButton, BorderLayout.EAST);
+
+        JPanel buttonPanel = new JPanel();
+        buttonPanel.add(addInstanceButton);
+        buttonPanel.add(removeInstanceButton);
+        panel.add(buttonPanel, BorderLayout.NORTH);
         this.component = panel;
     }
 
