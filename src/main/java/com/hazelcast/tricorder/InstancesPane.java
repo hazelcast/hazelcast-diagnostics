@@ -12,6 +12,8 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
+import static com.hazelcast.tricorder.DiagnosticsLoader.load;
+
 public class InstancesPane {
 
     private static final String FILE_CHOOSER_DIALOG_TITLE = "Choose instance directory";
@@ -61,12 +63,8 @@ public class InstancesPane {
         JButton button = new JButton();
         button.setText(ADD_INSTANCE_BUTTON_LABEL);
         button.addActionListener(e -> {
-            int returnVal = fileChooser.showOpenDialog(parent);
-            if (returnVal == JFileChooser.APPROVE_OPTION) {
-                File[] directories = fileChooser.getSelectedFiles();
-                for (File directory : directories) {
-                    listModel.addElement(directory);
-                }
+            if (fileChooser.showOpenDialog(parent) == JFileChooser.APPROVE_OPTION) {
+                listModel.addElements(fileChooser.getSelectedFiles());
             }
         });
         return button;
@@ -104,9 +102,7 @@ public class InstancesPane {
 
     @Deprecated
     void addDirectories(File... directories) {
-        for (File directory : directories) {
-            listModel.addElement(directory);
-        }
+        listModel.addElements(directories);
         list.getSelectionModel().setSelectionInterval(0, directories.length - 1);
     }
 
@@ -130,19 +126,26 @@ public class InstancesPane {
             this.selectedInstances = new HashSet<>();
         }
 
-        void addElement(File directory) {
-            File canonicalDirectory;
-            try {
-                canonicalDirectory = directory.getCanonicalFile();
-            } catch (IOException e) {
-                throw new RuntimeException(e);
+        void addElements(File... dirs) {
+            List<File> canonicalDirs = new ArrayList<>();
+            for (File dir : dirs) {
+                try {
+                    File canonicalDir = dir.getCanonicalFile();
+                    if (!directories.contains(canonicalDir)) {
+                        canonicalDirs.add(canonicalDir);
+                    }
+                } catch (IOException e) {
+                    throw new RuntimeException(e);
+                }
             }
 
-            if (!directories.contains(canonicalDirectory)) {
-                directories.add(canonicalDirectory);
-                instances.add(new InstanceDiagnostics(canonicalDirectory).analyze());
+            for (InstanceDiagnostics diagnostics : load(canonicalDirs)) {
+                File directory = diagnostics.getDirectory();
+                directories.add(directory);
+                instances.add(new InstanceDiagnostics(directory).analyze());
 
-                fireIntervalAdded(this, instances.size(), instances.size());
+                int index = instances.size();
+                fireIntervalAdded(this, index, index);
             }
         }
 
