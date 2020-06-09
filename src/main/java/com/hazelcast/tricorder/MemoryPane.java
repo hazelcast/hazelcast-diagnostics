@@ -29,7 +29,7 @@ public class MemoryPane {
 //        XYDataset dataset = DatasetUtils.sampleFunction2D(normal, -5.0, 5.0, 100, "Normal");
         collection = new TimeSeriesCollection();
         invocationChart = ChartFactory.createXYLineChart(
-                "XY Series Demo",
+                "Memory Usage",
                 "X",
                 "Y",
                 collection,

@@ -22,7 +22,7 @@ public class CpuUtilizationPane {
     public CpuUtilizationPane(){
         collection = new TimeSeriesCollection();
         invocationChart = ChartFactory.createXYLineChart(
-                "XY Series Demo",
+                "CPU Utilization",
                 "X",
                 "Y",
                 collection,

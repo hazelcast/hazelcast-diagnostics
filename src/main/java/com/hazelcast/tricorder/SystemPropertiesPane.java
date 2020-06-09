@@ -39,7 +39,7 @@ public class SystemPropertiesPane {
                 continue;
             }
 
-            String key = line.substring(0, indexEquals);
+            String key = line.substring(0, indexEquals).trim();
             String value = line.substring(indexEquals + 1).replace("]", "");
             model.addRow(new Object[]{key, value});
         }
