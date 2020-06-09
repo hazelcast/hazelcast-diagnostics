@@ -22,9 +22,11 @@ public class InstancesPane {
     private final JPanel component;
 
     private final InstanceListModel listModel;
+    private final JList<String> list;
 
     public InstancesPane(MainWindow window) {
         this.listModel = new InstanceListModel(window);
+        this.list = createInstanceList(listModel);
 
         JPanel panel = new JPanel(new BorderLayout(), true);
 
@@ -32,7 +34,7 @@ public class InstancesPane {
         buttonsPanel.add(createAddInstanceButton(buttonsPanel, listModel));
         panel.add(buttonsPanel, BorderLayout.NORTH);
 
-        panel.add(createInstanceList(listModel), BorderLayout.CENTER);
+        panel.add(list, BorderLayout.CENTER);
 
         this.component = panel;
     }
@@ -103,8 +105,11 @@ public class InstancesPane {
     }
 
     @Deprecated
-    void addDirectory(File directory) {
-        listModel.addElement(directory);
+    void addDirectories(File... directories) {
+        for (File directory : directories) {
+            listModel.addElement(directory);
+        }
+        list.getSelectionModel().setSelectionInterval(0, directories.length - 1);
     }
 
     public JComponent getComponent() {
@@ -135,6 +140,7 @@ public class InstancesPane {
 
             if (!instances.contains(canonicalDirectory)) {
                 instances.add(canonicalDirectory);
+
                 fireIntervalAdded(this, instances.size(), instances.size());
             }
         }

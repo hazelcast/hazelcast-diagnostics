@@ -76,8 +76,7 @@ public class MainWindow {
         window.setDefaultCloseOperation(WindowConstants.EXIT_ON_CLOSE);
 
         machinesPane = new InstancesPane(this);
-        machinesPane.addDirectory(new File("data/member"));
-        machinesPane.addDirectory(new File("data/litemember"));
+        machinesPane.addDirectories(new File("data/member"), new File("data/litemember"));
 
         buildMenu(window);
 
