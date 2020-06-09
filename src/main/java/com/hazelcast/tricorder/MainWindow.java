@@ -1,16 +1,11 @@
 package com.hazelcast.tricorder;
 
-import com.jidesoft.swing.RangeSlider;
-
 import javax.swing.*;
-import javax.swing.event.ChangeEvent;
-import javax.swing.event.ChangeListener;
 import java.awt.*;
 import java.util.ArrayList;
 import java.util.List;
 
 public class MainWindow {
-    private RangeSlider rangeSlider;
     private JFrame window;
     private List<InstanceDiagnostics> machines = new ArrayList<>();
     private SystemPropertiesPane systemPropertiesPane = new SystemPropertiesPane();
@@ -20,8 +15,7 @@ public class MainWindow {
     private MemoryPane memoryPane = new MemoryPane();
     private CpuUtilizationPane cpuUtilizationPane = new CpuUtilizationPane();
     private MetricsPane metricsPane = new MetricsPane();
-    private long durationMs;
-    private long startMs;
+    private TimeSelectorPane timeSelectorPane = new TimeSelectorPane();
 
     public JFrame getJFrame() {
         return window;
@@ -30,20 +24,7 @@ public class MainWindow {
     public void add(InstanceDiagnostics instanceDiagnostics) {
         machines.add(instanceDiagnostics);
 
-        this.startMs = instanceDiagnostics.startMs();
-        this.durationMs = instanceDiagnostics.endMs() - startMs;
-
-        BoundedRangeModel model = rangeSlider.getModel();
-        model.setMinimum(0);
-        model.setMaximum((int) durationMs);
-        model.setValue(0);
-        model.setExtent((int) durationMs);
-        // model.setValueIsAdjusting(true);
-        //  rangeSlider.setValue();
-
-        System.out.println(instanceDiagnostics.startMs());
-        System.out.println(instanceDiagnostics.endMs());
-
+        timeSelectorPane.setInstanceDiagnostics(machines);
         systemPropertiesPane.setDiagnostics(instanceDiagnostics);
         buildInfoPane.setInstanceDiagnostics(instanceDiagnostics);
         invocationProfilerPane.setInstanceDiagnostics(instanceDiagnostics);
@@ -71,18 +52,10 @@ public class MainWindow {
         JTabbedPane tabbedPane = newTabbedPane();
         JPanel mainPanel = new JPanel();
         mainPanel.setLayout(new BorderLayout());
-        rangeSlider = newRangeSlider();
-        mainPanel.add(rangeSlider, BorderLayout.NORTH);
-        mainPanel.add(tabbedPane, BorderLayout.CENTER);
 
-        window.setContentPane(mainPanel);
-    }
-
-    private RangeSlider newRangeSlider() {
-        RangeSlider rangeSlider = new RangeSlider();
-        rangeSlider.addChangeListener(e -> {
-            long begin = rangeSlider.getLowValue() + startMs;
-            long end = rangeSlider.getHighValue() + startMs;
+        timeSelectorPane.addChangeListener(e -> {
+            long begin = timeSelectorPane.getStartMs();
+            long end = timeSelectorPane.getEndMs();
 
             // System.out.println(begin + " " + end);
             cpuUtilizationPane.setRange(begin, end);
@@ -94,8 +67,11 @@ public class MainWindow {
             metricsPane.setRange(begin, end);
             metricsPane.update();
         });
-        rangeSlider.setRangeDraggable(true);
-        return rangeSlider;
+
+        mainPanel.add(timeSelectorPane.getComponent(), BorderLayout.NORTH);
+        mainPanel.add(tabbedPane, BorderLayout.CENTER);
+
+        window.setContentPane(mainPanel);
     }
 
     private JTabbedPane newTabbedPane() {
