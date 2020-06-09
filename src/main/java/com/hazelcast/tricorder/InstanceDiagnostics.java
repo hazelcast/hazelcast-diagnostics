@@ -1,6 +1,5 @@
 package com.hazelcast.tricorder;
 
-import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.FileReader;
@@ -68,7 +67,6 @@ public class InstanceDiagnostics {
     private void analyze(DiagnosticsFile file) throws IOException {
         FileReader fr = new FileReader(file.file);
 
-        BufferedReader br = new BufferedReader(fr);
         int depth = 0;
         int offset = 0;
         int startOffset = 0;
@@ -76,7 +74,7 @@ public class InstanceDiagnostics {
         StringBuilder sb = new StringBuilder();
 
         for (; ; ) {
-            int read = br.read(buffer);
+            int read = fr.read(buffer);
             if (read == -1) {
                 break;
             }
