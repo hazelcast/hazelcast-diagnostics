@@ -4,8 +4,7 @@ import org.jfree.chart.ChartFactory;
 import org.jfree.chart.ChartPanel;
 import org.jfree.chart.JFreeChart;
 import org.jfree.chart.plot.PlotOrientation;
-import org.jfree.data.category.CategoryDataset;
-import org.jfree.data.category.DefaultCategoryDataset;
+import org.jfree.data.xy.DefaultXYDataset;
 
 import javax.swing.*;
 import java.text.ParseException;
@@ -15,10 +14,8 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.Map.Entry;
-import java.util.Set;
 import java.util.SortedMap;
 import java.util.TreeMap;
-import java.util.TreeSet;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -26,16 +23,16 @@ public class InvocationProfilerPane {
     private static final String INVOCATION_PROFILE_MARKER = "InvocationProfiler[";
 
     private final ChartPanel pane;
-    private final DefaultCategoryDataset dataset = new DefaultCategoryDataset();
+    private final DefaultXYDataset dataset = new DefaultXYDataset();
     private long startMs = Long.MIN_VALUE;
     private long endMs = Long.MAX_VALUE;
     private Collection<InstanceDiagnostics> instanceDiagnosticsColl = new ArrayList<>();
 
     public InvocationProfilerPane() {
-        JFreeChart latencyChart = ChartFactory.createBarChart(
+        JFreeChart latencyChart = ChartFactory.createXYLineChart(
                 "Operation Latency Profile",
+                "Percentile",
                 "Latency",
-                "Count",
                 dataset,
                 PlotOrientation.VERTICAL,
                 true,
@@ -80,42 +77,39 @@ public class InvocationProfilerPane {
     }
 
     private void updateWithProfiles(String startProfileStr, String endProfileStr) throws ParseException {
-        Map<String, SortedMap<Long, Long>> startLatencies = operationToLatencyProfile(parseProfile(startProfileStr));
-        Map<String, SortedMap<Long, Long>> endLatencies = operationToLatencyProfile(parseProfile(endProfileStr));
+        Map<String, SortedMap<Long, Long>> startLatencies = extractOperationToLatencyProfile(parseProfile(startProfileStr));
+        Map<String, SortedMap<Long, Long>> endLatencies = extractOperationToLatencyProfile(parseProfile(endProfileStr));
         subtractStartFromEnd(startLatencies, endLatencies);
-        workaroundToSortXAxis(endLatencies);
+
         for (Entry<String, SortedMap<Long, Long>> operationAndProfile : endLatencies.entrySet()) {
             String operation = operationAndProfile.getKey();
             operation = operation.substring(operation.lastIndexOf('.') + 1);
             SortedMap<Long, Long> profile = operationAndProfile.getValue();
-            for (Entry<Long, Long> latAndCount : profile.entrySet()) {
-                dataset.addValue(latAndCount.getValue(), operation, latAndCount.getKey());
-            }
+            double[][] percentilePlot = transposeToPercentilePlot(profile);
+            dataset.addSeries(operation, percentilePlot);
         }
     }
 
-    private void workaroundToSortXAxis(Map<String, SortedMap<Long, Long>> endLatencies) {
-        Set<Long> latencyKeys = allLatencyKeys(endLatencies);
-        String someOperation = endLatencies.keySet().iterator().next();
-        dataset.clear();
-        for (Long latency : latencyKeys) {
-            dataset.addValue(0, someOperation, latency);
+    private double[][] transposeToPercentilePlot(SortedMap<Long, Long> latencyProfile) {
+        double[][] result = new double[2][latencyProfile.size()];
+        long totalCount = 0;
+        for (long count : latencyProfile.values()) {
+            totalCount += count;
         }
-    }
-
-    private Set<Long> allLatencyKeys(Map<String, SortedMap<Long, Long>> endLatencies) {
-        Set<Long> latencyKeys = new TreeSet<>();
-        for (Entry<String, SortedMap<Long, Long>> operationAndProfile : endLatencies.entrySet()) {
-            SortedMap<Long, Long> profile = operationAndProfile.getValue();
-            for (Entry<Long, Long> latAndCount : profile.entrySet()) {
-                latencyKeys.add(latAndCount.getKey());
-            }
+        long runningCount = 0;
+        int index = 0;
+        for (Entry<Long, Long> latencyAndCount : latencyProfile.entrySet()) {
+            runningCount += latencyAndCount.getValue();
+            result[0][index] = 100.0 * runningCount / totalCount;
+            result[1][index++] = 1.5 * latencyAndCount.getKey();
         }
-        return latencyKeys;
+        return result;
     }
 
     @SuppressWarnings("unchecked")
-    private static Map<String, SortedMap<Long, Long>> operationToLatencyProfile(Map<String, Object> invocationProfile) {
+    private static Map<String, SortedMap<Long, Long>> extractOperationToLatencyProfile(
+            Map<String, Object> invocationProfile
+    ) {
         Map<String, SortedMap<Long, Long>> result = new HashMap<>();
         for (Entry<String, Object> e : invocationProfile.entrySet()) {
             SortedMap<Long, Long> latencyProfile = new TreeMap<>();
@@ -140,7 +134,7 @@ public class InvocationProfilerPane {
         return new MetricsParser(profileStr, markerStart + INVOCATION_PROFILE_MARKER.length() - 1).parseMap();
     }
 
-    private void subtractStartFromEnd(
+    private static void subtractStartFromEnd(
             Map<String, SortedMap<Long, Long>> startLatencies,
             Map<String, SortedMap<Long, Long>> endLatencies
     ) {
