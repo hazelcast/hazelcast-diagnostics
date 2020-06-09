@@ -85,10 +85,8 @@ public class InstancesPane {
             {
                 JMenuItem removeItem = new JMenuItem(REMOVE_INSTANCE_LABEL);
                 removeItem.addActionListener(e -> {
-                    if (list.getSelectedIndex() >= 0) {
-                        listModel.removeElement(list.getSelectedIndex());
-                        list.clearSelection();
-                    }
+                    listModel.removeElements(list.getSelectedIndices());
+                    list.clearSelection();
                 });
                 add(removeItem);
             }
@@ -97,7 +95,8 @@ public class InstancesPane {
             public void show(Component invoker, int x, int y) {
                 int row = list.locationToIndex(new Point(x, y));
                 if (row != -1) {
-                    list.setSelectedIndex(row);
+                    int index = list.getSelectedIndex();
+                    list.getSelectionModel().addSelectionInterval(index, index);
                 }
                 super.show(invoker, x, y);
             }
@@ -145,11 +144,13 @@ public class InstancesPane {
             }
         }
 
-        void removeElement(int i) {
-            selectedInstances.remove(i);
-            window.remove(instances.remove(i));
+        void removeElements(int... indices) {
+            for (int i = indices.length - 1; i >= 0; i--) {
+                int index = indices[i];
+                fireIntervalRemoved(this, index, index);
 
-            fireIntervalRemoved(this, instances.size(), instances.size());
+                instances.remove(index);
+            }
         }
 
         @Override

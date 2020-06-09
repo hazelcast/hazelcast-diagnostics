@@ -5,28 +5,29 @@ import org.jfree.chart.ChartPanel;
 import org.jfree.chart.JFreeChart;
 import org.jfree.chart.plot.PlotOrientation;
 import org.jfree.data.category.DefaultCategoryDataset;
-import org.jfree.data.function.Function2D;
-import org.jfree.data.function.NormalDistributionFunction2D;
-import org.jfree.data.xy.XYDataset;
 
 import javax.swing.*;
+import java.text.ParseException;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
+import java.util.Map.Entry;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public class InvocationProfilerPane {
-
+    private static final String INVOCATION_PROFILE_MARKER = "InvocationProfiler[";
 
     private final ChartPanel pane;
+    private final DefaultCategoryDataset dataset = new DefaultCategoryDataset();
     private long startMs = Long.MIN_VALUE;
     private long endMs = Long.MAX_VALUE;
     private Collection<InstanceDiagnostics> instanceDiagnosticsColl = new ArrayList<>();
 
     public InvocationProfilerPane() {
-        Function2D normal = new NormalDistributionFunction2D(0.0, 1.0);
-        XYDataset dataset = org.jfree.data.general.DatasetUtils.sampleFunction2D(normal, -5.0, 5.0, 100, "Normal");
-        JFreeChart invocationChart = ChartFactory.createXYLineChart(
+        JFreeChart latencyChart = ChartFactory.createBarChart(
                 "XY Series Demo",
                 "X",
                 "Y",
@@ -35,7 +36,7 @@ public class InvocationProfilerPane {
                 true,
                 true,
                 false);
-        this.pane = new ChartPanel(invocationChart);
+        pane = new ChartPanel(latencyChart);
     }
 
     public void setInstanceDiagnostics(Collection<InstanceDiagnostics> instanceDiagnostics) {
@@ -47,50 +48,123 @@ public class InvocationProfilerPane {
         this.endMs = endMs;
     }
 
+    public JComponent getComponent() {
+        return pane;
+    }
+
     public void update() {
-        for (int i = 0; i < 100; i++) {
-            System.out.println();
-        }
         for (InstanceDiagnostics profile : instanceDiagnosticsColl) {
             Iterator<Map.Entry<Long, String>> iter = profile
-                    .between(InstanceDiagnostics.TYPE_INVOCATION_PROFILER, 0, Long.MAX_VALUE);
+                    .between(InstanceDiagnostics.TYPE_INVOCATION_PROFILER, startMs, endMs);
             if (!iter.hasNext()) {
                 continue;
             }
             String startProfile = iter.next().getValue();
             String endProfile = null;
-
             while (iter.hasNext()) {
                 endProfile = iter.next().getValue();
             }
-            if (endProfile == null) {
-                continue;
+            if (endProfile != null) {
+                try {
+                    updateWithProfiles(startProfile, endProfile);
+                } catch (ParseException e) {
+                    e.printStackTrace();
+                }
             }
-            System.out.format("Invocation profile data: %s%n", endProfile);
-            int start = endProfile.indexOf("com.hazelcast.cache.impl.operation.CacheGetOperation[");
-            if (start == -1) {
-                continue;
-            }
-            int end = endProfile.indexOf("]]", start);
-            String s = endProfile.substring(start, end);
-            String[] distribution = s
-                    .substring(s.indexOf("latency-distribution[") + "latency-distribution[".length() + 1)
-                    .split("\\n");
-
-            final DefaultCategoryDataset dataset = new DefaultCategoryDataset();
-
-            for (String dist : distribution) {
-                dist = dist.trim();
-                int indexEquals = dist.indexOf("=");
-                long value = Long.parseLong(dist.substring(indexEquals + 1).replace(",", ""));
-                String key = dist.substring(0, indexEquals);
-                dataset.addValue(value, key, key);
-            }
-            break;
         }
     }
 
-    public JComponent getComponent() {
-        return pane;
+    @SuppressWarnings("unchecked")
+    private void updateWithProfiles(String startProfileStr, String endProfileStr) throws ParseException {
+        Map<String, Object> startProfile = parseProfile(startProfileStr);
+        Map<String, Object> endProfile = parseProfile(endProfileStr);
+
+        Iterator<String> it = endProfile.keySet().iterator();
+        if (!it.hasNext()) {
+            return;
+        }
+        String service = it.next();
+        Map<String, Object> profile = (Map<String, Object>) endProfile.get(service);
+        Map<String, String> latencyDistribution = (Map<String, String>) profile.get("latency-distribution");
+        System.out.format("%s: %s%n", service, latencyDistribution);
+
+        dataset.clear();
+        for (Entry<String, String> dataPoint : latencyDistribution.entrySet()) {
+            String bracket = dataPoint.getKey();
+            Long latency = Long.parseLong(bracket.substring(0, bracket.indexOf('.')));
+            long count = Long.parseLong(dataPoint.getValue());
+            dataset.addValue(count, latency, latency);
+        }
+
+    }
+
+    private static Map<String, Object> parseProfile(String profileStr) throws ParseException {
+        int markerStart = profileStr.indexOf(INVOCATION_PROFILE_MARKER);
+        if (markerStart < 0) {
+            throw new ParseException("Didn't find start of profile, '" + INVOCATION_PROFILE_MARKER + "'", 0);
+        }
+        return new MetricsParser(profileStr, markerStart + INVOCATION_PROFILE_MARKER.length() - 1).parseMap();
+    }
+
+    private static class MetricsParser {
+        private static final Pattern RE_KEY = Pattern.compile("\\s*(.+?)([=\\[])");
+        private static final Pattern RE_VALUE = Pattern.compile("(.+?)([\\s\\]])");
+
+        private final String string;
+        private int offset;
+
+        public MetricsParser(String string, int offset) {
+            this.string = string;
+            this.offset = offset;
+        }
+
+        Map<String, Object> parseMap() throws ParseException {
+            if (string.charAt(offset) != '[') {
+                throw new ParseException("[ expected: " + string.substring(offset), offset);
+            }
+            Map<String, Object> parsed = new HashMap<>();
+            offset++;
+            while (true) {
+                if (string.charAt(offset) == ']') {
+                    offset++;
+                    break;
+                }
+                Matcher keyAndDelimiter = find(RE_KEY);
+                if (keyAndDelimiter == null) {
+                    throw new ParseException("key expected: " + string.substring(offset), offset);
+                }
+                String key = keyAndDelimiter.group(1);
+                String delimiter = keyAndDelimiter.group(2);
+                if (delimiter.equals("=")) {
+                    offset = keyAndDelimiter.end(2);
+                    Matcher valueAndDelimiter = find(RE_VALUE);
+                    if (valueAndDelimiter == null) {
+                        throw new ParseException("Failed to parse value", key.length() + 1);
+                    }
+                    String value = valueAndDelimiter.group(1);
+                    parsed.put(key, value);
+                    if (valueAndDelimiter.group(2).equals("]")) {
+                        offset = valueAndDelimiter.end(2);
+                        break;
+                    }
+                    offset = valueAndDelimiter.end(2);
+                } else if (delimiter.equals("[")) {
+                    offset = keyAndDelimiter.start(2);
+                    parsed.put(key, parseMap());
+                } else {
+                    throw new ParseException("= or [ expected: " + string.substring(offset), offset);
+                }
+            }
+            return parsed;
+        }
+
+        private Matcher find(Pattern pattern) {
+            Matcher m = pattern.matcher(string);
+            m.region(offset, string.length());
+            if (!m.find()) {
+                return null;
+            }
+            return m;
+        }
     }
 }
