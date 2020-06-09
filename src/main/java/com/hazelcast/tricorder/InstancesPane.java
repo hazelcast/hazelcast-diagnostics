@@ -48,8 +48,8 @@ public class InstancesPane {
         fileChooser.setAcceptAllFileFilterUsed(false);
         fileChooser.setFileFilter(new FileFilter() {
             @Override
-            public boolean accept(File f) {
-                return f.isDirectory();
+            public boolean accept(File file) {
+                return file.isDirectory();
             }
 
             @Override
@@ -69,7 +69,6 @@ public class InstancesPane {
                 }
             }
         });
-
         return button;
     }
 
@@ -118,14 +117,16 @@ public class InstancesPane {
     private static class InstanceListModel extends AbstractListModel<String> implements ListSelectionListener {
 
         private final MainWindow window;
-        private final List<File> instances;
 
+        private final List<File> directories;
+        private final List<InstanceDiagnostics> instances;
         private final Set<Integer> selectedInstances;
 
         public InstanceListModel(MainWindow window) {
             this.window = window;
-            this.instances = new ArrayList<>();
 
+            this.directories = new ArrayList<>();
+            this.instances = new ArrayList<>();
             this.selectedInstances = new HashSet<>();
         }
 
@@ -137,8 +138,9 @@ public class InstancesPane {
                 throw new RuntimeException(e);
             }
 
-            if (!instances.contains(canonicalDirectory)) {
-                instances.add(canonicalDirectory);
+            if (!directories.contains(canonicalDirectory)) {
+                directories.add(canonicalDirectory);
+                instances.add(new InstanceDiagnostics(canonicalDirectory).analyze());
 
                 fireIntervalAdded(this, instances.size(), instances.size());
             }
@@ -150,6 +152,7 @@ public class InstancesPane {
                 fireIntervalRemoved(this, index, index);
 
                 instances.remove(index);
+                directories.remove(index);
             }
         }
 
@@ -160,7 +163,7 @@ public class InstancesPane {
 
         @Override
         public String getElementAt(int i) {
-            return instances.get(i).getName();
+            return directories.get(i).getName();
         }
 
         @Override
@@ -169,13 +172,11 @@ public class InstancesPane {
             if (!model.getValueIsAdjusting()) {
                 for (int i = 0; i <= instances.size(); i++) {
                     if (model.isSelectedIndex(i) && selectedInstances.add(i)) {
-                        InstanceDiagnostics instance = new InstanceDiagnostics(instances.get(i));
-                        instance.analyze();
-                        window.add(instance);
+                        window.add(instances.get(i));
                     }
 
                     if (!model.isSelectedIndex(i) && selectedInstances.remove(i)) {
-                        window.remove(instances.get(i));
+                        window.remove(directories.get(i));
                     }
                 }
             }
