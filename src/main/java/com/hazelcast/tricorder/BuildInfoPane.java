@@ -2,7 +2,8 @@ package com.hazelcast.tricorder;
 
 import javax.swing.*;
 import javax.swing.table.DefaultTableModel;
-import java.awt.*;
+import java.util.Iterator;
+import java.util.Map;
 
 public class BuildInfoPane {
 
@@ -18,15 +19,23 @@ public class BuildInfoPane {
         model.addColumn("Value");
 
         //buildInfoTextPane.setEditable(false);
-        pane =  new JScrollPane(table);
+        pane = new JScrollPane(table);
     }
 
-    public JComponent getComponent(){
+    public JComponent getComponent() {
         return pane;
     }
 
-    public void setMachine(Diagnostics machine) {
-        String[] lines = machine.between(Diagnostics.TYPE_BUILD_INFO, 0, Long.MAX_VALUE).next().getValue().split("\\n");
+    public void setInstanceDiagnostics(InstanceDiagnostics diagnostics) {
+        model.setRowCount(0);
+
+        Iterator<Map.Entry<Long, String>> it = diagnostics.between(InstanceDiagnostics.TYPE_BUILD_INFO, 0, Long.MAX_VALUE);
+        if(it.hasNext()){
+            System.out.println("No BuildInfo found in directory: "+diagnostics.getDirectory());
+            return;
+        }
+
+        String[] lines = it.next().getValue().split("\\n");
         for (String line : lines) {
             line = line.trim();
             int indexEquals = line.indexOf('=');

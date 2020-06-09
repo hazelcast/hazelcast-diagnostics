@@ -11,7 +11,6 @@ import org.jfree.data.general.DatasetUtilities;
 import org.jfree.data.xy.XYDataset;
 
 import javax.swing.*;
-import java.awt.*;
 import java.util.Arrays;
 import java.util.Iterator;
 import java.util.Map;
@@ -38,9 +37,8 @@ public class InvocationProfilerPane {
         this.pane = chartPanel;
     }
 
-    public void setMachine(Diagnostics machine){
-
-        Iterator<Map.Entry<Long, String>> between = machine.between(Diagnostics.TYPE_INVOCATION_PROFILER, 0, Long.MAX_VALUE);
+    public void setInstanceDiagnostics(InstanceDiagnostics instanceDiagnostics){
+        Iterator<Map.Entry<Long, String>> between = instanceDiagnostics.between(InstanceDiagnostics.TYPE_INVOCATION_PROFILER, 0, Long.MAX_VALUE);
         for (; ; ) {
             if (!between.hasNext()) {
                 return;

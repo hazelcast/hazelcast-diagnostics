@@ -2,6 +2,8 @@ package com.hazelcast.tricorder;
 
 import javax.swing.*;
 import javax.swing.table.DefaultTableModel;
+import java.util.Iterator;
+import java.util.Map;
 
 public class SystemPropertiesPane {
 
@@ -22,8 +24,15 @@ public class SystemPropertiesPane {
         return panel;
     }
 
-    public void setMachine(Diagnostics machine) {
-        String[] lines = machine.between(Diagnostics.TYPE_SYSTEM_PROPERTIES, 0, Long.MAX_VALUE).next().getValue().split("\\n");
+    public void setDiagnostics(InstanceDiagnostics machine) {
+        model.setRowCount(0);
+        Iterator<Map.Entry<Long, String>> it = machine.between(InstanceDiagnostics.TYPE_SYSTEM_PROPERTIES, 0, Long.MAX_VALUE);
+        if(!it.hasNext()){
+            System.out.println("No System Properties found in directory: "+machine.getDirectory());
+            return;
+        }
+
+        String[] lines = it.next().getValue().split("\\n");
         for (String line : lines) {
             int indexEquals = line.indexOf('=');
             if (indexEquals == -1) {

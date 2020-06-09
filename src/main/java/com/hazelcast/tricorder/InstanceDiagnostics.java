@@ -13,7 +13,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 
-public class Diagnostics {
+public class InstanceDiagnostics {
     public static final int TYPE_UNKNOWN = 0;
     public static final int TYPE_METRIC = 1;
     public static final int TYPE_BUILD_INFO = 2;

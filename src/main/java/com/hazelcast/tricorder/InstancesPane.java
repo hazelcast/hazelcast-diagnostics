@@ -6,11 +6,11 @@ import java.awt.event.ActionEvent;
 import java.awt.event.ActionListener;
 import java.io.File;
 
-public class MachinesPane {
+public class InstancesPane {
 
     private final JPanel component;
 
-    public MachinesPane() {
+    public InstancesPane() {
         JPanel panel = new JPanel();
 
         final JFileChooser fc = new JFileChooser();
@@ -21,7 +21,7 @@ public class MachinesPane {
         DefaultListModel listModel = new DefaultListModel();
         list.setModel(listModel);
         JButton button = new JButton();
-        button.setText("Add directories");
+        button.setText("Add instance directories");
         button.addActionListener(new ActionListener() {
             @Override
             public void actionPerformed(ActionEvent e) {

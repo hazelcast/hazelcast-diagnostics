@@ -10,34 +10,33 @@ import java.util.List;
 public class MainWindow {
     private final RangeSlider rangeSlider;
     private JFrame window;
-    private List<Diagnostics> machines = new ArrayList<>();
+    private List<InstanceDiagnostics> machines = new ArrayList<>();
     private SystemPropertiesPane systemPropertiesPane = new SystemPropertiesPane();
     private BuildInfoPane buildInfoPane = new BuildInfoPane();
-    private MachinesPane machinesPane = new MachinesPane();
+    private InstancesPane machinesPane = new InstancesPane();
     private InvocationProfilerPane invocationProfilerPane = new InvocationProfilerPane();
 
     public JFrame getJFrame() {
         return window;
     }
 
-    public void add(Diagnostics machine) {
-        machines.add(machine);
-
+    public void add(InstanceDiagnostics instanceDiagnostics) {
+        machines.add(instanceDiagnostics);
 
         BoundedRangeModel model = rangeSlider.getModel();
-        model.setMinimum((int) machine.startMillis());
-        model.setMaximum((int) machine.endMillis());
-        model.setValue((int) machine.startMillis());
-        model.setExtent((int) (machine.endMillis() - machine.startMillis()));
+        model.setMinimum((int) instanceDiagnostics.startMillis());
+        model.setMaximum((int) instanceDiagnostics.endMillis());
+        model.setValue((int) instanceDiagnostics.startMillis());
+        model.setExtent((int) (instanceDiagnostics.endMillis() - instanceDiagnostics.startMillis()));
         // model.setValueIsAdjusting(true);
         //  rangeSlider.setValue();
 
-        System.out.println(machine.startMillis());
-        System.out.println(machine.endMillis());
+        System.out.println(instanceDiagnostics.startMillis());
+        System.out.println(instanceDiagnostics.endMillis());
 
-        systemPropertiesPane.setMachine(machine);
-        buildInfoPane.setMachine(machine);
-        invocationProfilerPane.setMachine(machine);
+        systemPropertiesPane.setDiagnostics(instanceDiagnostics);
+        buildInfoPane.setInstanceDiagnostics(instanceDiagnostics);
+        invocationProfilerPane.setInstanceDiagnostics(instanceDiagnostics);
     }
 
     public MainWindow() {
