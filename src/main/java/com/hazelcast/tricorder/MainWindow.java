@@ -1,34 +1,20 @@
 package com.hazelcast.tricorder;
 
 import com.jidesoft.swing.RangeSlider;
-import org.jfree.chart.ChartFactory;
-import org.jfree.chart.ChartPanel;
-import org.jfree.chart.JFreeChart;
-import org.jfree.chart.plot.PlotOrientation;
-import org.jfree.data.category.DefaultCategoryDataset;
-import org.jfree.data.function.Function2D;
-import org.jfree.data.function.NormalDistributionFunction2D;
-import org.jfree.data.general.DatasetUtilities;
-import org.jfree.data.xy.XYDataset;
 
 import javax.swing.*;
 import java.awt.*;
-import java.awt.event.ActionEvent;
-import java.awt.event.ActionListener;
-import java.io.File;
 import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Iterator;
 import java.util.List;
-import java.util.Map;
 
 public class MainWindow {
     private final RangeSlider rangeSlider;
     private JFrame window;
     private List<Diagnostics> machines = new ArrayList<>();
-    private JTextPane propertiesTextPane;
-    private JTextPane buildInfoTextPane;
-    private JFreeChart invocationChart;
+    private SystemPropertiesPane systemPropertiesPane = new SystemPropertiesPane();
+    private BuildInfoPane buildInfoPane = new BuildInfoPane();
+    private MachinesPane machinesPane = new MachinesPane();
+    private InvocationProfilerPane invocationProfilerPane = new InvocationProfilerPane();
 
     public JFrame getJFrame() {
         return window;
@@ -49,65 +35,9 @@ public class MainWindow {
         System.out.println(machine.startMillis());
         System.out.println(machine.endMillis());
 
-        updateSystemProperties(machine);
-        updateBuildInfo(machine);
-
-        Iterator<Map.Entry<Long, String>> between = machine.between(Diagnostics.TYPE_INVOCATION_PROFILER, 0, Long.MAX_VALUE);
-        for (; ; ) {
-            if (!between.hasNext()) {
-                return;
-            }
-            String invocationProfileData = between.next().getValue();
-            int start = invocationProfileData.indexOf("com.hazelcast.cache.impl.operation.CacheGetOperation[");
-            if (start == -1) {
-                continue;
-            }
-            int end = invocationProfileData.indexOf("]]", start);
-            //System.out.println("start:" + start + " end:" + end);
-            String s = invocationProfileData.substring(start, end);
-            String[] distribution = s.substring(s.indexOf("latency-distribution[") + "latency-distribution[".length() + 1).split("\\n");
-
-            final DefaultCategoryDataset dataset = new DefaultCategoryDataset();
-
-            for (String dist : distribution) {
-                dist = dist.trim();
-                int indexEquals = dist.indexOf("=");
-                long value = Long.parseLong(dist.substring(indexEquals + 1).replace(",", ""));
-                String key = dist.substring(0, indexEquals);
-                dataset.addValue(value, key, key);
-            }
-            // invocationChart.set.
-            System.out.println(Arrays.asList(distribution));
-            break;
-        }
-    }
-
-    private void updateBuildInfo(Diagnostics machine) {
-        String[] lines = machine.between(Diagnostics.TYPE_BUILD_INFO, 0, Long.MAX_VALUE).next().getValue().split("\\n");
-        StringBuffer sb = new StringBuffer();
-        for (String line: lines) {
-            int indexEquals = line.indexOf('=');
-            if (indexEquals == -1) {
-                continue;
-            }
-
-            sb.append(line.trim().replace("]","")).append("\n");
-        }
-        buildInfoTextPane.setText(sb.toString());
-    }
-
-    private void updateSystemProperties(Diagnostics machine) {
-        String[] lines = machine.between(Diagnostics.TYPE_SYSTEM_PROPERTIES, 0, Long.MAX_VALUE).next().getValue().split("\\n");
-        StringBuffer sb = new StringBuffer();
-        for (String line: lines) {
-            int indexEquals = line.indexOf('=');
-            if (indexEquals == -1) {
-                continue;
-            }
-
-            sb.append(line.trim().replace("]","")).append("\n");
-        }
-        propertiesTextPane.setText(sb.toString());
+        systemPropertiesPane.setMachine(machine);
+        buildInfoPane.setMachine(machine);
+        invocationProfilerPane.setMachine(machine);
     }
 
     public MainWindow() {
@@ -122,18 +52,6 @@ public class MainWindow {
         buildMenu(window);
 
         JTabbedPane tabbedPane = newTabbedPane();
-
-//        public static final int TYPE_OPERATION_THREAD_SAMPLES = 9;
-//        public static final int TYPE_CONNECTION_REMOVED = 10;
-//        public static final int TYPE_HAZELCAST_INSTANCE = 11;
-//        public static final int TYPE_MEMBER_REMOVED = 12;
-//        public static final int TYPE_MEMBER_ADDED = 13;
-//        public static final int TYPE_CLUSTER_VERSION_CHANGE = 14;
-//        public static final int TYPE_LIFECYCLE = 15;
-//        public static final int TYPE_CONNECTION_ADDED = 16;
-//        public static final int TYPES = TYPE_CONNECTION_ADDED + 1;
-
-
         JPanel mainPanel = new JPanel();
         mainPanel.setLayout(new BorderLayout());
         rangeSlider = newRangeSlider();
@@ -154,16 +72,14 @@ public class MainWindow {
         JTabbedPane tabbedPane = new JTabbedPane();
         tabbedPane.setTabPlacement(JTabbedPane.BOTTOM);
 
-
-        tabbedPane.addTab("Machines", null, newMachinesPanel());
+        tabbedPane.addTab("Machines", null, machinesPane.getComponent());
 
         JComponent panel1 = new JPanel();
         tabbedPane.addTab("Metrics", null, panel1);
 
-        JComponent panel2 = new JPanel();
-        tabbedPane.addTab("Build Info", null, newBuildInfoPane());
+        tabbedPane.addTab("Build Info", null, buildInfoPane.getComponent());
 
-        tabbedPane.addTab("System properties", null, newPropertiesPane());
+        tabbedPane.addTab("System properties", null, systemPropertiesPane.getComponent());
 
         JComponent panel4 = new JPanel();
         tabbedPane.addTab("Slow Operations", null, panel4);
@@ -171,7 +87,7 @@ public class MainWindow {
         JComponent panel5 = new JPanel();
         tabbedPane.addTab("Invocations", null, panel5);
 
-        tabbedPane.addTab("Invocation Profiler", null, newInvocationProfilerPane());
+        tabbedPane.addTab("Invocation Profiler", null, invocationProfilerPane.getComponent());
 
         JComponent panel7 = new JPanel();
         tabbedPane.addTab("Operation profiler", null, panel7);
@@ -185,67 +101,6 @@ public class MainWindow {
         JComponent panel10 = new JPanel();
         tabbedPane.addTab("Slow Operations", null, panel10);
         return tabbedPane;
-    }
-
-    private Component newMachinesPanel() {
-        JPanel panel = new JPanel();
-
-        final JFileChooser fc = new JFileChooser();
-        fc.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
-        fc.setMultiSelectionEnabled(true);
-
-        JList list = new JList();
-        DefaultListModel listModel = new DefaultListModel();
-        list.setModel(listModel);
-        JButton button = new JButton();
-        button.setText("Add directories");
-        button.addActionListener(new ActionListener() {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                int returnVal = fc.showOpenDialog(panel);
-                if (returnVal == JFileChooser.APPROVE_OPTION) {
-                    File[] files = fc.getSelectedFiles();
-                    for(File file: files){
-                        if(!listModel.contains(file)){
-                            listModel.addElement(file);
-                        }
-                    }
-                }
-            }
-        });
-
-        panel.setLayout(new BorderLayout());
-        panel.add(list, BorderLayout.CENTER);
-        panel.add(button, BorderLayout.WEST);
-        return panel;
-    }
-
-    private Component newInvocationProfilerPane() {
-        Function2D normal = new NormalDistributionFunction2D(0.0, 1.0);
-        XYDataset dataset = DatasetUtilities.sampleFunction2D(normal, -5.0, 5.0, 100, "Normal");
-        invocationChart = ChartFactory.createXYLineChart(
-                "XY Series Demo",
-                "X",
-                "Y",
-                dataset,
-                PlotOrientation.VERTICAL,
-                true,
-                true,
-                false);
-        ChartPanel chartPanel = new ChartPanel(invocationChart);
-        return chartPanel;
-    }
-
-    private Component newBuildInfoPane() {
-        buildInfoTextPane = new JTextPane();
-        buildInfoTextPane.setEditable(false);
-        return new JScrollPane(buildInfoTextPane);
-    }
-
-    private JComponent newPropertiesPane() {
-        propertiesTextPane = new JTextPane();
-        propertiesTextPane.setEditable(false);
-        return new JScrollPane(propertiesTextPane);
     }
 
     private static void buildMenu(JFrame window) {
