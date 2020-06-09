@@ -36,7 +36,8 @@ public class MainWindow {
         timeSelectorPane.setInstanceDiagnostics(machines.values());
 //        systemPropertiesPane.setDiagnostics(instanceDiagnostics);
 //        buildInfoPane.setInstanceDiagnostics(instanceDiagnostics);
-//        invocationProfilerPane.setInstanceDiagnostics(instanceDiagnostics);
+        invocationProfilerPane.setInstanceDiagnostics(machines.values());
+        invocationProfilerPane.update();
 
         memoryPane.setInstanceDiagnostics(machines.values());
         memoryPane.update();
@@ -81,12 +82,14 @@ public class MainWindow {
             long begin = timeSelectorPane.getStartMs();
             long end = timeSelectorPane.getEndMs();
 
-            // System.out.println(begin + " " + end);
             cpuUtilizationPane.setRange(begin, end);
             cpuUtilizationPane.update();
 
             memoryPane.setRange(begin, end);
             memoryPane.update();
+
+            invocationProfilerPane.setRange(begin, end);
+            invocationProfilerPane.update();
 
             metricsPane.setRange(begin, end);
             metricsPane.update();
