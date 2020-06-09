@@ -17,6 +17,8 @@ public class MainWindow {
     private MetricsPane metricsPane = new MetricsPane();
     private TimeSelectorPane timeSelectorPane = new TimeSelectorPane();
     private InvocationsPlane invocationsPlane = new InvocationsPlane();
+    private OperationsPlane operationsPlane = new OperationsPlane();
+
     public JFrame getJFrame() {
         return window;
     }
@@ -40,6 +42,9 @@ public class MainWindow {
 
         invocationsPlane.setInstanceDiagnostics(machines);
         invocationsPlane.update();
+
+        operationsPlane.setInstanceDiagnostics(machines);
+        operationsPlane.update();
     }
 
     public MainWindow() {
@@ -72,6 +77,9 @@ public class MainWindow {
 
             invocationsPlane.setRange(begin, end);
             invocationsPlane.update();
+
+            operationsPlane.setRange(begin, end);
+            operationsPlane.update();
         });
 
         mainPanel.add(timeSelectorPane.getComponent(), BorderLayout.NORTH);
@@ -93,6 +101,7 @@ public class MainWindow {
         tabbedPane.addTab("Slow Operations", null, new JPanel());
         tabbedPane.addTab("Invocations", null, invocationsPlane.getComponent());
         tabbedPane.addTab("Invocation Profiler", null, invocationProfilerPane.getComponent());
+        tabbedPane.addTab("Operations", null, operationsPlane.getComponent());
         tabbedPane.addTab("Operation profiler", null, new JPanel());
         tabbedPane.addTab("Slow operation thread sampler", null, new JPanel());
         tabbedPane.addTab("Slow Operations", null, new JPanel());

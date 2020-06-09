@@ -14,7 +14,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 
-public class InvocationsPlane {
+public class OperationsPlane {
 
     private final JPanel component;
     private final JFreeChart invocationChart;
@@ -24,10 +24,10 @@ public class InvocationsPlane {
     private long startMs = Long.MIN_VALUE;
     private long endMs = Long.MAX_VALUE;
 
-    public InvocationsPlane() {
+    public OperationsPlane() {
         this.collection = new TimeSeriesCollection();
         this.invocationChart = ChartFactory.createXYLineChart(
-                "Invocation/s",
+                "Operations/s",
                 "X",
                 "Y",
                 collection,
@@ -55,7 +55,7 @@ public class InvocationsPlane {
         }
 
         for (InstanceDiagnostics diagnostics : diagnosticsList) {
-            Iterator<Map.Entry<Long, Long>> iterator = diagnostics.longMetricsBetween("[unit=count,metric=operation.invocations.lastCallId]", startMs, endMs);
+            Iterator<Map.Entry<Long, Long>> iterator = diagnostics.longMetricsBetween("[unit=count,metric=operation.completedCount]", startMs, endMs);
 
             if (!iterator.hasNext()) {
                 continue;

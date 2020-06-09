@@ -13,6 +13,8 @@ import javax.swing.*;
 import java.awt.*;
 import java.awt.event.ActionEvent;
 import java.awt.event.ActionListener;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -76,7 +78,11 @@ public class MetricsPane {
         for (InstanceDiagnostics diagnostics : diagnosticsList) {
             metricsNames.addAll(diagnostics.getAvailableMetrics());
         }
-        for (String metricName : metricsNames) {
+
+        List<String> metrics = new ArrayList<>(metricsNames);
+        Collections.sort(metrics);
+
+        for (String metricName : metrics) {
             comboBoxModel.addElement(metricName);
         }
         if (diagnosticsList.isEmpty()) {
