@@ -8,9 +8,12 @@ import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.util.AbstractMap;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.TreeMap;
 
 public class InstanceDiagnostics {
@@ -37,6 +40,7 @@ public class InstanceDiagnostics {
     private List<DiagnosticsFile> diagnosticsFiles;
     private long startMs = Long.MAX_VALUE;
     private long endMs = Long.MIN_VALUE;
+    private Set<String> availableMetrics = new HashSet<>();
 
     public File getDirectory() {
         return directory;
@@ -49,22 +53,8 @@ public class InstanceDiagnostics {
     public void analyze() {
         try {
             diagnosticsFiles = diagnosticsFiles();
-            // System.out.println(diagnosticsFiles);
-
             for (DiagnosticsFile diagnosticsFile : diagnosticsFiles) {
                 analyze(diagnosticsFile);
-
-//                for (int k = 0; k < diagnosticsFile.indices.length; k++) {
-//                    DiagnosticsIndex index = diagnosticsFile.indices[k];
-//                    System.out.println(index.treeMap.size());
-//                }
-//
-//                DiagnosticsIndex index = diagnosticsFile.indices[TYPE_INVOCATION_PROFILER];
-//                for (Map.Entry<Long, DiagnosticsIndexEntry> entry : index.treeMap.entrySet()) {
-//                    DiagnosticsIndexEntry indexEntry = entry.getValue();
-//                    System.out.println("\n" + entry.getKey());
-//                    System.out.print(diagnosticsFile.load(indexEntry.offset, indexEntry.length));
-//                }
             }
         } catch (IOException e) {
             throw new RuntimeException(e);
@@ -81,7 +71,6 @@ public class InstanceDiagnostics {
         char[] buffer = new char[1024];
         StringBuilder sb = new StringBuilder();
 
-        Metadata metadata = new Metadata();
         for (; ; ) {
             int read = br.read(buffer);
             if (read == -1) {
@@ -100,25 +89,7 @@ public class InstanceDiagnostics {
                 } else if (c == ']') {
                     depth--;
                     if (depth == 0) {
-                        analyze(sb, metadata);
-                        if (metadata.timestamp > file.endMs) {
-                            file.endMs = metadata.timestamp;
-                        }
-                        if (metadata.timestamp > endMs) {
-                            endMs = metadata.timestamp;
-                        }
-                        if (metadata.timestamp < file.startMs) {
-                            file.startMs = metadata.timestamp;
-                        }
-                        if (metadata.timestamp < startMs) {
-                            startMs = metadata.timestamp;
-                        }
-
-                        DiagnosticsIndexEntry fragment = new DiagnosticsIndexEntry();
-                        fragment.offset = startOffset;
-                        fragment.length = (offset - startOffset) + 1;
-                        file.indices[metadata.type].treeMap.put(metadata.timestamp, fragment);
-                        file.load(fragment.offset, fragment.length);
+                        analyze(sb, file, offset, startOffset);
                         sb.setLength(0);
                     }
                 }
@@ -128,12 +99,7 @@ public class InstanceDiagnostics {
         }
     }
 
-    private static class Metadata {
-        int type;
-        long timestamp;
-    }
-
-    private void analyze(StringBuilder sb, Metadata metadata) {
+    private void analyze(StringBuilder sb, DiagnosticsFile file, int offset, int startOffset) {
         int spaces = 0;
         long timestamp = 0;
         for (int k = 0; k < sb.length(); k++) {
@@ -144,46 +110,73 @@ public class InstanceDiagnostics {
                 timestamp = timestamp * 10 + Character.getNumericValue(c);
             }
         }
-        metadata.timestamp = timestamp;
 
+        int type;
         // very inefficient.
         if (sb.indexOf("Metric[") != -1) {
-            metadata.type = TYPE_METRIC;
+            type = TYPE_METRIC;
         } else if (sb.indexOf("BuildInfo[") != -1) {
-            metadata.type = TYPE_BUILD_INFO;
+            type = TYPE_BUILD_INFO;
         } else if (sb.indexOf("SystemProperties[") != -1) {
-            metadata.type = TYPE_SYSTEM_PROPERTIES;
+            type = TYPE_SYSTEM_PROPERTIES;
         } else if (sb.indexOf("ConfigProperties[") != -1) {
-            metadata.type = TYPE_CONFIG_PROPERTIES;
+            type = TYPE_CONFIG_PROPERTIES;
         } else if (sb.indexOf("SlowOperations[") != -1) {
-            metadata.type = TYPE_SLOW_OPERATIONS;
+            type = TYPE_SLOW_OPERATIONS;
         } else if (sb.indexOf("Invocations[") != -1) {
-            metadata.type = TYPE_INVOCATIONS;
+            type = TYPE_INVOCATIONS;
         } else if (sb.indexOf("InvocationProfiler[") != -1) {
-            metadata.type = TYPE_INVOCATION_PROFILER;
+            type = TYPE_INVOCATION_PROFILER;
         } else if (sb.indexOf("OperationsProfiler[") != -1) {
-            metadata.type = TYPE_OPERATION_PROFILER;
+            type = TYPE_OPERATION_PROFILER;
         } else if (sb.indexOf("ConnectionRemoved[") != -1) {
-            metadata.type = TYPE_CONNECTION_REMOVED;
+            type = TYPE_CONNECTION_REMOVED;
         } else if (sb.indexOf("OperationThreadSamples[") != -1) {
-            metadata.type = TYPE_OPERATION_THREAD_SAMPLES;
+            type = TYPE_OPERATION_THREAD_SAMPLES;
         } else if (sb.indexOf("HazelcastInstance[") != -1) {
-            metadata.type = TYPE_HAZELCAST_INSTANCE;
+            type = TYPE_HAZELCAST_INSTANCE;
         } else if (sb.indexOf("MemberRemoved[") != -1) {
-            metadata.type = TYPE_MEMBER_REMOVED;
+            type = TYPE_MEMBER_REMOVED;
         } else if (sb.indexOf("MemberAdded[") != -1) {
-            metadata.type = TYPE_MEMBER_ADDED;
+            type = TYPE_MEMBER_ADDED;
         } else if (sb.indexOf("ClusterVersionChanged[") != -1) {
-            metadata.type = TYPE_CLUSTER_VERSION_CHANGE;
+            type = TYPE_CLUSTER_VERSION_CHANGE;
         } else if (sb.indexOf("Lifecycle[") != -1) {
-            metadata.type = TYPE_LIFECYCLE;
+            type = TYPE_LIFECYCLE;
         } else if (sb.indexOf("ConnectionAdded[") != -1) {
-            metadata.type = TYPE_CONNECTION_ADDED;
+            type = TYPE_CONNECTION_ADDED;
         } else {
             System.out.println("------------------------------------");
             System.out.println(sb.toString());
             System.out.println("------------------------------------");
-            metadata.type = TYPE_UNKNOWN;
+            type = TYPE_UNKNOWN;
+        }
+
+        if (timestamp > file.endMs) file.endMs = timestamp;
+        if (timestamp > endMs) endMs = timestamp;
+        if (timestamp < file.startMs) file.startMs = timestamp;
+        if (timestamp < startMs) startMs = timestamp;
+
+        DiagnosticsIndexEntry fragment = new DiagnosticsIndexEntry();
+        fragment.offset = startOffset;
+        fragment.length = (offset - startOffset) + 1;
+
+        if (type == TYPE_METRIC) {
+            int indexLastEquals = sb.lastIndexOf("=");
+            int indexFirstSquareBracket = sb.indexOf("[");
+            String key = sb.substring(indexFirstSquareBracket+1, indexLastEquals);
+
+            System.out.println(key);
+            availableMetrics.add(key);
+
+            DiagnosticsIndex index = file.metricsIndices.get(key);
+            if (index == null) {
+                index = new DiagnosticsIndex(file);
+                file.metricsIndices.put(key, index);
+            }
+            index.treeMap.put(timestamp, fragment);
+        } else {
+            file.indices[type].treeMap.put(timestamp, fragment);
         }
     }
 
@@ -209,6 +202,61 @@ public class InstanceDiagnostics {
     public Iterator<Map.Entry<Long, String>> between(int type, long startMs, long endMs) {
         return new IteratorImpl(type, startMs, endMs);
     }
+
+    public Iterator<Map.Entry<Long, String>> metricsbetween(String metricName, long startMs, long endMs) {
+        return new MetricsIterator(metricName, startMs, endMs);
+    }
+
+    private class MetricsIterator implements Iterator<Map.Entry<Long, String>> {
+        private final String name;
+        private final long startMs;
+        private final long endMs;
+        private Map.Entry<Long, String> entry;
+        private Iterator<Map.Entry<Long, DiagnosticsIndexEntry>> iterator;
+        private Iterator<DiagnosticsFile> diagnosticsFileIterator = diagnosticsFiles.iterator();
+        private DiagnosticsFile diagnosticsFile;
+
+        public MetricsIterator(String name, long startMs, long endMs) {
+            this.name = name;
+            this.startMs = startMs;
+            this.endMs = endMs;
+        }
+
+        @Override
+        public boolean hasNext() {
+            if (entry != null) {
+                return true;
+            }
+
+            for (; ; ) {
+                if (iterator != null && iterator.hasNext()) {
+                    Map.Entry<Long, DiagnosticsIndexEntry> e = iterator.next();
+                    DiagnosticsIndexEntry indexEntry = e.getValue();
+                    String value = diagnosticsFile.load(indexEntry.offset, indexEntry.length);
+                    entry = new AbstractMap.SimpleEntry<>(e.getKey(), value);
+                    return true;
+                }
+
+                if (!diagnosticsFileIterator.hasNext()) {
+                    return false;
+                }
+
+                diagnosticsFile = diagnosticsFileIterator.next();
+                iterator = diagnosticsFile.metricsIndices.get(name).treeMap.subMap(startMs, true, endMs, true).entrySet().iterator();
+            }
+        }
+
+        @Override
+        public Map.Entry<Long, String> next() {
+            if (hasNext()) {
+                Map.Entry<Long, String> tmp = entry;
+                entry = null;
+                return tmp;
+            }
+            return null;
+        }
+    }
+
 
     private class IteratorImpl implements Iterator<Map.Entry<Long, String>> {
         private final int type;
@@ -262,6 +310,7 @@ public class InstanceDiagnostics {
 
     private static class DiagnosticsFile {
         private final DiagnosticsIndex[] indices = new DiagnosticsIndex[TYPES];
+        private final Map<String, DiagnosticsIndex> metricsIndices = new HashMap<>();
         private final File file;
         private final RandomAccessFile randomAccessFile;
         private long startMs = Long.MIN_VALUE;

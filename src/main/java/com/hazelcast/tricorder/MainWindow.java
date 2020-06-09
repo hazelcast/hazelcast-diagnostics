@@ -15,6 +15,7 @@ public class MainWindow {
     private BuildInfoPane buildInfoPane = new BuildInfoPane();
     private InstancesPane machinesPane = new InstancesPane();
     private InvocationProfilerPane invocationProfilerPane = new InvocationProfilerPane();
+    private MemoryPane memoryPane = new MemoryPane();
 
     public JFrame getJFrame() {
         return window;
@@ -37,6 +38,7 @@ public class MainWindow {
         systemPropertiesPane.setDiagnostics(instanceDiagnostics);
         buildInfoPane.setInstanceDiagnostics(instanceDiagnostics);
         invocationProfilerPane.setInstanceDiagnostics(instanceDiagnostics);
+        memoryPane.setInstanceDiagnostics(instanceDiagnostics);
     }
 
     public MainWindow() {
@@ -75,6 +77,8 @@ public class MainWindow {
 
         JComponent panel1 = new JPanel();
         tabbedPane.addTab("Metrics", null, panel1);
+
+        tabbedPane.addTab("Memory", null, memoryPane.getComponent());
 
         tabbedPane.addTab("Build Info", null, buildInfoPane.getComponent());
 

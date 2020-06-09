@@ -7,7 +7,6 @@ import org.jfree.chart.plot.PlotOrientation;
 import org.jfree.data.category.DefaultCategoryDataset;
 import org.jfree.data.function.Function2D;
 import org.jfree.data.function.NormalDistributionFunction2D;
-import org.jfree.data.general.DatasetUtilities;
 import org.jfree.data.xy.XYDataset;
 
 import javax.swing.*;
@@ -23,7 +22,7 @@ public class InvocationProfilerPane {
 
     public InvocationProfilerPane() {
         Function2D normal = new NormalDistributionFunction2D(0.0, 1.0);
-        XYDataset dataset = DatasetUtilities.sampleFunction2D(normal, -5.0, 5.0, 100, "Normal");
+        XYDataset dataset = org.jfree.data.general.DatasetUtils.sampleFunction2D(normal, -5.0, 5.0, 100, "Normal");
         invocationChart = ChartFactory.createXYLineChart(
                 "XY Series Demo",
                 "X",
@@ -37,7 +36,7 @@ public class InvocationProfilerPane {
         this.pane = chartPanel;
     }
 
-    public void setInstanceDiagnostics(InstanceDiagnostics instanceDiagnostics){
+    public void setInstanceDiagnostics(InstanceDiagnostics instanceDiagnostics) {
         Iterator<Map.Entry<Long, String>> between = instanceDiagnostics.between(InstanceDiagnostics.TYPE_INVOCATION_PROFILER, 0, Long.MAX_VALUE);
         for (; ; ) {
             if (!between.hasNext()) {
@@ -68,7 +67,7 @@ public class InvocationProfilerPane {
         }
     }
 
-    public JComponent getComponent(){
+    public JComponent getComponent() {
         return pane;
     }
 }
