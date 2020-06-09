@@ -2,12 +2,15 @@ package com.hazelcast.tricorder;
 
 import javax.swing.*;
 import java.awt.*;
-import java.util.ArrayList;
-import java.util.List;
+import java.io.File;
+import java.util.HashMap;
+import java.util.Map;
 
 public class MainWindow {
+
     private JFrame window;
-    private List<InstanceDiagnostics> machines = new ArrayList<>();
+    private Map<File, InstanceDiagnostics> machines = new HashMap<>();
+
     private SystemPropertiesPane systemPropertiesPane = new SystemPropertiesPane();
     private BuildInfoPane buildInfoPane = new BuildInfoPane();
     private InstancesPane machinesPane;
@@ -22,20 +25,20 @@ public class MainWindow {
     }
 
     public void add(InstanceDiagnostics instanceDiagnostics) {
-        machines.add(instanceDiagnostics);
+        machines.put(instanceDiagnostics.getDirectory(), instanceDiagnostics);
 
-        timeSelectorPane.setInstanceDiagnostics(machines);
+        timeSelectorPane.setInstanceDiagnostics(machines.values());
         systemPropertiesPane.setDiagnostics(instanceDiagnostics);
         buildInfoPane.setInstanceDiagnostics(instanceDiagnostics);
         invocationProfilerPane.setInstanceDiagnostics(instanceDiagnostics);
 
-        memoryPane.setInstanceDiagnostics(machines);
+        memoryPane.setInstanceDiagnostics(machines.values());
         memoryPane.update();
 
-        cpuUtilizationPane.setInstanceDiagnostics(machines);
+        cpuUtilizationPane.setInstanceDiagnostics(machines.values());
         cpuUtilizationPane.update();
 
-        metricsPane.setInstanceDiagnostics(machines);
+        metricsPane.setInstanceDiagnostics(machines.values());
         metricsPane.update();
     }
 
@@ -48,6 +51,9 @@ public class MainWindow {
         window.setDefaultCloseOperation(WindowConstants.EXIT_ON_CLOSE);
 
         machinesPane = new InstancesPane(this);
+        machinesPane.addFile(new File("data/member"));
+        machinesPane.addFile(new File("data/litemember"));
+
         buildMenu(window);
 
         JTabbedPane tabbedPane = newTabbedPane();

@@ -4,7 +4,7 @@ import com.jidesoft.swing.RangeSlider;
 
 import javax.swing.*;
 import javax.swing.event.ChangeListener;
-import java.util.List;
+import java.util.Collection;
 
 public class TimeSelectorPane {
 
@@ -36,7 +36,7 @@ public class TimeSelectorPane {
         return this.component;
     }
 
-    public void setInstanceDiagnostics(List<InstanceDiagnostics> instanceDiagnosticsList) {
+    public void setInstanceDiagnostics(Collection<InstanceDiagnostics> instanceDiagnosticsList) {
         if (instanceDiagnosticsList.isEmpty()) {
             startMs = 0;
             endMs = 0;

@@ -9,9 +9,12 @@ public class InstancesPane {
 
     private static final String FILE_CHOOSER_DIALOG_TITLE = "Choose instance directory";
     private static final String FILE_CHOOSER_FILTER_TEXT = "Instance directory";
-    private static final String BUTTON_LABEL = "Add instance directories";
+    private static final String ADD_INSTANCE_BUTTON_LABEL = "Add instance directories";
 
     private final JPanel component;
+
+    private final MainWindow window;
+    private final DefaultListModel<File> listModel;
 
     public InstancesPane(MainWindow window) {
         JPanel panel = new JPanel();
@@ -34,23 +37,20 @@ public class InstancesPane {
             }
         });
 
+        this.window = window;
+        this.listModel = new DefaultListModel<>();
         JList<File> list = new JList<>();
-        DefaultListModel<File> listModel = new DefaultListModel<>();
         list.setModel(listModel);
 
-        JButton button = new JButton();
-        button.setText(BUTTON_LABEL);
-        button.addActionListener(e -> {
+        JButton addInstanceButton = new JButton();
+        addInstanceButton.setText(ADD_INSTANCE_BUTTON_LABEL);
+        addInstanceButton.addActionListener(e -> {
             int returnVal = fc.showOpenDialog(panel);
             if (returnVal == JFileChooser.APPROVE_OPTION) {
                 File[] files = fc.getSelectedFiles();
                 for (File file : files) {
                     if (!listModel.contains(file)) {
-                        listModel.addElement(file);
-
-                        InstanceDiagnostics instance = new InstanceDiagnostics(file);
-                        instance.analyze();
-                        window.add(instance);
+                        addFile(file);
                     }
                 }
             }
@@ -58,8 +58,17 @@ public class InstancesPane {
 
         panel.setLayout(new BorderLayout());
         panel.add(list, BorderLayout.CENTER);
-        panel.add(button, BorderLayout.WEST);
+        panel.add(addInstanceButton, BorderLayout.WEST);
         this.component = panel;
+    }
+
+    @Deprecated
+    void addFile(File file) {
+        listModel.addElement(file);
+
+        InstanceDiagnostics instance = new InstanceDiagnostics(file);
+        instance.analyze();
+        window.add(instance);
     }
 
     public JComponent getComponent() {
