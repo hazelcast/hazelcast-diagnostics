@@ -10,7 +10,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 public class MainWindow {
-    private final RangeSlider rangeSlider;
+    private RangeSlider rangeSlider;
     private JFrame window;
     private List<InstanceDiagnostics> machines = new ArrayList<>();
     private SystemPropertiesPane systemPropertiesPane = new SystemPropertiesPane();
@@ -19,6 +19,7 @@ public class MainWindow {
     private InvocationProfilerPane invocationProfilerPane = new InvocationProfilerPane();
     private MemoryPane memoryPane = new MemoryPane();
     private CpuUtilizationPane cpuUtilizationPane = new CpuUtilizationPane();
+    private MetricsPane metricsPane = new MetricsPane();
     private long durationMs;
     private long startMs;
 
@@ -52,6 +53,9 @@ public class MainWindow {
 
         cpuUtilizationPane.setInstanceDiagnostics(machines);
         cpuUtilizationPane.update();
+
+        metricsPane.setInstanceDiagnostics(machines);
+        metricsPane.update();
     }
 
     public MainWindow() {
@@ -76,19 +80,19 @@ public class MainWindow {
 
     private RangeSlider newRangeSlider() {
         RangeSlider rangeSlider = new RangeSlider();
-        rangeSlider.addChangeListener(new ChangeListener() {
-            @Override
-            public void stateChanged(ChangeEvent e) {
-                long begin = rangeSlider.getLowValue() + startMs;
-                long end = rangeSlider.getHighValue() + startMs;
+        rangeSlider.addChangeListener(e -> {
+            long begin = rangeSlider.getLowValue() + startMs;
+            long end = rangeSlider.getHighValue() + startMs;
 
-                // System.out.println(begin + " " + end);
-                cpuUtilizationPane.setRange(begin, end);
-                cpuUtilizationPane.update();
+            // System.out.println(begin + " " + end);
+            cpuUtilizationPane.setRange(begin, end);
+            cpuUtilizationPane.update();
 
-                memoryPane.setRange(begin, end);
-                memoryPane.update();
-            }
+            memoryPane.setRange(begin, end);
+            memoryPane.update();
+
+            metricsPane.setRange(begin, end);
+            metricsPane.update();
         });
         rangeSlider.setRangeDraggable(true);
         return rangeSlider;
@@ -99,7 +103,7 @@ public class MainWindow {
         tabbedPane.setTabPlacement(JTabbedPane.BOTTOM);
 
         tabbedPane.addTab("Machines", null, machinesPane.getComponent());
-        tabbedPane.addTab("Metrics", null, new JPanel());
+        tabbedPane.addTab("Metrics", null, metricsPane.getComponent());
         tabbedPane.addTab("Memory", null, memoryPane.getComponent());
         tabbedPane.addTab("CPU", null, cpuUtilizationPane.getComponent());
         tabbedPane.addTab("Build Info", null, buildInfoPane.getComponent());

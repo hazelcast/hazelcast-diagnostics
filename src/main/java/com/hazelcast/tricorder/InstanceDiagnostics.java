@@ -46,6 +46,10 @@ public class InstanceDiagnostics {
         this.directory = directory;
     }
 
+    public Set<String> getAvailableMetrics() {
+        return availableMetrics;
+    }
+
     public File getDirectory() {
         return directory;
     }
@@ -256,7 +260,11 @@ public class InstanceDiagnostics {
                 }
 
                 diagnosticsFile = diagnosticsFileIterator.next();
-                iterator = diagnosticsFile.metricsIndices.get(name).treeMap.subMap(startMs, true, endMs, true).entrySet().iterator();
+                DiagnosticsIndex diagnosticsIndex = diagnosticsFile.metricsIndices.get(name);
+                if(diagnosticsIndex == null){
+                    continue;
+                }
+                iterator = diagnosticsIndex.treeMap.subMap(startMs, true, endMs, true).entrySet().iterator();
             }
         }
 

@@ -10,26 +10,39 @@ import org.jfree.data.time.TimeSeries;
 import org.jfree.data.time.TimeSeriesCollection;
 
 import javax.swing.*;
+import java.awt.*;
+import java.awt.event.ActionEvent;
+import java.awt.event.ActionListener;
 import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
-public class MemoryPane {
+public class MetricsPane {
+    private final JComboBox<Object> comboBox;
+    private final DefaultComboBoxModel comboBoxModel;
+    private LinkedHashSet<String> metricsNames = new LinkedHashSet<>();
 
-    private final JPanel component;
+    private JPanel component;
     private final JFreeChart invocationChart;
     private final ChartPanel chartPanel;
     private final TimeSeriesCollection collection;
     private List<InstanceDiagnostics> diagnosticsList;
     private long startMs = Long.MIN_VALUE;
     private long endMs = Long.MAX_VALUE;
+    private String activeMetric;
 
-    public MemoryPane() {
+    public MetricsPane() {
+        this.comboBox = new JComboBox<>();
+        this.comboBox.addActionListener(e -> {
+            activeMetric = (String) comboBox.getSelectedItem();
+            update();
+        });
+        this.comboBoxModel = new DefaultComboBoxModel();
+        comboBox.setModel(comboBoxModel);
         this.collection = new TimeSeriesCollection();
         this.invocationChart = ChartFactory.createXYLineChart(
-                "Memory Usage",
+                "Metric",
                 "X",
                 "Y",
                 collection,
@@ -38,7 +51,17 @@ public class MemoryPane {
                 true,
                 false);
         this.chartPanel = new ChartPanel(invocationChart);
-        this.component = chartPanel;
+
+
+        JPanel panel = new JPanel();
+        panel.setLayout(new BorderLayout());
+        panel.add(comboBox, BorderLayout.NORTH);
+        panel.add(chartPanel, BorderLayout.CENTER);
+        this.component = panel;
+    }
+
+    public JComponent getComponent() {
+        return component;
     }
 
     public void setRange(long fromMs, long toMs) {
@@ -48,16 +71,27 @@ public class MemoryPane {
 
     public void setInstanceDiagnostics(List<InstanceDiagnostics> diagnosticsList) {
         this.diagnosticsList = diagnosticsList;
+
+        this.metricsNames.clear();
+        for (InstanceDiagnostics diagnostics : diagnosticsList) {
+            metricsNames.addAll(diagnostics.getAvailableMetrics());
+        }
+        for (String metricName : metricsNames) {
+            comboBoxModel.addElement(metricName);
+        }
+        if (diagnosticsList.isEmpty()) {
+            activeMetric = null;
+        }
     }
 
     public void update() {
         collection.removeAllSeries();
-        if (diagnosticsList == null) {
+        if (activeMetric == null) {
             return;
         }
 
         for (InstanceDiagnostics diagnostics : diagnosticsList) {
-            Iterator<Map.Entry<Long, Long>> iterator = diagnostics.longMetricsBetween("[metric=runtime.usedMemory]", startMs, endMs);
+            Iterator<Map.Entry<Long, Long>> iterator = diagnostics.longMetricsBetween(activeMetric, startMs, endMs);
 
             if (!iterator.hasNext()) {
                 continue;
@@ -80,7 +114,4 @@ public class MemoryPane {
         }
     }
 
-    public JComponent getComponent() {
-        return component;
-    }
 }
