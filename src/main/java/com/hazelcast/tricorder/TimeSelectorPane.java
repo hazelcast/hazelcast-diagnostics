@@ -20,16 +20,16 @@ public class TimeSelectorPane {
         this.component = rangeSlider;
     }
 
-    public void addChangeListener(ChangeListener changeListener){
+    public void addChangeListener(ChangeListener changeListener) {
         rangeSlider.addChangeListener(changeListener);
     }
 
-    public long getStartMs(){
-        return rangeSlider.getLowValue()+startMs;
+    public long getStartMs() {
+        return rangeSlider.getLowValue() + startMs;
     }
 
-    public long getEndMs(){
-        return rangeSlider.getHighValue()+startMs;
+    public long getEndMs() {
+        return rangeSlider.getHighValue() + startMs;
     }
 
     public JComponent getComponent() {
@@ -53,7 +53,6 @@ public class TimeSelectorPane {
             if (instanceDiagnostics.endMs() > endMs) {
                 this.endMs = instanceDiagnostics.endMs();
             }
-
         }
         this.durationMs = endMs - startMs;
 
