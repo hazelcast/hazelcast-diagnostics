@@ -26,14 +26,12 @@ public class InstanceDiagnostics {
     public static final int TYPE_INVOCATION_PROFILER = 7;
     public static final int TYPE_OPERATION_PROFILER = 8;
     public static final int TYPE_OPERATION_THREAD_SAMPLES = 9;
-    public static final int TYPE_CONNECTION_REMOVED = 10;
+    public static final int TYPE_CONNECTION = 10;
     public static final int TYPE_HAZELCAST_INSTANCE = 11;
-    public static final int TYPE_MEMBER_REMOVED = 12;
-    public static final int TYPE_MEMBER_ADDED = 13;
-    public static final int TYPE_CLUSTER_VERSION_CHANGE = 14;
-    public static final int TYPE_LIFECYCLE = 15;
-    public static final int TYPE_CONNECTION_ADDED = 16;
-    public static final int TYPES = TYPE_CONNECTION_ADDED + 1;
+    public static final int TYPE_MEMBER = 12;
+    public static final int TYPE_CLUSTER_VERSION_CHANGE = 13;
+    public static final int TYPE_LIFECYCLE = 14;
+    public static final int TYPES = TYPE_LIFECYCLE + 1;
 
     private File directory;
     private List<DiagnosticsFile> diagnosticsFiles;
@@ -133,21 +131,21 @@ public class InstanceDiagnostics {
         } else if (sb.indexOf("OperationsProfiler[") != -1) {
             type = TYPE_OPERATION_PROFILER;
         } else if (sb.indexOf("ConnectionRemoved[") != -1) {
-            type = TYPE_CONNECTION_REMOVED;
+            type = TYPE_CONNECTION;
         } else if (sb.indexOf("OperationThreadSamples[") != -1) {
             type = TYPE_OPERATION_THREAD_SAMPLES;
         } else if (sb.indexOf("HazelcastInstance[") != -1) {
             type = TYPE_HAZELCAST_INSTANCE;
         } else if (sb.indexOf("MemberRemoved[") != -1) {
-            type = TYPE_MEMBER_REMOVED;
+            type = TYPE_MEMBER;
         } else if (sb.indexOf("MemberAdded[") != -1) {
-            type = TYPE_MEMBER_ADDED;
+            type = TYPE_MEMBER;
         } else if (sb.indexOf("ClusterVersionChanged[") != -1) {
             type = TYPE_CLUSTER_VERSION_CHANGE;
         } else if (sb.indexOf("Lifecycle[") != -1) {
             type = TYPE_LIFECYCLE;
         } else if (sb.indexOf("ConnectionAdded[") != -1) {
-            type = TYPE_CONNECTION_ADDED;
+            type = TYPE_CONNECTION;
         } else {
             System.out.println("------------------------------------");
             System.out.println(sb.toString());

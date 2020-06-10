@@ -87,6 +87,7 @@ public class MetricsPane {
         java.util.List<String> metrics = new ArrayList<>(metricsNames);
         Collections.sort(metrics);
 
+        comboBoxModel.removeAllElements();
         for (String metricName : metrics) {
             comboBoxModel.addElement(metricName);
         }

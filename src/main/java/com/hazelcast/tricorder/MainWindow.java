@@ -3,6 +3,7 @@ package com.hazelcast.tricorder;
 import javax.swing.*;
 import java.awt.*;
 import java.io.File;
+import java.lang.reflect.Member;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.Map;
@@ -25,6 +26,9 @@ public class MainWindow {
     private PendingPane invocationsPendingPane = new PendingPane("[unit=count,metric=operation.invocations.pending]", "Invocations Pending");
     private PendingPane operationsPendingPane = new PendingPane("[unit=count,metric=operation.queueSize]", "Operations Pending");
     private StatusBar statusBar = new StatusBar();
+    private SlowOperationsPane slowOperationsPane = new SlowOperationsPane();
+    private ConnectionPane connectionPane = new ConnectionPane();
+    private MemberPane memberPane = new MemberPane();
 
     public JFrame getJFrame() {
         return window;
@@ -70,6 +74,15 @@ public class MainWindow {
 
         operationsPendingPane.setInstanceDiagnostics(machines);
         operationsPendingPane.update();
+
+        slowOperationsPane.setInstanceDiagnostics(machines);
+        slowOperationsPane.update();
+
+        connectionPane.setInstanceDiagnostics(machines);
+        connectionPane.update();
+
+        memberPane.setInstanceDiagnostics(machines);
+        memberPane.update();
     }
 
     public MainWindow() {
@@ -114,6 +127,15 @@ public class MainWindow {
 
             operationsPendingPane.setRange(startMs, endMs);
             operationsPendingPane.update();
+
+            slowOperationsPane.setRange(startMs,endMs);
+            slowOperationsPane.update();
+
+            connectionPane.setRange(startMs,endMs);
+            connectionPane.update();
+
+            memberPane.setRange(startMs,endMs);
+            memberPane.update();
         });
 
         JPanel analysisPanel = new JPanel();
@@ -149,7 +171,9 @@ public class MainWindow {
         tabbedPane.addTab("Operation profiler", null, new JPanel());
         tabbedPane.addTab("Operation Pending", null, operationsPendingPane.getComponent());
         tabbedPane.addTab("Slow operation thread sampler", null, new JPanel());
-        tabbedPane.addTab("Slow Operations", null, new JPanel());
+        tabbedPane.addTab("Slow Operations", null, slowOperationsPane.getComponent());
+        tabbedPane.addTab("Connections", null, connectionPane.getComponent());
+        tabbedPane.addTab("Members", null, memberPane.getComponent());
         return tabbedPane;
     }
 
