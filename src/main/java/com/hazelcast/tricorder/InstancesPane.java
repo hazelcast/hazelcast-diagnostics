@@ -13,12 +13,14 @@ import java.util.List;
 import java.util.Set;
 
 import static com.hazelcast.tricorder.DiagnosticsLoader.load;
+import static java.util.stream.IntStream.range;
 
 public class InstancesPane {
 
     private static final String FILE_CHOOSER_DIALOG_TITLE = "Choose instance directory";
     private static final String FILE_CHOOSER_FILTER_TEXT = "Instance directory";
     private static final String ADD_INSTANCE_BUTTON_LABEL = "Add";
+    private static final String CLEAR_INSTANCES_LABEL = "Clear";
     private static final String REMOVE_INSTANCE_LABEL = "Remove";
 
     private final JPanel component;
@@ -33,7 +35,8 @@ public class InstancesPane {
         JPanel panel = new JPanel(new BorderLayout(), true);
 
         JPanel buttonsPanel = new JPanel();
-        buttonsPanel.add(createAddInstanceButton(buttonsPanel, listModel));
+        buttonsPanel.add(createAddInstanceButton(buttonsPanel, listModel), BorderLayout.WEST);
+        buttonsPanel.add(createClearInstancesButton(listModel), BorderLayout.EAST);
         panel.add(buttonsPanel, BorderLayout.NORTH);
 
         panel.add(list, BorderLayout.CENTER);
@@ -67,6 +70,13 @@ public class InstancesPane {
                 listModel.addElements(fileChooser.getSelectedFiles());
             }
         });
+        return button;
+    }
+
+    private JButton createClearInstancesButton(InstanceListModel listModel) {
+        JButton button = new JButton();
+        button.setText(CLEAR_INSTANCES_LABEL);
+        button.addActionListener(e -> listModel.clearElements());
         return button;
     }
 
@@ -157,6 +167,10 @@ public class InstancesPane {
                 instances.remove(index);
                 directories.remove(index);
             }
+        }
+
+        void clearElements() {
+            removeElements(range(0, instances.size()).toArray());
         }
 
         @Override
