@@ -26,7 +26,7 @@ public class InstancesPane {
     private final JPanel component;
 
     private final InstanceListModel listModel;
-    private final JList<String> list;
+    private final JList<?> list;
 
     public InstancesPane(MainWindow window) {
         this.listModel = new InstanceListModel(window);
@@ -83,11 +83,11 @@ public class InstancesPane {
     private JList<String> createInstanceList(InstanceListModel listModel) {
         JList<String> list = new JList<>(listModel);
         list.getSelectionModel().addListSelectionListener(listModel);
-        list.setComponentPopupMenu(createInstanceListMenu(list, listModel));
+        list.setComponentPopupMenu(createInstanceListMenu(listModel, list));
         return list;
     }
 
-    private JPopupMenu createInstanceListMenu(JList<String> list, InstanceListModel listModel) {
+    private JPopupMenu createInstanceListMenu(InstanceListModel listModel, JList<?> list) {
         return new JPopupMenu() {
             {
                 JMenuItem removeItem = new JMenuItem(REMOVE_INSTANCE_LABEL);
@@ -150,11 +150,10 @@ public class InstancesPane {
             }
 
             for (InstanceDiagnostics diagnostics : load(canonicalDirs)) {
-                File directory = diagnostics.getDirectory();
-                directories.add(directory);
-                instances.add(new InstanceDiagnostics(directory).analyze());
+                directories.add(diagnostics.getDirectory());
+                instances.add(diagnostics);
 
-                int index = instances.size();
+                int index = instances.size() - 1;
                 fireIntervalAdded(this, index, index);
             }
         }
@@ -187,7 +186,7 @@ public class InstancesPane {
         public void valueChanged(ListSelectionEvent e) {
             ListSelectionModel model = (ListSelectionModel) e.getSource();
             if (!model.getValueIsAdjusting()) {
-                for (int i = 0; i <= instances.size(); i++) {
+                for (int i = 0; i < instances.size(); i++) {
                     if (model.isSelectedIndex(i) && selectedInstances.add(i)) {
                         window.add(instances.get(i));
                     }
