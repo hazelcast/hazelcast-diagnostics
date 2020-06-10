@@ -153,7 +153,7 @@ public class InstancesPane {
                 directories.add(diagnostics.getDirectory());
                 instances.add(diagnostics);
 
-                int index = instances.size() - 1;
+                int index = directories.size() - 1;
                 fireIntervalAdded(this, index, index);
             }
         }
@@ -169,12 +169,12 @@ public class InstancesPane {
         }
 
         void clearElements() {
-            removeElements(range(0, instances.size()).toArray());
+            removeElements(range(0, directories.size()).toArray());
         }
 
         @Override
         public int getSize() {
-            return instances.size();
+            return directories.size();
         }
 
         @Override
@@ -186,7 +186,7 @@ public class InstancesPane {
         public void valueChanged(ListSelectionEvent e) {
             ListSelectionModel model = (ListSelectionModel) e.getSource();
             if (!model.getValueIsAdjusting()) {
-                for (int i = 0; i < instances.size(); i++) {
+                for (int i = 0; i < directories.size(); i++) {
                     if (model.isSelectedIndex(i) && selectedInstances.add(i)) {
                         window.add(instances.get(i));
                     }
