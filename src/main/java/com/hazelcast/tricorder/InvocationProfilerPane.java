@@ -3,10 +3,14 @@ package com.hazelcast.tricorder;
 import org.jfree.chart.ChartFactory;
 import org.jfree.chart.ChartPanel;
 import org.jfree.chart.JFreeChart;
+import org.jfree.chart.axis.ValueAxis;
 import org.jfree.chart.plot.PlotOrientation;
+import org.jfree.chart.plot.XYPlot;
+import org.jfree.chart.renderer.AbstractRenderer;
 import org.jfree.data.xy.DefaultXYDataset;
 
 import javax.swing.*;
+import java.awt.*;
 import java.text.ParseException;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -39,6 +43,11 @@ public class InvocationProfilerPane {
                 true,
                 false);
         pane = new ChartPanel(latencyChart);
+        XYPlot plot = latencyChart.getXYPlot();
+        ValueAxis xAxis = plot.getDomainAxis();
+        xAxis.setRange(0, 8);
+        xAxis.setMinorTickCount(1);
+        xAxis.setAutoTickUnitSelection(false);
     }
 
     public void setInstanceDiagnostics(Collection<InstanceDiagnostics> instanceDiagnostics) {
