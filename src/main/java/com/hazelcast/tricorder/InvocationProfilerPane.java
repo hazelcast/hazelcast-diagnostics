@@ -108,12 +108,13 @@ public class InvocationProfilerPane {
         for (long count : latencyProfile.values()) {
             totalCount += count;
         }
+        totalCount++;
         long runningCount = 0;
         int index = 0;
         for (Entry<Long, Long> latencyAndCount : latencyProfile.entrySet()) {
-            result[0][index] = Math.log10(100.0 / (1.0 - (double) runningCount / totalCount));
-            result[1][index++] = 1.5 * latencyAndCount.getKey();
             runningCount += latencyAndCount.getValue();
+            result[0][index] = Math.log10(100.0 / (1.0 - (double) runningCount / totalCount));
+            result[1][index++] = 2.0 * latencyAndCount.getKey();
         }
         return result;
     }
