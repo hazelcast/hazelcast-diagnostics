@@ -3,7 +3,6 @@ package com.hazelcast.tricorder;
 import javax.swing.*;
 import java.awt.*;
 import java.io.File;
-import java.lang.reflect.Member;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.Map;
@@ -49,8 +48,14 @@ public class MainWindow {
 
         timeSelectorPane.setInstanceDiagnostics(machines);
 
-        // systemPropertiesPane.setDiagnostics(instanceDiagnostics);
-        // buildInfoPane.setInstanceDiagnostics(instanceDiagnostics);
+        if (machines.size() == 1) {
+            InstanceDiagnostics instanceDiagnostics = machines.iterator().next();
+            systemPropertiesPane.setInstanceDiagnostics(instanceDiagnostics);
+            buildInfoPane.setInstanceDiagnostics(instanceDiagnostics);
+        } else {
+            systemPropertiesPane.setInstanceDiagnostics(null);
+            buildInfoPane.setInstanceDiagnostics(null);
+        }
         invocationProfilerPane.setInstanceDiagnostics(machines);
         invocationProfilerPane.update();
 
@@ -128,13 +133,13 @@ public class MainWindow {
             operationsPendingPane.setRange(startMs, endMs);
             operationsPendingPane.update();
 
-            slowOperationsPane.setRange(startMs,endMs);
+            slowOperationsPane.setRange(startMs, endMs);
             slowOperationsPane.update();
 
-            connectionPane.setRange(startMs,endMs);
+            connectionPane.setRange(startMs, endMs);
             connectionPane.update();
 
-            memberPane.setRange(startMs,endMs);
+            memberPane.setRange(startMs, endMs);
             memberPane.update();
         });
 
@@ -163,14 +168,13 @@ public class MainWindow {
         tabbedPane.addTab("Metrics", null, metricsPane.getComponent());
         tabbedPane.addTab("Build Info", null, buildInfoPane.getComponent());
         tabbedPane.addTab("System properties", null, systemPropertiesPane.getComponent());
-        tabbedPane.addTab("Slow Operations", null, new JPanel());
         tabbedPane.addTab("Invocation Throughput", null, invocationsPlane.getComponent());
         tabbedPane.addTab("Invocation Profiler", null, invocationProfilerPane.getComponent());
         tabbedPane.addTab("Invocation Pending", null, invocationsPendingPane.getComponent());
         tabbedPane.addTab("Operations Throughput", null, operationsPlane.getComponent());
         tabbedPane.addTab("Operation profiler", null, new JPanel());
         tabbedPane.addTab("Operation Pending", null, operationsPendingPane.getComponent());
-        tabbedPane.addTab("Slow operation thread sampler", null, new JPanel());
+        // tabbedPane.addTab("Slow operation thread sampler", null, new JPanel());
         tabbedPane.addTab("Slow Operations", null, slowOperationsPane.getComponent());
         tabbedPane.addTab("Connections", null, connectionPane.getComponent());
         tabbedPane.addTab("Members", null, memberPane.getComponent());

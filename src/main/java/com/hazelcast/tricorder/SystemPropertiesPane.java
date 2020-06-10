@@ -24,8 +24,12 @@ public class SystemPropertiesPane {
         return panel;
     }
 
-    public void setDiagnostics(InstanceDiagnostics machine) {
+    public void setInstanceDiagnostics(InstanceDiagnostics machine) {
         model.setRowCount(0);
+        if(machine == null){
+            return;
+        }
+
         Iterator<Map.Entry<Long, String>> it = machine.between(InstanceDiagnostics.TYPE_SYSTEM_PROPERTIES, 0, Long.MAX_VALUE);
         if(!it.hasNext()){
             System.out.println("No System Properties found in directory: "+machine.getDirectory());

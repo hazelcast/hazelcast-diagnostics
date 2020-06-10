@@ -27,6 +27,10 @@ public class BuildInfoPane {
     public void setInstanceDiagnostics(InstanceDiagnostics diagnostics) {
         model.setRowCount(0);
 
+        if(diagnostics==null){
+            return;
+        }
+
         Iterator<Map.Entry<Long, String>> it = diagnostics.between(InstanceDiagnostics.TYPE_BUILD_INFO, 0, Long.MAX_VALUE);
         if (!it.hasNext()) {
             System.out.println("No BuildInfo found in directory: " + diagnostics.getDirectory());

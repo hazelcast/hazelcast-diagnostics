@@ -1,5 +1,6 @@
 package com.hazelcast.tricorder;
 
+import javax.print.DocFlavor;
 import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.FileReader;
@@ -39,7 +40,7 @@ public class InstanceDiagnostics {
     private long endMs = Long.MIN_VALUE;
     private Set<String> availableMetrics = new HashSet<>();
 
-    public InstanceDiagnostics(File directory){
+    public InstanceDiagnostics(File directory) {
         this.directory = directory;
     }
 
@@ -147,9 +148,9 @@ public class InstanceDiagnostics {
         } else if (sb.indexOf("ConnectionAdded[") != -1) {
             type = TYPE_CONNECTION;
         } else {
-            System.out.println("------------------------------------");
-            System.out.println(sb.toString());
-            System.out.println("------------------------------------");
+//            System.out.println("------------------------------------");
+//            System.out.println(sb.toString());
+//            System.out.println("------------------------------------");
             type = TYPE_UNKNOWN;
         }
 
@@ -167,7 +168,7 @@ public class InstanceDiagnostics {
             int indexFirstSquareBracket = sb.indexOf("[");
             String key = sb.substring(indexFirstSquareBracket + 1, indexLastEquals);
 
-          //  System.out.println(key);
+            //  System.out.println(key);
             availableMetrics.add(key);
 
             DiagnosticsIndex index = file.metricsIndices.get(key);
@@ -205,11 +206,39 @@ public class InstanceDiagnostics {
     }
 
     public Iterator<Map.Entry<Long, Long>> longMetricsBetween(String metricName, long startMs, long endMs) {
-        return (Iterator) new LongMetricsIterator(metricName, startMs, endMs, true);
+        return (Iterator) new LongMetricsIterator(fixMetricName(metricName), startMs, endMs, true);
+    }
+
+    public String fixMetricName(String metricName) {
+        if (availableMetrics.contains(metricName)) {
+            return metricName;
+        }
+
+        if (metricName.equals("[metric=os.processCpuLoad]")) {
+            return "os.processCpuLoad";
+        }
+
+        if(metricName.equals("[metric=runtime.usedMemory]")){
+            return "runtime.usedMemory";
+        }
+
+        if(metricName.equals("[unit=count,metric=operation.completedCount]")){
+            return "operation.completedCount";
+        }
+
+        if(metricName.equals("[unit=count,metric=operation.invocations.pending]")){
+            return "operation.invocations.pending";
+        }
+
+        if(metricName.equals("[unit=count,metric=operation.queueSize]")){
+            return "operation.queueSize";
+        }
+
+        return metricName;
     }
 
     public Iterator<Map.Entry<Long, Double>> doubleMetricsBetween(String metricName, long startMs, long endMs) {
-        return (Iterator) new LongMetricsIterator(metricName, startMs, endMs, false);
+        return (Iterator) new LongMetricsIterator(fixMetricName(metricName), startMs, endMs, false);
     }
 
     private class LongMetricsIterator implements Iterator<Map.Entry<Long, Number>> {
@@ -243,9 +272,9 @@ public class InstanceDiagnostics {
                     int indexOfLastEquals = s.lastIndexOf('=');
                     String value = s.substring(indexOfLastEquals + 1).replace("]", "");
                     Number n;
-                    if(isLong) {
+                    if (isLong) {
                         n = Long.parseLong(value);
-                    }else {
+                    } else {
                         n = Double.parseDouble(value);
                     }
                     entry = new AbstractMap.SimpleEntry<>(e.getKey(), n);
@@ -258,7 +287,7 @@ public class InstanceDiagnostics {
 
                 diagnosticsFile = diagnosticsFileIterator.next();
                 DiagnosticsIndex diagnosticsIndex = diagnosticsFile.metricsIndices.get(name);
-                if(diagnosticsIndex == null){
+                if (diagnosticsIndex == null) {
                     continue;
                 }
                 iterator = diagnosticsIndex.treeMap.subMap(startMs, true, endMs, true).entrySet().iterator();
