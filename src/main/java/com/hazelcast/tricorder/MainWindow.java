@@ -28,6 +28,8 @@ public class MainWindow {
     private SlowOperationsPane slowOperationsPane = new SlowOperationsPane();
     private ConnectionPane connectionPane = new ConnectionPane();
     private MemberPane memberPane = new MemberPane();
+    private WANPane wanPane = new WANPane();
+    private HeartbeatPane heartbeatPane = new HeartbeatPane();
 
     public JFrame getJFrame() {
         return window;
@@ -88,6 +90,12 @@ public class MainWindow {
 
         memberPane.setInstanceDiagnostics(machines);
         memberPane.update();
+
+        wanPane.setInstanceDiagnostics(machines);
+        wanPane.update();
+
+        heartbeatPane.setInstanceDiagnostics(machines);
+        heartbeatPane.update();
     }
 
     public MainWindow() {
@@ -141,6 +149,12 @@ public class MainWindow {
 
             memberPane.setRange(startMs, endMs);
             memberPane.update();
+
+            wanPane.setRange(startMs, endMs);
+            wanPane.update();
+
+            heartbeatPane.setRange(startMs, endMs);
+            heartbeatPane.update();
         });
 
         JPanel analysisPanel = new JPanel();
@@ -178,6 +192,8 @@ public class MainWindow {
         tabbedPane.addTab("Slow Operations", null, slowOperationsPane.getComponent());
         tabbedPane.addTab("Connections", null, connectionPane.getComponent());
         tabbedPane.addTab("Members", null, memberPane.getComponent());
+        tabbedPane.addTab("WAN", null, wanPane.getComponent());
+        tabbedPane.addTab("Heartbeats", null, heartbeatPane.getComponent());
         return tabbedPane;
     }
 

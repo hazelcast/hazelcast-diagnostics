@@ -8,7 +8,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 
-public class MemberPane {
+public class WANPane {
 
     private final JComponent component;
     private final JTextArea textArea;
@@ -16,7 +16,7 @@ public class MemberPane {
     private long startMs = Long.MIN_VALUE;
     private long endMs = Long.MAX_VALUE;
 
-    public MemberPane() {
+    public WANPane() {
         this.textArea = new JTextArea();
         textArea.setEditable(false);
         this.component = new JScrollPane(textArea);
@@ -39,7 +39,7 @@ public class MemberPane {
 
         TreeMap<Long, List<String>> treeMap = new TreeMap();
         for (InstanceDiagnostics diagnostics : diagnosticsList) {
-            Iterator<Map.Entry<Long, String>> iterator = diagnostics.between(InstanceDiagnostics.TYPE_MEMBER, startMs, endMs);
+            Iterator<Map.Entry<Long, String>> iterator = diagnostics.between(InstanceDiagnostics.TYPE_WAN, startMs, endMs);
 
             if (!iterator.hasNext()) {
                 continue;
@@ -48,7 +48,11 @@ public class MemberPane {
             while (iterator.hasNext()) {
                 Map.Entry<Long, String> entry = iterator.next();
                 Long key = entry.getKey();
-                List<String> list = treeMap.computeIfAbsent(key, k -> new ArrayList<>());
+                List<String> list = treeMap.get(key);
+                if (list == null) {
+                    list = new ArrayList<>();
+                    treeMap.put(key, list);
+                }
                 list.add(entry.getValue());
             }
         }

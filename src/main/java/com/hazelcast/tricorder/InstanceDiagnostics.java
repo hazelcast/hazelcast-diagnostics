@@ -1,6 +1,5 @@
 package com.hazelcast.tricorder;
 
-import javax.print.DocFlavor;
 import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.FileReader;
@@ -32,7 +31,9 @@ public class InstanceDiagnostics {
     public static final int TYPE_MEMBER = 12;
     public static final int TYPE_CLUSTER_VERSION_CHANGE = 13;
     public static final int TYPE_LIFECYCLE = 14;
-    public static final int TYPES = TYPE_LIFECYCLE + 1;
+    public static final int TYPE_WAN = 15;
+    public static final int TYPE_HEARTBEAT = 16;
+    public static final int TYPES = TYPE_HEARTBEAT + 1;
 
     private File directory;
     private List<DiagnosticsFile> diagnosticsFiles;
@@ -147,10 +148,16 @@ public class InstanceDiagnostics {
             type = TYPE_LIFECYCLE;
         } else if (sb.indexOf("ConnectionAdded[") != -1) {
             type = TYPE_CONNECTION;
+        } else if (sb.indexOf("WAN[") != -1) {
+            type = TYPE_WAN;
+        } else if (sb.indexOf("OperationHeartbeat[") != -1) {
+            type = TYPE_HEARTBEAT;
+        } else if (sb.indexOf("MemberHeartbeats[") != -1) {
+            type = TYPE_HEARTBEAT;
         } else {
-//            System.out.println("------------------------------------");
-//            System.out.println(sb.toString());
-//            System.out.println("------------------------------------");
+            System.out.println("------------------------------------");
+            System.out.println(sb.toString());
+            System.out.println("------------------------------------");
             type = TYPE_UNKNOWN;
         }
 
@@ -232,6 +239,10 @@ public class InstanceDiagnostics {
 
         if(metricName.equals("[unit=count,metric=operation.queueSize]")){
             return "operation.queueSize";
+        }
+
+        if(metricName.equals("[unit=count,metric=operation.invocations.lastCallId]")){
+            return "operation.invocations.lastCallId";
         }
 
         return metricName;
