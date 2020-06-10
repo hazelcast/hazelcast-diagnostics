@@ -48,6 +48,9 @@ public class InvocationProfilerPane {
         xAxis.setRange(0, 8);
         xAxis.setMinorTickCount(1);
         xAxis.setAutoTickUnitSelection(false);
+        AbstractRenderer renderer = (AbstractRenderer) plot.getRenderer();
+        renderer.setDefaultStroke(new BasicStroke(2.0f));
+        renderer.setAutoPopulateSeriesStroke(false);
     }
 
     public void setInstanceDiagnostics(Collection<InstanceDiagnostics> instanceDiagnostics) {
