@@ -61,7 +61,7 @@ public class PendingPane {
         }
 
         for (InstanceDiagnostics diagnostics : diagnosticsList) {
-            Iterator<Map.Entry<Long, Long>> iterator = diagnostics.longMetricsBetween(metric, startMs, endMs);
+            Iterator<Map.Entry<Long, Number>> iterator = diagnostics.metricsBetween(metric, startMs, endMs);
 
             if (!iterator.hasNext()) {
                 continue;
@@ -70,7 +70,7 @@ public class PendingPane {
             TimeSeries series = new TimeSeries(diagnostics.getDirectory().getName());
             while (iterator.hasNext()) {
                 try {
-                    Map.Entry<Long, Long> entry = iterator.next();
+                    Map.Entry<Long, Number> entry = iterator.next();
                     series.add(new FixedMillisecond(entry.getKey()), entry.getValue());
                 } catch (SeriesException e) {
                     System.err.println("Error adding to series");

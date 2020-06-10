@@ -59,7 +59,7 @@ public class InvocationsPlane {
         }
 
         for (InstanceDiagnostics diagnostics : diagnosticsList) {
-            Iterator<Map.Entry<Long, Long>> iterator = diagnostics.longMetricsBetween("[unit=count,metric=operation.invocations.lastCallId]", startMs, endMs);
+            Iterator<Map.Entry<Long, Number>> iterator = diagnostics.metricsBetween("[unit=count,metric=operation.invocations.lastCallId]", startMs, endMs);
 
             if (!iterator.hasNext()) {
                 continue;
@@ -70,10 +70,10 @@ public class InvocationsPlane {
             long previousCount = 0;
             while (iterator.hasNext()) {
                 try {
-                    Map.Entry<Long, Long> entry = iterator.next();
+                    Map.Entry<Long, Number> entry = iterator.next();
                     long currentMs = entry.getKey();
 
-                    long count = entry.getValue();
+                    long count = entry.getValue().longValue();
                     long delta = count - previousCount;
                     long durationMs = currentMs - previousMs;
                     double throughput = (delta * 1000d) / durationMs;

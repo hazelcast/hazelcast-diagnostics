@@ -212,8 +212,8 @@ public class InstanceDiagnostics {
         return new IteratorImpl(type, startMs, endMs);
     }
 
-    public Iterator<Map.Entry<Long, Long>> longMetricsBetween(String metricName, long startMs, long endMs) {
-        return (Iterator) new LongMetricsIterator(fixMetricName(metricName), startMs, endMs, true);
+    public Iterator<Map.Entry<Long, Number>> metricsBetween(String metricName, long startMs, long endMs) {
+        return new LongMetricsIterator(fixMetricName(metricName), startMs, endMs);
     }
 
     public String fixMetricName(String metricName) {
@@ -248,25 +248,21 @@ public class InstanceDiagnostics {
         return metricName;
     }
 
-    public Iterator<Map.Entry<Long, Double>> doubleMetricsBetween(String metricName, long startMs, long endMs) {
-        return (Iterator) new LongMetricsIterator(fixMetricName(metricName), startMs, endMs, false);
-    }
+
 
     private class LongMetricsIterator implements Iterator<Map.Entry<Long, Number>> {
         private final String name;
         private final long startMs;
         private final long endMs;
-        private final boolean isLong;
         private Map.Entry<Long, Number> entry;
         private Iterator<Map.Entry<Long, DiagnosticsIndexEntry>> iterator;
         private Iterator<DiagnosticsFile> diagnosticsFileIterator = diagnosticsFiles.iterator();
         private DiagnosticsFile diagnosticsFile;
 
-        public LongMetricsIterator(String name, long startMs, long endMs, boolean isLong) {
+        public LongMetricsIterator(String name, long startMs, long endMs) {
             this.name = name;
             this.startMs = startMs;
             this.endMs = endMs;
-            this.isLong = isLong;
         }
 
         @Override
@@ -282,10 +278,11 @@ public class InstanceDiagnostics {
                     String s = diagnosticsFile.load(indexEntry.offset, indexEntry.length);
                     int indexOfLastEquals = s.lastIndexOf('=');
                     String value = s.substring(indexOfLastEquals + 1).replace("]", "");
+                    int indexDot = value.indexOf('.');
                     Number n;
-                    if (isLong) {
+                    if(indexDot == -1){
                         n = Long.parseLong(value);
-                    } else {
+                    }else{
                         n = Double.parseDouble(value);
                     }
                     entry = new AbstractMap.SimpleEntry<>(e.getKey(), n);

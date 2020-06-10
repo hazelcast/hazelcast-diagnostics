@@ -57,7 +57,7 @@ public class MemoryPane {
         collection.removeAllSeries();
 
         for (InstanceDiagnostics diagnostics : diagnosticsList) {
-            Iterator<Map.Entry<Long, Long>> iterator = diagnostics.longMetricsBetween("[metric=runtime.usedMemory]", startMs, endMs);
+            Iterator<Map.Entry<Long, Number>> iterator = diagnostics.metricsBetween("[metric=runtime.usedMemory]", startMs, endMs);
 
             if (!iterator.hasNext()) {
                 continue;
@@ -66,9 +66,9 @@ public class MemoryPane {
             TimeSeries series = new TimeSeries(diagnostics.getDirectory().getName());
             while (iterator.hasNext()) {
                 try {
-                    Map.Entry<Long, Long> entry = iterator.next();
+                    Map.Entry<Long, Number> entry = iterator.next();
                     long ms = entry.getKey();
-                    Long value = entry.getValue();
+                    Long value = entry.getValue().longValue();
                     series.add(new FixedMillisecond(ms), value);
                 } catch (SeriesException e) {
                     System.err.println("Error adding to series");

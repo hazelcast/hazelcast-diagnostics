@@ -4,11 +4,9 @@ import org.jfree.chart.ChartFactory;
 import org.jfree.chart.ChartPanel;
 import org.jfree.chart.JFreeChart;
 import org.jfree.chart.axis.DateAxis;
-import org.jfree.chart.plot.PlotOrientation;
 import org.jfree.chart.plot.XYPlot;
 import org.jfree.data.general.SeriesException;
 import org.jfree.data.time.FixedMillisecond;
-import org.jfree.data.time.Second;
 import org.jfree.data.time.TimeSeries;
 import org.jfree.data.time.TimeSeriesCollection;
 
@@ -103,7 +101,7 @@ public class MetricsPane {
         }
 
         for (InstanceDiagnostics diagnostics : diagnosticsList) {
-            Iterator<Map.Entry<Long, Long>> iterator = diagnostics.longMetricsBetween(activeMetric, startMs, endMs);
+            Iterator<Map.Entry<Long, Number>> iterator = diagnostics.metricsBetween(activeMetric, startMs, endMs);
 
             if (!iterator.hasNext()) {
                 continue;
@@ -113,7 +111,7 @@ public class MetricsPane {
 
             while (iterator.hasNext()) {
                 try {
-                    Map.Entry<Long, Long> entry = iterator.next();
+                    Map.Entry<Long, Number> entry = iterator.next();
                     series.add(new FixedMillisecond(entry.getKey()), entry.getValue());
                 } catch (SeriesException e) {
                     System.err.println("Error adding to series");

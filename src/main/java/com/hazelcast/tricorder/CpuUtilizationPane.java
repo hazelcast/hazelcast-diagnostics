@@ -56,7 +56,7 @@ public class CpuUtilizationPane {
         collection.removeAllSeries();
 
         for (InstanceDiagnostics diagnostics : diagnosticsList) {
-            Iterator<Map.Entry<Long, Double>> iterator = diagnostics.doubleMetricsBetween("[metric=os.processCpuLoad]", startMs, endMs);
+            Iterator<Map.Entry<Long, Number>> iterator = diagnostics.metricsBetween("[metric=os.processCpuLoad]", startMs, endMs);
 
             if (!iterator.hasNext()) {
                 continue;
@@ -66,9 +66,9 @@ public class CpuUtilizationPane {
 
             while (iterator.hasNext()) {
                 try {
-                    Map.Entry<Long, Double> entry = iterator.next();
+                    Map.Entry<Long, Number> entry = iterator.next();
                     long ms = entry.getKey();
-                    Double value = entry.getValue();
+                    double value = entry.getValue().doubleValue();
                     // System.out.println(value);
                     series.add(new FixedMillisecond(ms), value);
                 } catch (SeriesException e) {
