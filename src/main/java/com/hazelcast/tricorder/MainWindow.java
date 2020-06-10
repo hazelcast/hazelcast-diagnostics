@@ -12,6 +12,7 @@ public class MainWindow {
     private JFrame window;
     private Map<File, InstanceDiagnostics> machines = new HashMap<>();
 
+    private DashboardPane dashboardPane = new DashboardPane();
     private SystemPropertiesPane systemPropertiesPane = new SystemPropertiesPane();
     private BuildInfoPane buildInfoPane = new BuildInfoPane();
     private InstancesPane machinesPane;
@@ -58,6 +59,10 @@ public class MainWindow {
             systemPropertiesPane.setInstanceDiagnostics(null);
             buildInfoPane.setInstanceDiagnostics(null);
         }
+
+        dashboardPane.setInstanceDiagnostics(machines);
+        dashboardPane.update();
+
         invocationProfilerPane.setInstanceDiagnostics(machines);
         invocationProfilerPane.update();
 
@@ -116,6 +121,9 @@ public class MainWindow {
         timeSelectorPane.addChangeListener(e -> {
             long startMs = timeSelectorPane.getStartMs();
             long endMs = timeSelectorPane.getEndMs();
+
+            dashboardPane.setRange(startMs, endMs);
+            dashboardPane.update();
 
             cpuUtilizationPane.setRange(startMs, endMs);
             cpuUtilizationPane.update();
@@ -177,6 +185,7 @@ public class MainWindow {
     private JTabbedPane newTabbedPane() {
         JTabbedPane tabbedPane = new JTabbedPane();
         tabbedPane.setTabPlacement(JTabbedPane.BOTTOM);
+        tabbedPane.addTab("Dashboard", null, dashboardPane.getComponent());
         tabbedPane.addTab("Memory", null, memoryPane.getComponent());
         tabbedPane.addTab("CPU", null, cpuUtilizationPane.getComponent());
         tabbedPane.addTab("Metrics", null, metricsPane.getComponent());
