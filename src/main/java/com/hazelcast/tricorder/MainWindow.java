@@ -24,6 +24,7 @@ public class MainWindow {
     private OperationsPlane operationsPlane = new OperationsPlane();
     private PendingPane invocationsPendingPane = new PendingPane("[unit=count,metric=operation.invocations.pending]", "Invocations Pending");
     private PendingPane operationsPendingPane = new PendingPane("[unit=count,metric=operation.queueSize]", "Operations Pending");
+    private StatusBar statusBar = new StatusBar();
 
     public JFrame getJFrame() {
         return window;
@@ -87,34 +88,33 @@ public class MainWindow {
         JTabbedPane tabbedPane = newTabbedPane();
 
         timeSelectorPane.addChangeListener(e -> {
-            long begin = timeSelectorPane.getStartMs();
-            long end = timeSelectorPane.getEndMs();
+            long startMs = timeSelectorPane.getStartMs();
+            long endMs = timeSelectorPane.getEndMs();
 
-            cpuUtilizationPane.setRange(begin, end);
+            cpuUtilizationPane.setRange(startMs, endMs);
             cpuUtilizationPane.update();
 
-            memoryPane.setRange(begin, end);
+            memoryPane.setRange(startMs, endMs);
             memoryPane.update();
 
-            invocationProfilerPane.setRange(begin, end);
+            invocationProfilerPane.setRange(startMs, endMs);
             invocationProfilerPane.update();
 
-            metricsPane.setRange(begin, end);
+            metricsPane.setRange(startMs, endMs);
             metricsPane.update();
 
-            invocationsPlane.setRange(begin, end);
+            invocationsPlane.setRange(startMs, endMs);
             invocationsPlane.update();
 
-            operationsPlane.setRange(begin, end);
+            operationsPlane.setRange(startMs, endMs);
             operationsPlane.update();
 
-            invocationsPendingPane.setRange(begin, end);
+            invocationsPendingPane.setRange(startMs, endMs);
             invocationsPendingPane.update();
 
-            operationsPendingPane.setRange(begin, end);
+            operationsPendingPane.setRange(startMs, endMs);
             operationsPendingPane.update();
         });
-
 
         JPanel analysisPanel = new JPanel();
         analysisPanel.setLayout(new BorderLayout());
@@ -125,7 +125,12 @@ public class MainWindow {
         splitPane.setDividerLocation(250);
 
 
-        window.setContentPane(splitPane);
+        JPanel mainPanel = new JPanel();
+        mainPanel.setLayout(new BorderLayout());
+        mainPanel.add(splitPane, BorderLayout.CENTER);
+        mainPanel.add(statusBar.getComponent(), BorderLayout.SOUTH);
+
+        window.setContentPane(mainPanel);
     }
 
     private JTabbedPane newTabbedPane() {
