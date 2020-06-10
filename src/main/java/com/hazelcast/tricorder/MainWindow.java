@@ -16,6 +16,8 @@ public class MainWindow {
     private BuildInfoPane buildInfoPane = new BuildInfoPane();
     private InstancesPane machinesPane;
     private InvocationProfilerPane invocationProfilerPane = new InvocationProfilerPane();
+    private LatencyDistributionPane invocationLatencyDistributionPane = new LatencyDistributionPane(InstanceDiagnostics.TYPE_INVOCATION_PROFILER);
+    private LatencyDistributionPane operationLatencyDistributionPane = new LatencyDistributionPane(InstanceDiagnostics.TYPE_OPERATION_PROFILER);
     private MemoryPane memoryPane = new MemoryPane();
     private CpuUtilizationPane cpuUtilizationPane = new CpuUtilizationPane();
     private MetricsPane metricsPane = new MetricsPane();
@@ -79,6 +81,12 @@ public class MainWindow {
         invocationsPendingPane.setInstanceDiagnostics(machines);
         invocationsPendingPane.update();
 
+        invocationLatencyDistributionPane.setInstanceDiagnostics(machines);
+        invocationLatencyDistributionPane.update();
+
+        operationLatencyDistributionPane.setInstanceDiagnostics(machines);
+        operationLatencyDistributionPane.update();
+
         operationsPendingPane.setInstanceDiagnostics(machines);
         operationsPendingPane.update();
 
@@ -138,6 +146,12 @@ public class MainWindow {
             invocationsPendingPane.setRange(startMs, endMs);
             invocationsPendingPane.update();
 
+            invocationLatencyDistributionPane.setRange(startMs, endMs);
+            invocationLatencyDistributionPane.update();
+
+            operationLatencyDistributionPane.setRange(startMs, endMs);
+            operationLatencyDistributionPane.update();
+
             operationsPendingPane.setRange(startMs, endMs);
             operationsPendingPane.update();
 
@@ -184,9 +198,10 @@ public class MainWindow {
         tabbedPane.addTab("System properties", null, systemPropertiesPane.getComponent());
         tabbedPane.addTab("Invocation Throughput", null, invocationsPlane.getComponent());
         tabbedPane.addTab("Invocation Profiler", null, invocationProfilerPane.getComponent());
+        tabbedPane.addTab("Invocation Latency Distribution", null, invocationLatencyDistributionPane.getComponent());
         tabbedPane.addTab("Invocation Pending", null, invocationsPendingPane.getComponent());
         tabbedPane.addTab("Operations Throughput", null, operationsPlane.getComponent());
-        tabbedPane.addTab("Operation profiler", null, new JPanel());
+        tabbedPane.addTab("Operation Latency Distribution", null, operationLatencyDistributionPane.getComponent());
         tabbedPane.addTab("Operation Pending", null, operationsPendingPane.getComponent());
         // tabbedPane.addTab("Slow operation thread sampler", null, new JPanel());
         tabbedPane.addTab("Slow Operations", null, slowOperationsPane.getComponent());
