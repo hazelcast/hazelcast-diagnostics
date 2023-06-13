@@ -1,4 +1,4 @@
-package com.hazelcast.tricorder;
+package com.hazelcast.diagnostics;
 
 import java.io.File;
 import java.io.FileNotFoundException;

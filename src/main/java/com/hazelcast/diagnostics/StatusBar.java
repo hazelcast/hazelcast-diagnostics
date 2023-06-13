@@ -1,7 +1,6 @@
-package com.hazelcast.tricorder;
+package com.hazelcast.diagnostics;
 
 import javax.swing.*;
-import javax.swing.border.BevelBorder;
 import javax.swing.border.EmptyBorder;
 import java.awt.*;
 import java.awt.event.ActionEvent;

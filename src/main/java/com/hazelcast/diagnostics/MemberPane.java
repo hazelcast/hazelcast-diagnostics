@@ -1,4 +1,4 @@
-package com.hazelcast.tricorder;
+package com.hazelcast.diagnostics;
 
 import javax.swing.*;
 import java.util.ArrayList;
@@ -8,7 +8,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 
-public class SlowOperationsPane {
+public class MemberPane {
 
     private final JComponent component;
     private final JTextArea textArea;
@@ -16,7 +16,7 @@ public class SlowOperationsPane {
     private long startMs = Long.MIN_VALUE;
     private long endMs = Long.MAX_VALUE;
 
-    public SlowOperationsPane() {
+    public MemberPane() {
         this.textArea = new JTextArea();
         textArea.setEditable(false);
         this.component = new JScrollPane(textArea);
@@ -39,7 +39,7 @@ public class SlowOperationsPane {
 
         TreeMap<Long, List<String>> treeMap = new TreeMap();
         for (InstanceDiagnostics diagnostics : diagnosticsList) {
-            Iterator<Map.Entry<Long, String>> iterator = diagnostics.between(InstanceDiagnostics.TYPE_SLOW_OPERATIONS, startMs, endMs);
+            Iterator<Map.Entry<Long, String>> iterator = diagnostics.between(InstanceDiagnostics.TYPE_MEMBER, startMs, endMs);
 
             if (!iterator.hasNext()) {
                 continue;
@@ -48,11 +48,7 @@ public class SlowOperationsPane {
             while (iterator.hasNext()) {
                 Map.Entry<Long, String> entry = iterator.next();
                 Long key = entry.getKey();
-                List<String> list = treeMap.get(key);
-                if (list == null) {
-                    list = new ArrayList<>();
-                    treeMap.put(key, list);
-                }
+                List<String> list = treeMap.computeIfAbsent(key, k -> new ArrayList<>());
                 list.add(entry.getValue());
             }
         }

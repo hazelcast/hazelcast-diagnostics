@@ -1,4 +1,4 @@
-package com.hazelcast.tricorder;
+package com.hazelcast.diagnostics;
 
 import org.jfree.chart.ChartFactory;
 import org.jfree.chart.ChartPanel;
@@ -14,24 +14,24 @@ import javax.swing.*;
 import java.text.SimpleDateFormat;
 import java.util.Collection;
 import java.util.Iterator;
-import java.util.LinkedList;
 import java.util.Map;
 
-public class CpuUtilizationPane {
+public class InvocationsPlane {
+
     private final JPanel component;
     private final JFreeChart chart;
     private final ChartPanel chartPanel;
     private final TimeSeriesCollection collection;
+    private Collection<InstanceDiagnostics> diagnosticsList;
     private long startMs = Long.MIN_VALUE;
     private long endMs = Long.MAX_VALUE;
-    private Collection<InstanceDiagnostics> diagnosticsList = new LinkedList<>();
 
-    public CpuUtilizationPane() {
+    public InvocationsPlane() {
         collection = new TimeSeriesCollection();
         chart = ChartFactory.createTimeSeriesChart(
-                "CPU Utilization",
+                "Invocation Throughput",
                 "Time",
-                "Utilization",
+                "Throughput",
                 collection,
                 true,
                 true,
@@ -54,28 +54,36 @@ public class CpuUtilizationPane {
 
     public void update() {
         collection.removeAllSeries();
+        if (diagnosticsList == null) {
+            return;
+        }
 
         for (InstanceDiagnostics diagnostics : diagnosticsList) {
-            Iterator<Map.Entry<Long, Number>> iterator = diagnostics.metricsBetween("[metric=os.processCpuLoad]", startMs, endMs);
+            Iterator<Map.Entry<Long, Number>> iterator = diagnostics.metricsBetween("[unit=count,metric=operation.invocations.lastCallId]", startMs, endMs);
 
             if (!iterator.hasNext()) {
                 continue;
             }
 
-            final TimeSeries series = new TimeSeries(diagnostics.getDirectory().getName());
-
+            TimeSeries series = new TimeSeries(diagnostics.getDirectory().getName());
+            long previousMs = 0;
+            long previousCount = 0;
             while (iterator.hasNext()) {
                 try {
                     Map.Entry<Long, Number> entry = iterator.next();
-                    long ms = entry.getKey();
-                    double value = entry.getValue().doubleValue();
-                    // System.out.println(value);
-                    series.add(new FixedMillisecond(ms), value);
+                    long currentMs = entry.getKey();
+
+                    long count = entry.getValue().longValue();
+                    long delta = count - previousCount;
+                    long durationMs = currentMs - previousMs;
+                    double throughput = (delta * 1000d) / durationMs;
+                    series.add(new FixedMillisecond(currentMs), throughput);
+                    previousMs = currentMs;
+                    previousCount = count;
                 } catch (SeriesException e) {
                     System.err.println("Error adding to series");
                 }
             }
-
             collection.addSeries(series);
         }
     }
