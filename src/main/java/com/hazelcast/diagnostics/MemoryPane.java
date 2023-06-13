@@ -1,4 +1,4 @@
-package com.hazelcast.tricorder;
+package com.hazelcast.diagnostics;
 
 import org.jfree.chart.ChartFactory;
 import org.jfree.chart.ChartPanel;
@@ -12,28 +12,27 @@ import org.jfree.data.time.TimeSeriesCollection;
 
 import javax.swing.*;
 import java.text.SimpleDateFormat;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Iterator;
 import java.util.Map;
 
-public class PendingPane {
+public class MemoryPane {
 
     private final JPanel component;
     private final JFreeChart chart;
     private final ChartPanel chartPanel;
     private final TimeSeriesCollection collection;
-    private final String metric;
-    private Collection<InstanceDiagnostics> diagnosticsList;
+    private Collection<InstanceDiagnostics> diagnosticsList = new ArrayList<>();
     private long startMs = Long.MIN_VALUE;
     private long endMs = Long.MAX_VALUE;
 
-    public PendingPane(String metric, String title) {
-        this.collection = new TimeSeriesCollection();
-        this.metric = metric;
-        this.chart = ChartFactory.createTimeSeriesChart(
-                title,
+    public MemoryPane() {
+        collection = new TimeSeriesCollection();
+        chart = ChartFactory.createTimeSeriesChart(
+                "Memory Usage",
                 "Time",
-                "Pending",
+                "Memory Usage",
                 collection,
                 true,
                 true,
@@ -56,12 +55,9 @@ public class PendingPane {
 
     public void update() {
         collection.removeAllSeries();
-        if (diagnosticsList == null) {
-            return;
-        }
 
         for (InstanceDiagnostics diagnostics : diagnosticsList) {
-            Iterator<Map.Entry<Long, Number>> iterator = diagnostics.metricsBetween(metric, startMs, endMs);
+            Iterator<Map.Entry<Long, Number>> iterator = diagnostics.metricsBetween("[metric=runtime.usedMemory]", startMs, endMs);
 
             if (!iterator.hasNext()) {
                 continue;
@@ -71,7 +67,9 @@ public class PendingPane {
             while (iterator.hasNext()) {
                 try {
                     Map.Entry<Long, Number> entry = iterator.next();
-                    series.add(new FixedMillisecond(entry.getKey()), entry.getValue());
+                    long ms = entry.getKey();
+                    Long value = entry.getValue().longValue();
+                    series.add(new FixedMillisecond(ms), value);
                 } catch (SeriesException e) {
                     System.err.println("Error adding to series");
                 }

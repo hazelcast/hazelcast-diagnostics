@@ -1,4 +1,4 @@
-package com.hazelcast.tricorder;
+package com.hazelcast.diagnostics;
 
 import org.jfree.chart.ChartPanel;
 import org.jfree.chart.JFreeChart;

@@ -1,4 +1,4 @@
-package com.hazelcast.tricorder;
+package com.hazelcast.diagnostics;
 
 import javax.swing.*;
 import javax.swing.event.ListSelectionEvent;
@@ -12,7 +12,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
-import static com.hazelcast.tricorder.DiagnosticsLoader.load;
+import static com.hazelcast.diagnostics.DiagnosticsLoader.load;
 import static java.util.stream.IntStream.range;
 
 public class InstancesPane {

@@ -1,4 +1,4 @@
-package com.hazelcast.tricorder;
+package com.hazelcast.diagnostics;
 
 import org.jfree.chart.ChartFactory;
 import org.jfree.chart.ChartPanel;
@@ -16,22 +16,24 @@ import java.util.Collection;
 import java.util.Iterator;
 import java.util.Map;
 
-public class OperationsPlane {
+public class PendingPane {
 
     private final JPanel component;
     private final JFreeChart chart;
     private final ChartPanel chartPanel;
     private final TimeSeriesCollection collection;
+    private final String metric;
     private Collection<InstanceDiagnostics> diagnosticsList;
     private long startMs = Long.MIN_VALUE;
     private long endMs = Long.MAX_VALUE;
 
-    public OperationsPlane() {
-        collection = new TimeSeriesCollection();
-        chart = ChartFactory.createTimeSeriesChart(
-                "Operation Throughput",
+    public PendingPane(String metric, String title) {
+        this.collection = new TimeSeriesCollection();
+        this.metric = metric;
+        this.chart = ChartFactory.createTimeSeriesChart(
+                title,
                 "Time",
-                "Throughput",
+                "Pending",
                 collection,
                 true,
                 true,
@@ -59,27 +61,17 @@ public class OperationsPlane {
         }
 
         for (InstanceDiagnostics diagnostics : diagnosticsList) {
-            Iterator<Map.Entry<Long, Number>> iterator = diagnostics.metricsBetween("[unit=count,metric=operation.completedCount]", startMs, endMs);
+            Iterator<Map.Entry<Long, Number>> iterator = diagnostics.metricsBetween(metric, startMs, endMs);
 
             if (!iterator.hasNext()) {
                 continue;
             }
 
             TimeSeries series = new TimeSeries(diagnostics.getDirectory().getName());
-            long previousMs = 0;
-            long previousCount = 0;
             while (iterator.hasNext()) {
                 try {
                     Map.Entry<Long, Number> entry = iterator.next();
-                    long currentMs = entry.getKey();
-
-                    long count = entry.getValue().longValue();
-                    long delta = count-previousCount;
-                    long durationMs = currentMs - previousMs;
-                    double throughput = (delta * 1000d) / durationMs;
-                    series.add(new FixedMillisecond(currentMs), throughput);
-                    previousMs = currentMs;
-                    previousCount=count;
+                    series.add(new FixedMillisecond(entry.getKey()), entry.getValue());
                 } catch (SeriesException e) {
                     System.err.println("Error adding to series");
                 }

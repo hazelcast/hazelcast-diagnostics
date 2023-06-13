@@ -1,4 +1,4 @@
-package com.hazelcast.tricorder;
+package com.hazelcast.diagnostics;
 
 import javax.swing.*;
 import java.awt.*;
@@ -115,6 +115,7 @@ public class MainWindow {
         window = new JFrame();
         Dimension dim = Toolkit.getDefaultToolkit().getScreenSize();
         window.setSize(1440, 900);
+        window.setTitle("Diagnostics Analyzer");
         window.setLocation(dim.width / 2 - window.getSize().width / 2, dim.height / 2 - window.getSize().height / 2);
         window.setLocationRelativeTo(null);
         window.setDefaultCloseOperation(WindowConstants.EXIT_ON_CLOSE);
