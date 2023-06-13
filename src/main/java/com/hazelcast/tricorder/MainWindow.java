@@ -228,8 +228,8 @@ public class MainWindow {
         menuBar.add(fileMenu);
         window.setJMenuBar(menuBar);
 
-        JMenuItem menuItem = new JMenuItem("Load");
-        fileMenu.add(menuItem);
+//        JMenuItem menuItem = new JMenuItem("Load");
+//        fileMenu.add(menuItem);
 
         JMenuItem exitItem = new JMenuItem("Exit");
         exitItem.addActionListener(e -> System.exit(0));
