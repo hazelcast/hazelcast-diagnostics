@@ -87,7 +87,6 @@ public class LatencyDistributionPane {
                     continue;
                 }
 
-                System.out.println(distribution);
                 for (Map.Entry<Long, Long> e : distribution.entrySet()) {
                     dataset.addValue(e.getValue(), diagnostics.getDirectory().getName(),e.getKey());
                 }

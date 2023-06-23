@@ -12,13 +12,18 @@ import org.jfree.data.time.TimeSeriesCollection;
 
 import javax.swing.*;
 import java.awt.*;
+import java.awt.event.ActionEvent;
+import java.awt.event.ActionListener;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.regex.PatternSyntaxException;
 
 public class MetricsPane {
     private final JComboBox<Object> comboBox;
@@ -26,6 +31,7 @@ public class MetricsPane {
     private LinkedHashSet<String> metricsNames = new LinkedHashSet<>();
 
     private JPanel component;
+    private JTextField filterTextField;
     private final JFreeChart chart;
     private final ChartPanel chartPanel;
     private final TimeSeriesCollection collection;
@@ -37,13 +43,13 @@ public class MetricsPane {
     public MetricsPane() {
         this.comboBox = new JComboBox<>();
         this.comboBox.grabFocus();
-        AutoCompletion.enable(comboBox);
         this.comboBox.addActionListener(e -> {
             activeMetric = (String) comboBox.getSelectedItem();
             update();
         });
         this.comboBoxModel = new DefaultComboBoxModel();
         comboBox.setModel(comboBoxModel);
+
         this.collection = new TimeSeriesCollection();
         this.chart = ChartFactory.createTimeSeriesChart(
                 "Metrics",
@@ -54,15 +60,25 @@ public class MetricsPane {
                 true,
                 false);
         this.chartPanel = new ChartPanel(chart);
-        XYPlot plot = (XYPlot)chartPanel.getChart().getPlot();
-        DateAxis axis = (DateAxis)plot.getDomainAxis();
+        XYPlot plot = (XYPlot) chartPanel.getChart().getPlot();
+        DateAxis axis = (DateAxis) plot.getDomainAxis();
         axis.setDateFormatOverride(new SimpleDateFormat("HH:mm:ss"));
 
-        JPanel panel = new JPanel();
-        panel.setLayout(new BorderLayout());
-        panel.add(comboBox, BorderLayout.NORTH);
-        panel.add(chartPanel, BorderLayout.CENTER);
-        this.component = panel;
+        this.filterTextField = new JTextField();
+        filterTextField.setText(".*");
+        filterTextField.setToolTipText("A regex based filter over the metrics.");
+        filterTextField.addActionListener(e -> updateCombobox());
+
+        JPanel selectionPanel = new JPanel();
+        selectionPanel.setLayout(new BoxLayout(selectionPanel, BoxLayout.Y_AXIS));
+        selectionPanel.add(filterTextField);
+        selectionPanel.add(comboBox);
+
+        JPanel mainPanel = new JPanel();
+        mainPanel.setLayout(new BorderLayout());
+        mainPanel.add(selectionPanel, BorderLayout.NORTH);
+        mainPanel.add(chartPanel, BorderLayout.CENTER);
+        this.component = mainPanel;
     }
 
     public JComponent getComponent() {
@@ -81,16 +97,36 @@ public class MetricsPane {
         for (InstanceDiagnostics diagnostics : diagnosticsList) {
             metricsNames.addAll(diagnostics.getAvailableMetrics());
         }
-
-        java.util.List<String> metrics = new ArrayList<>(metricsNames);
-        Collections.sort(metrics);
-
-        comboBoxModel.removeAllElements();
-        for (String metricName : metrics) {
-            comboBoxModel.addElement(metricName);
-        }
         if (diagnosticsList.isEmpty()) {
             activeMetric = null;
+        }
+
+        updateCombobox();
+    }
+
+    private void updateCombobox() {
+        String patternString = filterTextField.getText().trim();
+        Pattern p;
+        try {
+            p = Pattern.compile(patternString);
+        } catch (PatternSyntaxException ex) {
+            JOptionPane.showMessageDialog(null, "Invalid regex [" + patternString + "]", "Error", JOptionPane.ERROR_MESSAGE);
+            return;
+        }
+
+        java.util.List<String> filteredMetrics = new ArrayList<>();
+        for (String metric : metricsNames) {
+            Matcher m = p.matcher(metric);
+            if (m.matches()) {
+                filteredMetrics.add(metric);
+            }
+        }
+
+        Collections.sort(filteredMetrics);
+
+        comboBoxModel.removeAllElements();
+        for (String metricName : filteredMetrics) {
+            comboBoxModel.addElement(metricName);
         }
     }
 
