@@ -1,0 +1,1 @@
+`Diagnostics Analyzer` is a GUI that analyzes the [collected diagnostics](https://docs.hazelcast.com/hazelcast/latest/maintain-cluster/monitoring#diagnostics)https://docs.hazelcast.com/hazelcast/latest/maintain-cluster/monitoring#diagnostics of Hazelcast
