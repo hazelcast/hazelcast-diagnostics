@@ -4,7 +4,7 @@ Analyzes the [collected diagnostics](https://docs.hazelcast.com/hazelcast/latest
 
 ----
 
-![Screenshot](./images/screenshot.png)
+![Screenshot](./images/screenshot.PNG)
 
 ----
 
