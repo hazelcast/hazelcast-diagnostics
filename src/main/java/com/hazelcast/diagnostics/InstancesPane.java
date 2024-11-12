@@ -34,11 +34,11 @@ public class InstancesPane {
 
         JPanel panel = new JPanel(new BorderLayout(), true);
 
-        JPanel buttonsPanel = new JPanel();
+        JPanel buttonsPanel = new JPanel(new BorderLayout());
         buttonsPanel.add(createAddInstanceButton(buttonsPanel, listModel), BorderLayout.WEST);
         buttonsPanel.add(createClearInstancesButton(listModel), BorderLayout.EAST);
-        panel.add(buttonsPanel, BorderLayout.NORTH);
 
+        panel.add(buttonsPanel, BorderLayout.NORTH);
         panel.add(list, BorderLayout.CENTER);
 
         this.component = panel;

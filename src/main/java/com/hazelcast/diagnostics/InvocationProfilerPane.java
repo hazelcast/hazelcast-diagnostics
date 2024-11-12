@@ -12,16 +12,21 @@ import org.jfree.data.xy.DefaultXYDataset;
 import javax.swing.*;
 import java.awt.*;
 import java.text.ParseException;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.Set;
 import java.util.SortedMap;
 import java.util.TreeMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 public class InvocationProfilerPane {
     private static final String INVOCATION_PROFILE_MARKER = "InvocationProfiler[";
@@ -43,6 +48,7 @@ public class InvocationProfilerPane {
                 true,
                 false);
         pane = new ChartPanel(latencyChart);
+
         XYPlot plot = latencyChart.getXYPlot();
         ValueAxis xAxis = plot.getDomainAxis();
         xAxis.setRange(0, 8);

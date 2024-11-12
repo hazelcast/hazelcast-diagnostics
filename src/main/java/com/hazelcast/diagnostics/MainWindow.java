@@ -25,8 +25,8 @@ public class MainWindow {
     private TimeSelectorPane timeSelectorPane = new TimeSelectorPane();
     private InvocationsPlane invocationsPlane = new InvocationsPlane();
     private OperationsPlane operationsPlane = new OperationsPlane();
-    private PendingPane invocationsPendingPane = new PendingPane("[unit=count,metric=operation.invocations.pending]", "Invocations Pending");
-    private PendingPane operationsPendingPane = new PendingPane("[unit=count,metric=operation.queueSize]", "Operations Pending");
+    private PendingPane invocationsPendingPane = new PendingPane(InstanceDiagnostics.METRIC_OPERATION_INVOCATIONS_PENDING, "Invocations Pending");
+    private PendingPane operationsPendingPane = new PendingPane(InstanceDiagnostics.METRIC_OPERATION_QUEUE_SIZE, "Operations Pending");
     private StatusBar statusBar = new StatusBar();
     private SlowOperationsPane slowOperationsPane = new SlowOperationsPane();
     private ConnectionPane connectionPane = new ConnectionPane();
@@ -229,11 +229,12 @@ public class MainWindow {
         menuBar.add(fileMenu);
         window.setJMenuBar(menuBar);
 
-//        JMenuItem menuItem = new JMenuItem("Load");
-//        fileMenu.add(menuItem);
-
         JMenuItem exitItem = new JMenuItem("Exit");
         exitItem.addActionListener(e -> System.exit(0));
         fileMenu.add(exitItem);
+
+        JMenuItem gcItem = new JMenuItem("GC");
+        gcItem.addActionListener(e -> System.gc());
+        fileMenu.add(gcItem);
     }
 }

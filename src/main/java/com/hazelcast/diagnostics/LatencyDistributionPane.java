@@ -27,21 +27,20 @@ public class LatencyDistributionPane {
     private static final String INVOCATION_PROFILE_MARKER = "InvocationProfiler[";
 
     private final DefaultCategoryDataset dataset = new DefaultCategoryDataset();
-    private final ChartPanel chart;
     private final JPanel component;
-    private final DefaultComboBoxModel<Object> comboBoxModel;
     private long startMs = Long.MIN_VALUE;
     private long endMs = Long.MAX_VALUE;
     private Collection<InstanceDiagnostics> instanceDiagnosticsColl = new ArrayList<>();
-    private JComboBox comboBox;
-    private Map<InstanceDiagnostics, Map<String, SortedMap<Long,Long>>> distributionMap = new HashMap<>();
+    private final DefaultComboBoxModel<String> comboBoxModel;
+    private final JComboBox<String> comboBox;
+    private final Map<InstanceDiagnostics, Map<String, SortedMap<Long,Long>>> distributionMap = new HashMap<>();
+    private final String type;
     private String active;
-    private int type;
 
-    public LatencyDistributionPane(int type) {
+    public LatencyDistributionPane(String type) {
         this.type = type;
         comboBoxModel = new DefaultComboBoxModel<>();
-        comboBox = new JComboBox(comboBoxModel);
+        comboBox = new JComboBox<>(comboBoxModel);
         comboBox.addActionListener(e -> {
             active = (String) comboBox.getSelectedItem();
             render();
@@ -55,7 +54,7 @@ public class LatencyDistributionPane {
                 dataset,
                 PlotOrientation.VERTICAL,
                 true, true, false);
-        chart = new ChartPanel(barChart);
+        ChartPanel chart = new ChartPanel(barChart);
         panel.add(comboBox, BorderLayout.NORTH);
         panel.add(chart, BorderLayout.CENTER);
         component = panel;
@@ -138,7 +137,6 @@ public class LatencyDistributionPane {
         Map<String, SortedMap<Long, Long>> endLatencies = extractOperationToLatencyProfile(parseProfile(endProfileStr));
         subtractStartFromEnd(startLatencies, endLatencies);
 
-
         Map<String,SortedMap<Long,Long>> result  = new HashMap<>();
 
         for (Entry<String, SortedMap<Long, Long>> endLatency : endLatencies.entrySet()) {
@@ -171,9 +169,6 @@ public class LatencyDistributionPane {
                     exist.put(key, finalValue + delta);
                 }
             }
-
-//            double[][] percentilePlot = transposeToPercentilePlot(endProfile);
-//            dataset.addSeries(operation, percentilePlot);
         }
 
         return result;

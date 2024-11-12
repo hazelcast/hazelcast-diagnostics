@@ -19,8 +19,6 @@ import java.util.Map;
 public class OperationsPlane {
 
     private final JPanel component;
-    private final JFreeChart chart;
-    private final ChartPanel chartPanel;
     private final TimeSeriesCollection collection;
     private Collection<InstanceDiagnostics> diagnosticsList;
     private long startMs = Long.MIN_VALUE;
@@ -28,16 +26,10 @@ public class OperationsPlane {
 
     public OperationsPlane() {
         collection = new TimeSeriesCollection();
-        chart = ChartFactory.createTimeSeriesChart(
-                "Operation Throughput",
-                "Time",
-                "Throughput",
-                collection,
-                true,
-                true,
-                false);
-        this.chartPanel = new ChartPanel(chart);
-        XYPlot plot = (XYPlot)chartPanel.getChart().getPlot();
+        JFreeChart chart = ChartFactory.createTimeSeriesChart("Operation Throughput", "Time", "Throughput", collection, true,
+                true, false);
+        ChartPanel chartPanel = new ChartPanel(chart);
+        XYPlot plot = (XYPlot) chartPanel.getChart().getPlot();
         DateAxis axis = (DateAxis)plot.getDomainAxis();
         axis.setDateFormatOverride(new SimpleDateFormat("HH:mm:ss"));
         this.component = chartPanel;
@@ -59,7 +51,8 @@ public class OperationsPlane {
         }
 
         for (InstanceDiagnostics diagnostics : diagnosticsList) {
-            Iterator<Map.Entry<Long, Number>> iterator = diagnostics.metricsBetween("[unit=count,metric=operation.completedCount]", startMs, endMs);
+            Iterator<Map.Entry<Long, Number>> iterator = diagnostics.metricsBetween(
+                    InstanceDiagnostics.METRIC_OPERATION_COMPLETED_COUNT, startMs, endMs);
 
             if (!iterator.hasNext()) {
                 continue;
