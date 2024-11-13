@@ -9,9 +9,10 @@ Analyzes the [collected diagnostics](https://docs.hazelcast.com/hazelcast/latest
 ----
 
 ## Launching
-Launch `com.hazelcast.diagnostics.Main.main(String[])`
-
-## Troubleshooting
-
-- `java.lang.IllegalAccessError: class com.jidesoft.plaf.LookAndFeelFactory [...] cannot access class com.sun.java.swing.plaf.windows.WindowsLookAndFeel [...] because module java.desktop does not export com.sun.java.swing.plaf.windows to unnamed module`
-  - Add `--add-exports java.desktop/com.sun.java.swing.plaf.windows=ALL-UNNAMED` VM argument
+- Launch [`com.hazelcast.diagnostics.Main.main(String[])`](./src/main/java/com/hazelcast/diagnostics/Main.java)
+- Add VM arguments to avoid `java.lang.IllegalAccessError: [...] java.desktop does not export [...] to unnamed module`
+	- Windows
+		- `--add-exports java.desktop/com.sun.java.swing.plaf.windows=ALL-UNNAMED`
+	- MacOS
+		- `--add-exports java.desktop/com.apple.laf=ALL-UNNAMED`
+		- `--add-exports java.desktop/com.apple.laf=ALL-UNNAMED`
