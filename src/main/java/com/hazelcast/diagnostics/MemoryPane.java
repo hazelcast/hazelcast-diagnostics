@@ -10,7 +10,8 @@ import org.jfree.data.time.FixedMillisecond;
 import org.jfree.data.time.TimeSeries;
 import org.jfree.data.time.TimeSeriesCollection;
 
-import javax.swing.*;
+import javax.swing.JComponent;
+import javax.swing.JPanel;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Collection;

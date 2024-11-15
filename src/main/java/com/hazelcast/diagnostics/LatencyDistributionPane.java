@@ -6,8 +6,11 @@ import org.jfree.chart.JFreeChart;
 import org.jfree.chart.plot.PlotOrientation;
 import org.jfree.data.category.DefaultCategoryDataset;
 
-import javax.swing.*;
-import java.awt.*;
+import javax.swing.DefaultComboBoxModel;
+import javax.swing.JComboBox;
+import javax.swing.JComponent;
+import javax.swing.JPanel;
+import java.awt.BorderLayout;
 import java.text.ParseException;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -34,10 +37,10 @@ public class LatencyDistributionPane {
     private final DefaultComboBoxModel<String> comboBoxModel;
     private final JComboBox<String> comboBox;
     private final Map<InstanceDiagnostics, Map<String, SortedMap<Long,Long>>> distributionMap = new HashMap<>();
-    private final String type;
+    private final InstanceDiagnostics.DiagnosticType type;
     private String active;
 
-    public LatencyDistributionPane(String type) {
+    public LatencyDistributionPane(InstanceDiagnostics.DiagnosticType type) {
         this.type = type;
         comboBoxModel = new DefaultComboBoxModel<>();
         comboBox = new JComboBox<>(comboBoxModel);
@@ -162,12 +165,7 @@ public class LatencyDistributionPane {
                 long delta = endValue - startValue;
                 SortedMap<Long, Long> exist = result.computeIfAbsent(operation, k -> new TreeMap<>());
 
-                Long finalValue = exist.get(key);
-                if (finalValue == null) {
-                    exist.put(key, delta);
-                } else {
-                    exist.put(key, finalValue + delta);
-                }
+                exist.merge(key, delta, Long::sum);
             }
         }
 

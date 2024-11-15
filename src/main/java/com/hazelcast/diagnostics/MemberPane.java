@@ -1,12 +1,16 @@
 package com.hazelcast.diagnostics;
 
-import javax.swing.*;
+import javax.swing.JComponent;
+import javax.swing.JScrollPane;
+import javax.swing.JTextArea;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
+
+import static com.hazelcast.diagnostics.InstanceDiagnostics.DiagnosticType.TYPE_MEMBER;
 
 public class MemberPane {
 
@@ -37,9 +41,9 @@ public class MemberPane {
             return;
         }
 
-        TreeMap<Long, List<String>> treeMap = new TreeMap();
+        TreeMap<Long, List<String>> treeMap = new TreeMap<>();
         for (InstanceDiagnostics diagnostics : diagnosticsList) {
-            Iterator<Map.Entry<Long, String>> iterator = diagnostics.between(InstanceDiagnostics.TYPE_MEMBER, startMs, endMs);
+            Iterator<Map.Entry<Long, String>> iterator = diagnostics.between(TYPE_MEMBER, startMs, endMs);
 
             if (!iterator.hasNext()) {
                 continue;

@@ -9,8 +9,13 @@ import org.jfree.data.Range;
 import org.jfree.data.general.DefaultValueDataset;
 import org.jfree.data.general.ValueDataset;
 
-import javax.swing.*;
-import java.awt.*;
+import javax.swing.JComponent;
+import javax.swing.JPanel;
+import javax.swing.JTabbedPane;
+import java.awt.BasicStroke;
+import java.awt.Color;
+import java.awt.GridLayout;
+import java.awt.Label;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Iterator;
@@ -126,9 +131,9 @@ public class DashboardPane {
     public void update() {
 
         Long maxUsedHeap = 0L;
-        Long maxHeap = 0L;
+        long maxHeap = 0L;
         Double maxCPULoad = 0D;
-        Long totalMemory = 0L;
+        long totalMemory = 0L;
 
         for (InstanceDiagnostics diagnostics : instanceDiagnosticsColl) {
             Iterator<Map.Entry<Long, Number>> iteratorUsedHeap = diagnostics.metricsBetween(
@@ -157,7 +162,7 @@ public class DashboardPane {
 
             while (iteratorTotalMemory.hasNext()) {
                 Map.Entry<Long, Number> entry = iteratorTotalMemory.next();
-                totalMemory = entry.getValue().longValue() > totalMemory ? entry.getValue().longValue() : totalMemory;
+                totalMemory = Math.max(entry.getValue().longValue(), totalMemory);
 
             }
         }

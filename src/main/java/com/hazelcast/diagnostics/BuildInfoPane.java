@@ -1,18 +1,21 @@
 package com.hazelcast.diagnostics;
 
-import javax.swing.*;
+import javax.swing.JComponent;
+import javax.swing.JScrollPane;
+import javax.swing.JTable;
 import javax.swing.table.DefaultTableModel;
 import java.util.Iterator;
 import java.util.Map;
 
+import static com.hazelcast.diagnostics.InstanceDiagnostics.DiagnosticType.TYPE_BUILD_INFO;
+
 public class BuildInfoPane {
 
-    private final JTable table;
     private final DefaultTableModel model;
     private final JScrollPane pane;
 
     public BuildInfoPane() {
-        table = new JTable();
+        JTable table = new JTable();
         model = new DefaultTableModel();
         table.setModel(model);
         model.addColumn("Key");
@@ -31,7 +34,7 @@ public class BuildInfoPane {
             return;
         }
 
-        Iterator<Map.Entry<Long, String>> it = diagnostics.between(InstanceDiagnostics.TYPE_BUILD_INFO, 0, Long.MAX_VALUE);
+        Iterator<Map.Entry<Long, String>> it = diagnostics.between(TYPE_BUILD_INFO, 0, Long.MAX_VALUE);
         if (!it.hasNext()) {
             System.out.println("No BuildInfo found in directory: " + diagnostics.getDirectory());
             return;

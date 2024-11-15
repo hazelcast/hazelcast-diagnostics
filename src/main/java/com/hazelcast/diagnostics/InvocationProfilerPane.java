@@ -9,24 +9,19 @@ import org.jfree.chart.plot.XYPlot;
 import org.jfree.chart.renderer.AbstractRenderer;
 import org.jfree.data.xy.DefaultXYDataset;
 
-import javax.swing.*;
-import java.awt.*;
+import javax.swing.JComponent;
+import java.awt.BasicStroke;
 import java.text.ParseException;
-import java.time.LocalDateTime;
-import java.time.format.DateTimeFormatter;
-import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.Map.Entry;
-import java.util.Set;
 import java.util.SortedMap;
 import java.util.TreeMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import java.util.stream.Collectors;
 
 public class InvocationProfilerPane {
     private static final String INVOCATION_PROFILE_MARKER = "InvocationProfiler[";
@@ -75,7 +70,7 @@ public class InvocationProfilerPane {
     public void update() {
         for (InstanceDiagnostics profile : instanceDiagnosticsColl) {
             Iterator<Map.Entry<Long, String>> iter = profile
-                    .between(InstanceDiagnostics.TYPE_INVOCATION_PROFILER, startMs, endMs);
+                    .between(InstanceDiagnostics.DiagnosticType.TYPE_INVOCATION_PROFILER, startMs, endMs);
             if (!iter.hasNext()) {
                 continue;
             }

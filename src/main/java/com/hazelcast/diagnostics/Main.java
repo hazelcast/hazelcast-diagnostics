@@ -1,8 +1,9 @@
 package com.hazelcast.diagnostics;
 
-import javax.swing.*;
+import javax.swing.UIDefaults;
+import javax.swing.UIManager;
 import javax.swing.plaf.FontUIResource;
-import java.awt.*;
+import java.awt.Font;
 import java.util.Enumeration;
 
 public class Main {
@@ -22,8 +23,7 @@ public class Main {
 
     public static void incFontSize(float multiplier) {
         UIDefaults defaults = UIManager.getDefaults();
-        int i = 0;
-        for (Enumeration e = defaults.keys(); e.hasMoreElements(); i++) {
+        for (Enumeration<Object> e = defaults.keys(); e.hasMoreElements(); ) {
             Object key = e.nextElement();
             Object value = defaults.get(key);
             if (value instanceof Font) {

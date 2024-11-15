@@ -12,29 +12,12 @@ import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.SortedMap;
 import java.util.TreeMap;
 
 public class InstanceDiagnostics {
-
-    public static final String TYPE_UNKNOWN = "__builtin_type-0";
-    public static final String TYPE_METRIC = "__builtin_type-1";
-    public static final String TYPE_BUILD_INFO = "__builtin_type-2";
-    public static final String TYPE_SYSTEM_PROPERTIES = "__builtin_type-3";
-    public static final String TYPE_CONFIG_PROPERTIES = "__builtin_type-4";
-    public static final String TYPE_SLOW_OPERATIONS = "__builtin_type-5";
-    public static final String TYPE_INVOCATIONS = "__builtin_type-6";
-    public static final String TYPE_INVOCATION_PROFILER = "__builtin_type-7";
-    public static final String TYPE_OPERATION_PROFILER = "__builtin_type-8";
-    public static final String TYPE_OPERATION_THREAD_SAMPLES = "__builtin_type-9";
-    public static final String TYPE_CONNECTION = "__builtin_type-10";
-    public static final String TYPE_HAZELCAST_INSTANCE = "__builtin_type-11";
-    public static final String TYPE_MEMBER = "__builtin_type-12";
-    public static final String TYPE_CLUSTER_VERSION_CHANGE = "__builtin_type-13";
-    public static final String TYPE_LIFECYCLE = "__builtin_type-14";
-    public static final String TYPE_WAN = "__builtin_type-15";
-    public static final String TYPE_HEARTBEAT = "__builtin_type-16";
 
     public static final String METRIC_OPERATION_INVOCATIONS_PENDING = "[unit=count,metric=operation.invocations.pending]";
     public static final String METRIC_OPERATION_QUEUE_SIZE = "[unit=count,metric=operation.queueSize]";
@@ -115,60 +98,32 @@ public class InstanceDiagnostics {
     private void analyze(StringBuilder sb, DiagnosticsFile file, int offset, int startOffset) {
         int spaces = 0;
         long timestamp = 0;
-        for (int k = 0; k < sb.length(); k++) {
+        int k;
+        for (k = 0; k < sb.length(); k++) {
             char c = sb.charAt(k);
             if (c == ' ') {
                 spaces++;
             } else if (spaces == 2) {
                 timestamp = timestamp * 10 + Character.getNumericValue(c);
+            } else if (spaces == 3)
+            {
+                break;
             }
         }
 
-        String type;
-        // very inefficient.
-        if (sb.indexOf("Metric[") != -1) {
-            type = TYPE_METRIC;
-        } else if (sb.indexOf("BuildInfo[") != -1) {
-            type = TYPE_BUILD_INFO;
-        } else if (sb.indexOf("SystemProperties[") != -1) {
-            type = TYPE_SYSTEM_PROPERTIES;
-        } else if (sb.indexOf("ConfigProperties[") != -1) {
-            type = TYPE_CONFIG_PROPERTIES;
-        } else if (sb.indexOf("SlowOperations[") != -1) {
-            type = TYPE_SLOW_OPERATIONS;
-        } else if (sb.indexOf("Invocations[") != -1) {
-            type = TYPE_INVOCATIONS;
-        } else if (sb.indexOf("InvocationProfiler[") != -1) {
-            type = TYPE_INVOCATION_PROFILER;
-        } else if (sb.indexOf("OperationsProfiler[") != -1) {
-            type = TYPE_OPERATION_PROFILER;
-        } else if (sb.indexOf("ConnectionRemoved[") != -1) {
-            type = TYPE_CONNECTION;
-        } else if (sb.indexOf("OperationThreadSamples[") != -1) {
-            type = TYPE_OPERATION_THREAD_SAMPLES;
-        } else if (sb.indexOf("HazelcastInstance[") != -1) {
-            type = TYPE_HAZELCAST_INSTANCE;
-        } else if (sb.indexOf("MemberRemoved[") != -1) {
-            type = TYPE_MEMBER;
-        } else if (sb.indexOf("MemberAdded[") != -1) {
-            type = TYPE_MEMBER;
-        } else if (sb.indexOf("ClusterVersionChanged[") != -1) {
-            type = TYPE_CLUSTER_VERSION_CHANGE;
-        } else if (sb.indexOf("Lifecycle[") != -1) {
-            type = TYPE_LIFECYCLE;
-        } else if (sb.indexOf("ConnectionAdded[") != -1) {
-            type = TYPE_CONNECTION;
-        } else if (sb.indexOf("WAN[") != -1) {
-            type = TYPE_WAN;
-        } else if (sb.indexOf("OperationHeartbeat[") != -1) {
-            type = TYPE_HEARTBEAT;
-        } else if (sb.indexOf("MemberHeartbeats[") != -1) {
-            type = TYPE_HEARTBEAT;
+        int closeType = sb.indexOf("[");
+        DiagnosticType type;
+        if(closeType == -1) {
+            type = DiagnosticType.TYPE_UNKNOWN;
         } else {
+            type = DiagnosticType.from(sb.substring(k, closeType));
+        }
+
+        if(type == DiagnosticType.TYPE_UNKNOWN)
+        {
             System.out.println("------------------------------------");
-            System.out.println(sb.toString());
+            System.out.println(sb);
             System.out.println("------------------------------------");
-            type = TYPE_UNKNOWN;
         }
 
         if (timestamp > file.endMs) file.endMs = timestamp;
@@ -178,12 +133,17 @@ public class InstanceDiagnostics {
 
         DiagnosticsIndexEntry fragment = new DiagnosticsIndexEntry(file, startOffset, (offset - startOffset) + 1);
 
-        String metricName = type;
-        if (TYPE_METRIC.equals(type)) {
+        DiagnosticKey diagnosticKey;
+        if (DiagnosticType.TYPE_METRIC.equals(type)) {
             int indexLastEquals = sb.lastIndexOf("=");
             int indexFirstSquareBracket = sb.indexOf("[");
-            metricName = sb.substring(indexFirstSquareBracket + 1, indexLastEquals).intern();
+            String metricName = sb.substring(indexFirstSquareBracket + 1, indexLastEquals).intern();
             availableMetrics.add(metricName);
+            diagnosticKey = new DiagnosticKey(type, metricName);
+        }
+        else
+        {
+            diagnosticKey = new DiagnosticKey(type);
         }
 
         DiagnosticsIndex index = metricsIndices.get(timestamp);
@@ -191,7 +151,7 @@ public class InstanceDiagnostics {
             index = new DiagnosticsIndex();
             metricsIndices.put(timestamp, index);
         }
-        index.add(metricName, fragment);
+        index.add(diagnosticKey, fragment);
     }
 
     private List<DiagnosticsFile> diagnosticsFiles() {
@@ -213,7 +173,7 @@ public class InstanceDiagnostics {
         return endMs;
     }
 
-    public Iterator<Map.Entry<Long, String>> between(String type, long startMs, long endMs) {
+    public Iterator<Map.Entry<Long, String>> between(DiagnosticType type, long startMs, long endMs) {
         return new IteratorImpl(type, startMs, endMs);
     }
 
@@ -242,13 +202,60 @@ public class InstanceDiagnostics {
         return metricName;
     }
 
+    public enum DiagnosticType {
+        TYPE_UNKNOWN("!!Unknown!!"),
+        TYPE_METRIC("Metric"),
+        TYPE_BUILD_INFO("BuildInfo"),
+        TYPE_SYSTEM_PROPERTIES("SystemProperties"),
+        TYPE_CONFIG_PROPERTIES("ConfigProperties"),
+        TYPE_SLOW_OPERATIONS("SlowOperations"),
+        TYPE_INVOCATIONS("Invocations"),
+        TYPE_INVOCATION_PROFILER("InvocationProfiler"),
+        TYPE_OPERATION_PROFILER("OperationsProfiler"),
+        TYPE_OPERATION_THREAD_SAMPLES("OperationThreadSamples"),
+        TYPE_CONNECTION("ConnectionAdded", "ConnectionRemoved"),
+        TYPE_HAZELCAST_INSTANCE("HazelcastInstance"),
+        TYPE_MEMBER("MemberAdded", "MemberRemoved"),
+        TYPE_CLUSTER_VERSION_CHANGE("ClusterVersionChanged"),
+        TYPE_LIFECYCLE("Lifecycle"),
+        TYPE_WAN("WAN"),
+        TYPE_HEARTBEAT("OperationHeartbeat");
+
+        private final String[] logPrefixes;
+
+        private static final Map<String, DiagnosticType> byPrefix = new HashMap<>();
+
+        DiagnosticType(String... logPrefixes) {
+            this.logPrefixes = logPrefixes;
+        }
+
+        static {
+            for (DiagnosticType value : DiagnosticType.values()) {
+                for (String logPrefix : value.logPrefixes) {
+                    if(byPrefix.put(logPrefix, value) != null) {
+                        throw new IllegalArgumentException("Duplicate logPrefix! " + logPrefix);
+                    }
+                }
+            }
+        }
+
+        public static DiagnosticType from(String prefix) {
+            DiagnosticType type = byPrefix.get(prefix);
+            if( type == null)
+            {
+                type = TYPE_UNKNOWN;
+            }
+            return type;
+        }
+    }
+
     private class LongMetricsIterator implements Iterator<Map.Entry<Long, Number>> {
         private final Iterator<Map.Entry<Long, DiagnosticsIndex>> iterator;
-        private final String metricName;
+        private final DiagnosticKey diagnosticKey;
         private Map.Entry<Long, DiagnosticsIndex> entry;
 
         public LongMetricsIterator(String metricName, long startMs, long endMs) {
-            this.metricName = metricName;
+            this.diagnosticKey = new DiagnosticKey(DiagnosticType.TYPE_METRIC, metricName);
             iterator = metricsIndices.subMap(startMs, endMs).entrySet().iterator();
         }
 
@@ -260,7 +267,7 @@ public class InstanceDiagnostics {
             for (; ; ) {
                 if (iterator.hasNext()) {
                     Map.Entry<Long, DiagnosticsIndex> e = iterator.next();
-                    DiagnosticsIndexEntry indexEntry = e.getValue().metricsMap.get(metricName);
+                    DiagnosticsIndexEntry indexEntry = e.getValue().metricsMap.get(diagnosticKey);
                     if(indexEntry != null) {
                         entry = e;
                         return true;
@@ -275,7 +282,7 @@ public class InstanceDiagnostics {
         public Map.Entry<Long, Number> next() {
             Map.Entry<Long, DiagnosticsIndex> next = entry;
             DiagnosticsIndex index = next.getValue();
-            DiagnosticsIndexEntry indexEntry = index.metricsMap.get(metricName);
+            DiagnosticsIndexEntry indexEntry = index.metricsMap.get(diagnosticKey);
 
             String s = indexEntry.file.load(indexEntry.offset, indexEntry.length);
             int indexOfLastEquals = s.lastIndexOf('=');
@@ -292,14 +299,13 @@ public class InstanceDiagnostics {
         }
     }
 
-
     private class IteratorImpl implements Iterator<Map.Entry<Long, String>> {
         private Map.Entry<Long, DiagnosticsIndex> entry;
         private final Iterator<Map.Entry<Long, DiagnosticsIndex>> iterator;
-        private final String type;
+        private final DiagnosticKey diagnosticKey;
 
-        public IteratorImpl(String type, long startMs, long endMs) {
-            this.type = type;
+        public IteratorImpl(DiagnosticType type, long startMs, long endMs) {
+            this.diagnosticKey = new DiagnosticKey(type);
             this.iterator = metricsIndices.subMap(startMs, endMs).entrySet().iterator();
         }
 
@@ -311,7 +317,7 @@ public class InstanceDiagnostics {
             for (; ; ) {
                 if (iterator.hasNext()) {
                     Map.Entry<Long, DiagnosticsIndex> e = iterator.next();
-                    DiagnosticsIndexEntry indexEntry = e.getValue().metricsMap.get(type);
+                    DiagnosticsIndexEntry indexEntry = e.getValue().metricsMap.get(diagnosticKey);
                     if(indexEntry != null) {
                         entry = e;
                         return true;
@@ -324,7 +330,7 @@ public class InstanceDiagnostics {
 
         @Override
         public Map.Entry<Long, String> next() {
-            DiagnosticsIndexEntry indexEntry = entry.getValue().metricsMap.get(type);
+            DiagnosticsIndexEntry indexEntry = entry.getValue().metricsMap.get(diagnosticKey);
             String value = indexEntry.file.load(indexEntry.offset, indexEntry.length);
             Long key = entry.getKey();
             entry = null;
@@ -361,9 +367,44 @@ public class InstanceDiagnostics {
         }
     }
 
+    private static class DiagnosticKey {
+        private final DiagnosticType type;
+        private final String name;
+
+        private DiagnosticKey(DiagnosticType type, String name) {
+            this.type = type;
+            this.name = name;
+        }
+        private DiagnosticKey(DiagnosticType type) {
+            this(type, null);
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (o == null || getClass() != o.getClass()) {
+                return false;
+            }
+            DiagnosticKey that = (DiagnosticKey) o;
+            return type == that.type && Objects.equals(name, that.name);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(type, name);
+        }
+
+        @Override
+        public String toString() {
+            return "DiagnosticKey{" + "type=" + type + ", name='" + name + '\'' + '}';
+        }
+    }
+
     private static class DiagnosticsIndex {
-        private final Map<String, DiagnosticsIndexEntry> metricsMap = new HashMap<>();
-        public void add(String key, DiagnosticsIndexEntry indexEntry) {
+        private final Map<DiagnosticKey, DiagnosticsIndexEntry> metricsMap = new HashMap<>();
+        public void add(DiagnosticKey key, DiagnosticsIndexEntry indexEntry) {
             metricsMap.put(key, indexEntry);
         }
     }

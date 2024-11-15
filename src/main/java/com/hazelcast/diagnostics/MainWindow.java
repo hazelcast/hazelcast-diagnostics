@@ -1,7 +1,16 @@
 package com.hazelcast.diagnostics;
 
-import javax.swing.*;
-import java.awt.*;
+import javax.swing.JFrame;
+import javax.swing.JMenu;
+import javax.swing.JMenuBar;
+import javax.swing.JMenuItem;
+import javax.swing.JPanel;
+import javax.swing.JSplitPane;
+import javax.swing.JTabbedPane;
+import javax.swing.WindowConstants;
+import java.awt.BorderLayout;
+import java.awt.Dimension;
+import java.awt.Toolkit;
 import java.io.File;
 import java.util.Collection;
 import java.util.HashMap;
@@ -9,30 +18,30 @@ import java.util.Map;
 
 public class MainWindow {
 
-    private JFrame window;
-    private Map<File, InstanceDiagnostics> machines = new HashMap<>();
+    private final JFrame window;
+    private final Map<File, InstanceDiagnostics> machines = new HashMap<>();
 
-    private DashboardPane dashboardPane = new DashboardPane();
-    private SystemPropertiesPane systemPropertiesPane = new SystemPropertiesPane();
-    private BuildInfoPane buildInfoPane = new BuildInfoPane();
-    private InstancesPane machinesPane;
-    private InvocationProfilerPane invocationProfilerPane = new InvocationProfilerPane();
-    private LatencyDistributionPane invocationLatencyDistributionPane = new LatencyDistributionPane(InstanceDiagnostics.TYPE_INVOCATION_PROFILER);
-    private LatencyDistributionPane operationLatencyDistributionPane = new LatencyDistributionPane(InstanceDiagnostics.TYPE_OPERATION_PROFILER);
-    private MemoryPane memoryPane = new MemoryPane();
-    private CpuUtilizationPane cpuUtilizationPane = new CpuUtilizationPane();
-    private MetricsPane metricsPane = new MetricsPane();
-    private TimeSelectorPane timeSelectorPane = new TimeSelectorPane();
-    private InvocationsPlane invocationsPlane = new InvocationsPlane();
-    private OperationsPlane operationsPlane = new OperationsPlane();
-    private PendingPane invocationsPendingPane = new PendingPane(InstanceDiagnostics.METRIC_OPERATION_INVOCATIONS_PENDING, "Invocations Pending");
-    private PendingPane operationsPendingPane = new PendingPane(InstanceDiagnostics.METRIC_OPERATION_QUEUE_SIZE, "Operations Pending");
-    private StatusBar statusBar = new StatusBar();
-    private SlowOperationsPane slowOperationsPane = new SlowOperationsPane();
-    private ConnectionPane connectionPane = new ConnectionPane();
-    private MemberPane memberPane = new MemberPane();
-    private WANPane wanPane = new WANPane();
-    private HeartbeatPane heartbeatPane = new HeartbeatPane();
+    private final DashboardPane dashboardPane = new DashboardPane();
+    private final SystemPropertiesPane systemPropertiesPane = new SystemPropertiesPane();
+    private final BuildInfoPane buildInfoPane = new BuildInfoPane();
+    private final InvocationProfilerPane invocationProfilerPane = new InvocationProfilerPane();
+    private final LatencyDistributionPane invocationLatencyDistributionPane = new LatencyDistributionPane(
+            InstanceDiagnostics.DiagnosticType.TYPE_INVOCATION_PROFILER);
+    private final LatencyDistributionPane operationLatencyDistributionPane = new LatencyDistributionPane(
+            InstanceDiagnostics.DiagnosticType.TYPE_OPERATION_PROFILER);
+    private final MemoryPane memoryPane = new MemoryPane();
+    private final CpuUtilizationPane cpuUtilizationPane = new CpuUtilizationPane();
+    private final MetricsPane metricsPane = new MetricsPane();
+    private final TimeSelectorPane timeSelectorPane = new TimeSelectorPane();
+    private final InvocationsPlane invocationsPlane = new InvocationsPlane();
+    private final OperationsPlane operationsPlane = new OperationsPlane();
+    private final PendingPane invocationsPendingPane = new PendingPane(InstanceDiagnostics.METRIC_OPERATION_INVOCATIONS_PENDING, "Invocations Pending");
+    private final PendingPane operationsPendingPane = new PendingPane(InstanceDiagnostics.METRIC_OPERATION_QUEUE_SIZE, "Operations Pending");
+    private final SlowOperationsPane slowOperationsPane = new SlowOperationsPane();
+    private final ConnectionPane connectionPane = new ConnectionPane();
+    private final MemberPane memberPane = new MemberPane();
+    private final WANPane wanPane = new WANPane();
+    private final HeartbeatPane heartbeatPane = new HeartbeatPane();
 
     public JFrame getJFrame() {
         return window;
@@ -120,7 +129,7 @@ public class MainWindow {
         window.setLocationRelativeTo(null);
         window.setDefaultCloseOperation(WindowConstants.EXIT_ON_CLOSE);
 
-        machinesPane = new InstancesPane(this);
+        InstancesPane machinesPane = new InstancesPane(this);
         machinesPane.addDirectories(new File("data/member"), new File("data/litemember"));
 
         buildMenu(window);
@@ -192,6 +201,7 @@ public class MainWindow {
         JPanel mainPanel = new JPanel();
         mainPanel.setLayout(new BorderLayout());
         mainPanel.add(splitPane, BorderLayout.CENTER);
+        StatusBar statusBar = new StatusBar();
         mainPanel.add(statusBar.getComponent(), BorderLayout.SOUTH);
 
         window.setContentPane(mainPanel);

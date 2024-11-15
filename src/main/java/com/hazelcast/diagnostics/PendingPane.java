@@ -10,7 +10,8 @@ import org.jfree.data.time.FixedMillisecond;
 import org.jfree.data.time.TimeSeries;
 import org.jfree.data.time.TimeSeriesCollection;
 
-import javax.swing.*;
+import javax.swing.JComponent;
+import javax.swing.JPanel;
 import java.text.SimpleDateFormat;
 import java.util.Collection;
 import java.util.Iterator;
@@ -19,8 +20,6 @@ import java.util.Map;
 public class PendingPane {
 
     private final JPanel component;
-    private final JFreeChart chart;
-    private final ChartPanel chartPanel;
     private final TimeSeriesCollection collection;
     private final String metric;
     private Collection<InstanceDiagnostics> diagnosticsList;
@@ -30,16 +29,9 @@ public class PendingPane {
     public PendingPane(String metric, String title) {
         this.collection = new TimeSeriesCollection();
         this.metric = metric;
-        this.chart = ChartFactory.createTimeSeriesChart(
-                title,
-                "Time",
-                "Pending",
-                collection,
-                true,
-                true,
-                false);
-        this.chartPanel = new ChartPanel(chart);
-        XYPlot plot = (XYPlot)chartPanel.getChart().getPlot();
+        JFreeChart chart = ChartFactory.createTimeSeriesChart(title, "Time", "Pending", collection, true, true, false);
+        ChartPanel chartPanel = new ChartPanel(chart);
+        XYPlot plot = (XYPlot) chartPanel.getChart().getPlot();
         DateAxis axis = (DateAxis)plot.getDomainAxis();
         axis.setDateFormatOverride(new SimpleDateFormat("HH:mm:ss"));
         this.component = chartPanel;
