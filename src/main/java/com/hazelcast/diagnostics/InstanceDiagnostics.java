@@ -105,31 +105,37 @@ public class InstanceDiagnostics {
                 spaces++;
             } else if (spaces == 2) {
                 timestamp = timestamp * 10 + Character.getNumericValue(c);
-            } else if (spaces == 3)
-            {
+            } else if (spaces == 3) {
                 break;
             }
         }
 
         int closeType = sb.indexOf("[");
         DiagnosticType type;
-        if(closeType == -1) {
+        if (closeType == -1) {
             type = DiagnosticType.TYPE_UNKNOWN;
         } else {
             type = DiagnosticType.from(sb.substring(k, closeType));
         }
 
-        if(type == DiagnosticType.TYPE_UNKNOWN)
-        {
+        if (type == DiagnosticType.TYPE_UNKNOWN) {
             System.out.println("------------------------------------");
             System.out.println(sb);
             System.out.println("------------------------------------");
         }
 
-        if (timestamp > file.endMs) file.endMs = timestamp;
-        if (timestamp > endMs) endMs = timestamp;
-        if (timestamp < file.startMs) file.startMs = timestamp;
-        if (timestamp < startMs) startMs = timestamp;
+        if (timestamp > file.endMs) {
+            file.endMs = timestamp;
+        }
+        if (timestamp > endMs) {
+            endMs = timestamp;
+        }
+        if (timestamp < file.startMs) {
+            file.startMs = timestamp;
+        }
+        if (timestamp < startMs) {
+            startMs = timestamp;
+        }
 
         DiagnosticsIndexEntry fragment = new DiagnosticsIndexEntry(file, startOffset, (offset - startOffset) + 1);
 
@@ -140,9 +146,7 @@ public class InstanceDiagnostics {
             String metricName = sb.substring(indexFirstSquareBracket + 1, indexLastEquals).intern();
             availableMetrics.add(metricName);
             diagnosticKey = new DiagnosticKey(type, metricName);
-        }
-        else
-        {
+        } else {
             diagnosticKey = new DiagnosticKey(type);
         }
 
@@ -232,7 +236,7 @@ public class InstanceDiagnostics {
         static {
             for (DiagnosticType value : DiagnosticType.values()) {
                 for (String logPrefix : value.logPrefixes) {
-                    if(byPrefix.put(logPrefix, value) != null) {
+                    if (byPrefix.put(logPrefix, value) != null) {
                         throw new IllegalArgumentException("Duplicate logPrefix! " + logPrefix);
                     }
                 }
@@ -240,12 +244,7 @@ public class InstanceDiagnostics {
         }
 
         public static DiagnosticType from(String prefix) {
-            DiagnosticType type = byPrefix.get(prefix);
-            if( type == null)
-            {
-                type = TYPE_UNKNOWN;
-            }
-            return type;
+            return byPrefix.getOrDefault(prefix, TYPE_UNKNOWN);
         }
     }
 
@@ -268,7 +267,7 @@ public class InstanceDiagnostics {
                 if (iterator.hasNext()) {
                     Map.Entry<Long, DiagnosticsIndex> e = iterator.next();
                     DiagnosticsIndexEntry indexEntry = e.getValue().metricsMap.get(diagnosticKey);
-                    if(indexEntry != null) {
+                    if (indexEntry != null) {
                         entry = e;
                         return true;
                     }
@@ -289,9 +288,9 @@ public class InstanceDiagnostics {
             String value = s.substring(indexOfLastEquals + 1).replace("]", "");
             int indexDot = value.indexOf('.');
             Number n;
-            if(indexDot == -1){
+            if (indexDot == -1) {
                 n = Long.parseLong(value);
-            }else{
+            } else {
                 n = Double.parseDouble(value);
             }
             entry = null;
@@ -318,7 +317,7 @@ public class InstanceDiagnostics {
                 if (iterator.hasNext()) {
                     Map.Entry<Long, DiagnosticsIndex> e = iterator.next();
                     DiagnosticsIndexEntry indexEntry = e.getValue().metricsMap.get(diagnosticKey);
-                    if(indexEntry != null) {
+                    if (indexEntry != null) {
                         entry = e;
                         return true;
                     }
@@ -375,6 +374,7 @@ public class InstanceDiagnostics {
             this.type = type;
             this.name = name;
         }
+
         private DiagnosticKey(DiagnosticType type) {
             this(type, null);
         }
@@ -404,6 +404,7 @@ public class InstanceDiagnostics {
 
     private static class DiagnosticsIndex {
         private final Map<DiagnosticKey, DiagnosticsIndexEntry> metricsMap = new HashMap<>();
+
         public void add(DiagnosticKey key, DiagnosticsIndexEntry indexEntry) {
             metricsMap.put(key, indexEntry);
         }
@@ -422,11 +423,7 @@ public class InstanceDiagnostics {
 
         @Override
         public String toString() {
-            return "DiagnosticsIndexEntry{" +
-                    "file="+file.file +
-                    ", offset=" + offset +
-                    ", length=" + length +
-                    '}';
+            return "DiagnosticsIndexEntry{" + "file=" + file.file + ", offset=" + offset + ", length=" + length + '}';
         }
     }
 }
