@@ -1,10 +1,20 @@
 package com.hazelcast.diagnostics;
 
-import javax.swing.*;
+import javax.swing.AbstractListModel;
+import javax.swing.JButton;
+import javax.swing.JComponent;
+import javax.swing.JFileChooser;
+import javax.swing.JList;
+import javax.swing.JMenuItem;
+import javax.swing.JPanel;
+import javax.swing.JPopupMenu;
+import javax.swing.ListSelectionModel;
 import javax.swing.event.ListSelectionEvent;
 import javax.swing.event.ListSelectionListener;
 import javax.swing.filechooser.FileFilter;
-import java.awt.*;
+import java.awt.BorderLayout;
+import java.awt.Component;
+import java.awt.Point;
 import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
@@ -34,11 +44,11 @@ public class InstancesPane {
 
         JPanel panel = new JPanel(new BorderLayout(), true);
 
-        JPanel buttonsPanel = new JPanel();
+        JPanel buttonsPanel = new JPanel(new BorderLayout());
         buttonsPanel.add(createAddInstanceButton(buttonsPanel, listModel), BorderLayout.WEST);
         buttonsPanel.add(createClearInstancesButton(listModel), BorderLayout.EAST);
-        panel.add(buttonsPanel, BorderLayout.NORTH);
 
+        panel.add(buttonsPanel, BorderLayout.NORTH);
         panel.add(list, BorderLayout.CENTER);
 
         this.component = panel;

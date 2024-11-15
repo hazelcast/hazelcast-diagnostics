@@ -10,7 +10,8 @@ import org.jfree.data.time.FixedMillisecond;
 import org.jfree.data.time.TimeSeries;
 import org.jfree.data.time.TimeSeriesCollection;
 
-import javax.swing.*;
+import javax.swing.JComponent;
+import javax.swing.JPanel;
 import java.text.SimpleDateFormat;
 import java.util.Collection;
 import java.util.Iterator;
@@ -19,8 +20,6 @@ import java.util.Map;
 
 public class CpuUtilizationPane {
     private final JPanel component;
-    private final JFreeChart chart;
-    private final ChartPanel chartPanel;
     private final TimeSeriesCollection collection;
     private long startMs = Long.MIN_VALUE;
     private long endMs = Long.MAX_VALUE;
@@ -28,16 +27,10 @@ public class CpuUtilizationPane {
 
     public CpuUtilizationPane() {
         collection = new TimeSeriesCollection();
-        chart = ChartFactory.createTimeSeriesChart(
-                "CPU Utilization",
-                "Time",
-                "Utilization",
-                collection,
-                true,
-                true,
+        JFreeChart chart = ChartFactory.createTimeSeriesChart("CPU Utilization", "Time", "Utilization", collection, true, true,
                 false);
-        this.chartPanel = new ChartPanel(chart);
-        XYPlot plot = (XYPlot)chartPanel.getChart().getPlot();
+        ChartPanel chartPanel = new ChartPanel(chart);
+        XYPlot plot = (XYPlot) chartPanel.getChart().getPlot();
         DateAxis axis = (DateAxis)plot.getDomainAxis();
         axis.setDateFormatOverride(new SimpleDateFormat("HH:mm:ss"));
         this.component = chartPanel;
@@ -56,7 +49,8 @@ public class CpuUtilizationPane {
         collection.removeAllSeries();
 
         for (InstanceDiagnostics diagnostics : diagnosticsList) {
-            Iterator<Map.Entry<Long, Number>> iterator = diagnostics.metricsBetween("[metric=os.processCpuLoad]", startMs, endMs);
+            Iterator<Map.Entry<Long, Number>> iterator = diagnostics.metricsBetween(
+                    InstanceDiagnostics.METRIC_OS_PROCESS_CPU_LOAD, startMs, endMs);
 
             if (!iterator.hasNext()) {
                 continue;

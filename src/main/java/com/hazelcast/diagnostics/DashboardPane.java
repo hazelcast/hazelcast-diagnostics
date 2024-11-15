@@ -9,28 +9,26 @@ import org.jfree.data.Range;
 import org.jfree.data.general.DefaultValueDataset;
 import org.jfree.data.general.ValueDataset;
 
-import javax.swing.*;
-import java.awt.*;
+import javax.swing.JComponent;
+import javax.swing.JPanel;
+import javax.swing.JTabbedPane;
+import java.awt.BasicStroke;
+import java.awt.Color;
+import java.awt.GridLayout;
+import java.awt.Label;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Iterator;
 import java.util.Map;
 
 public class DashboardPane {
-    private static final String INVOCATION_PROFILE_MARKER = "InvocationProfiler[";
 
     private final JPanel pane;
-    private final JFreeChart heapChart;
-    private final JFreeChart cpuChart;
+    private final MeterPlot heapPlot;
+    private final MeterPlot cpuPlot;
 
-    private final ChartPanel heapChartPanel;
-    private final ChartPanel cpuChartPanel;
-
-    private MeterPlot heapPlot;
-    private MeterPlot cpuPlot;
-
-    ValueDataset heapDataset;
-    ValueDataset cpuDataset;
+    private ValueDataset heapDataset;
+    private ValueDataset cpuDataset;
     private long startMs = Long.MIN_VALUE;
     private long endMs = Long.MAX_VALUE;
     private Collection<InstanceDiagnostics> instanceDiagnosticsColl = new ArrayList<>();
@@ -46,18 +44,16 @@ public class DashboardPane {
         configureCPUPlot();
         configureHeapPlot();
 
-        heapChart = new JFreeChart("Heap Memory", JFreeChart.DEFAULT_TITLE_FONT, heapPlot, false);
-        cpuChart = new JFreeChart("CPU", JFreeChart.DEFAULT_TITLE_FONT, cpuPlot, false);
-
+        JFreeChart heapChart = new JFreeChart("Heap Memory", JFreeChart.DEFAULT_TITLE_FONT, heapPlot, false);
+        JFreeChart cpuChart = new JFreeChart("CPU", JFreeChart.DEFAULT_TITLE_FONT, cpuPlot, false);
 
         JTabbedPane jTabbedPane = new JTabbedPane();
         jTabbedPane.setTabPlacement(JTabbedPane.TOP);
         jTabbedPane.addTab("Heap", new Label("heap"));
         jTabbedPane.addTab("CPU", new Label("cpu"));
 
-
-        heapChartPanel = new ChartPanel(heapChart);
-        cpuChartPanel = new ChartPanel(cpuChart);
+        ChartPanel heapChartPanel = new ChartPanel(heapChart);
+        ChartPanel cpuChartPanel = new ChartPanel(cpuChart);
 
         JPanel gaugePanel = new JPanel();
         gaugePanel.setLayout(new GridLayout(1, 2));
@@ -135,15 +131,19 @@ public class DashboardPane {
     public void update() {
 
         Long maxUsedHeap = 0L;
-        Long maxHeap = 0L;
+        long maxHeap = 0L;
         Double maxCPULoad = 0D;
-        Long totalMemory = 0L;
+        long totalMemory = 0L;
 
         for (InstanceDiagnostics diagnostics : instanceDiagnosticsColl) {
-            Iterator<Map.Entry<Long, Number>> iteratorUsedHeap = diagnostics.metricsBetween("[unit=bytes,metric=memory.usedHeap]", startMs, endMs);
-            Iterator<Map.Entry<Long, Number>> iteratorMaxHeap = diagnostics.metricsBetween("[unit=bytes,metric=memory.maxHeap]", startMs, endMs);
-            Iterator<Map.Entry<Long, Number>> iteratorCPULoad = diagnostics.metricsBetween("[metric=os.processCpuLoad]", startMs, endMs);
-            Iterator<Map.Entry<Long, Number>> iteratorTotalMemory = diagnostics.metricsBetween("[metric=runtime.totalMemory]", startMs, endMs);
+            Iterator<Map.Entry<Long, Number>> iteratorUsedHeap = diagnostics.metricsBetween(
+                    InstanceDiagnostics.METRIC_MEMORY_USED_HEAP, startMs, endMs);
+            Iterator<Map.Entry<Long, Number>> iteratorMaxHeap = diagnostics.metricsBetween(
+                    InstanceDiagnostics.METRIC_MEMORY_MAX_HEAP, startMs, endMs);
+            Iterator<Map.Entry<Long, Number>> iteratorCPULoad = diagnostics.metricsBetween(
+                    InstanceDiagnostics.METRIC_OS_PROCESS_CPU_LOAD, startMs, endMs);
+            Iterator<Map.Entry<Long, Number>> iteratorTotalMemory = diagnostics.metricsBetween(
+                    InstanceDiagnostics.METRIC_RUNTIME_TOTAL_MEMORY, startMs, endMs);
 
             while (iteratorUsedHeap.hasNext()) {
                 Map.Entry<Long, Number> entry = iteratorUsedHeap.next();
@@ -162,18 +162,14 @@ public class DashboardPane {
 
             while (iteratorTotalMemory.hasNext()) {
                 Map.Entry<Long, Number> entry = iteratorTotalMemory.next();
-                totalMemory = entry.getValue().longValue() > totalMemory ? entry.getValue().longValue() : totalMemory;
+                totalMemory = Math.max(entry.getValue().longValue(), totalMemory);
 
             }
         }
-
 
         heapDataset = new DefaultValueDataset(maxUsedHeap);
         updateHeapPlot(heapDataset, totalMemory);
         cpuDataset = new DefaultValueDataset(maxCPULoad);
         updateCPUPlot(cpuDataset);
-
     }
-
-
 }

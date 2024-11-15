@@ -9,8 +9,8 @@ import org.jfree.chart.plot.XYPlot;
 import org.jfree.chart.renderer.AbstractRenderer;
 import org.jfree.data.xy.DefaultXYDataset;
 
-import javax.swing.*;
-import java.awt.*;
+import javax.swing.JComponent;
+import java.awt.BasicStroke;
 import java.text.ParseException;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -43,6 +43,7 @@ public class InvocationProfilerPane {
                 true,
                 false);
         pane = new ChartPanel(latencyChart);
+
         XYPlot plot = latencyChart.getXYPlot();
         ValueAxis xAxis = plot.getDomainAxis();
         xAxis.setRange(0, 8);
@@ -69,7 +70,7 @@ public class InvocationProfilerPane {
     public void update() {
         for (InstanceDiagnostics profile : instanceDiagnosticsColl) {
             Iterator<Map.Entry<Long, String>> iter = profile
-                    .between(InstanceDiagnostics.TYPE_INVOCATION_PROFILER, startMs, endMs);
+                    .between(InstanceDiagnostics.DiagnosticType.TYPE_INVOCATION_PROFILER, startMs, endMs);
             if (!iter.hasNext()) {
                 continue;
             }

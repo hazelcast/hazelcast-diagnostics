@@ -6,8 +6,11 @@ import org.jfree.chart.JFreeChart;
 import org.jfree.chart.plot.PlotOrientation;
 import org.jfree.data.category.DefaultCategoryDataset;
 
-import javax.swing.*;
-import java.awt.*;
+import javax.swing.DefaultComboBoxModel;
+import javax.swing.JComboBox;
+import javax.swing.JComponent;
+import javax.swing.JPanel;
+import java.awt.BorderLayout;
 import java.text.ParseException;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -27,21 +30,20 @@ public class LatencyDistributionPane {
     private static final String INVOCATION_PROFILE_MARKER = "InvocationProfiler[";
 
     private final DefaultCategoryDataset dataset = new DefaultCategoryDataset();
-    private final ChartPanel chart;
     private final JPanel component;
-    private final DefaultComboBoxModel<Object> comboBoxModel;
     private long startMs = Long.MIN_VALUE;
     private long endMs = Long.MAX_VALUE;
     private Collection<InstanceDiagnostics> instanceDiagnosticsColl = new ArrayList<>();
-    private JComboBox comboBox;
-    private Map<InstanceDiagnostics, Map<String, SortedMap<Long,Long>>> distributionMap = new HashMap<>();
+    private final DefaultComboBoxModel<String> comboBoxModel;
+    private final JComboBox<String> comboBox;
+    private final Map<InstanceDiagnostics, Map<String, SortedMap<Long,Long>>> distributionMap = new HashMap<>();
+    private final InstanceDiagnostics.DiagnosticType type;
     private String active;
-    private int type;
 
-    public LatencyDistributionPane(int type) {
+    public LatencyDistributionPane(InstanceDiagnostics.DiagnosticType type) {
         this.type = type;
         comboBoxModel = new DefaultComboBoxModel<>();
-        comboBox = new JComboBox(comboBoxModel);
+        comboBox = new JComboBox<>(comboBoxModel);
         comboBox.addActionListener(e -> {
             active = (String) comboBox.getSelectedItem();
             render();
@@ -55,7 +57,7 @@ public class LatencyDistributionPane {
                 dataset,
                 PlotOrientation.VERTICAL,
                 true, true, false);
-        chart = new ChartPanel(barChart);
+        ChartPanel chart = new ChartPanel(barChart);
         panel.add(comboBox, BorderLayout.NORTH);
         panel.add(chart, BorderLayout.CENTER);
         component = panel;
@@ -138,7 +140,6 @@ public class LatencyDistributionPane {
         Map<String, SortedMap<Long, Long>> endLatencies = extractOperationToLatencyProfile(parseProfile(endProfileStr));
         subtractStartFromEnd(startLatencies, endLatencies);
 
-
         Map<String,SortedMap<Long,Long>> result  = new HashMap<>();
 
         for (Entry<String, SortedMap<Long, Long>> endLatency : endLatencies.entrySet()) {
@@ -164,16 +165,8 @@ public class LatencyDistributionPane {
                 long delta = endValue - startValue;
                 SortedMap<Long, Long> exist = result.computeIfAbsent(operation, k -> new TreeMap<>());
 
-                Long finalValue = exist.get(key);
-                if (finalValue == null) {
-                    exist.put(key, delta);
-                } else {
-                    exist.put(key, finalValue + delta);
-                }
+                exist.merge(key, delta, Long::sum);
             }
-
-//            double[][] percentilePlot = transposeToPercentilePlot(endProfile);
-//            dataset.addSeries(operation, percentilePlot);
         }
 
         return result;

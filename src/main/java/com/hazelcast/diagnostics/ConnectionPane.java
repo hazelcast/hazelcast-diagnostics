@@ -1,12 +1,16 @@
 package com.hazelcast.diagnostics;
 
-import javax.swing.*;
+import javax.swing.JComponent;
+import javax.swing.JScrollPane;
+import javax.swing.JTextArea;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
+
+import static com.hazelcast.diagnostics.InstanceDiagnostics.DiagnosticType.TYPE_CONNECTION;
 
 public class ConnectionPane {
 
@@ -37,9 +41,9 @@ public class ConnectionPane {
             return;
         }
 
-        TreeMap<Long, List<String>> treeMap = new TreeMap();
+        TreeMap<Long, List<String>> treeMap = new TreeMap<>();
         for (InstanceDiagnostics diagnostics : diagnosticsList) {
-            Iterator<Map.Entry<Long, String>> iterator = diagnostics.between(InstanceDiagnostics.TYPE_CONNECTION, startMs, endMs);
+            Iterator<Map.Entry<Long, String>> iterator = diagnostics.between(TYPE_CONNECTION, startMs, endMs);
 
             if (!iterator.hasNext()) {
                 continue;
@@ -48,11 +52,7 @@ public class ConnectionPane {
             while (iterator.hasNext()) {
                 Map.Entry<Long, String> entry = iterator.next();
                 Long key = entry.getKey();
-                List<String> list = treeMap.get(key);
-                if (list == null) {
-                    list = new ArrayList<>();
-                    treeMap.put(key, list);
-                }
+                List<String> list = treeMap.computeIfAbsent(key, k -> new ArrayList<>());
                 list.add(entry.getValue());
             }
         }

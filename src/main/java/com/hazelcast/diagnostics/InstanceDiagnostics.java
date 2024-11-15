@@ -12,34 +12,30 @@ import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
+import java.util.SortedMap;
 import java.util.TreeMap;
 
 public class InstanceDiagnostics {
-    public static final int TYPE_UNKNOWN = 0;
-    public static final int TYPE_METRIC = 1;
-    public static final int TYPE_BUILD_INFO = 2;
-    public static final int TYPE_SYSTEM_PROPERTIES = 3;
-    public static final int TYPE_CONFIG_PROPERTIES = 4;
-    public static final int TYPE_SLOW_OPERATIONS = 5;
-    public static final int TYPE_INVOCATIONS = 6;
-    public static final int TYPE_INVOCATION_PROFILER = 7;
-    public static final int TYPE_OPERATION_PROFILER = 8;
-    public static final int TYPE_OPERATION_THREAD_SAMPLES = 9;
-    public static final int TYPE_CONNECTION = 10;
-    public static final int TYPE_HAZELCAST_INSTANCE = 11;
-    public static final int TYPE_MEMBER = 12;
-    public static final int TYPE_CLUSTER_VERSION_CHANGE = 13;
-    public static final int TYPE_LIFECYCLE = 14;
-    public static final int TYPE_WAN = 15;
-    public static final int TYPE_HEARTBEAT = 16;
-    public static final int TYPES = TYPE_HEARTBEAT + 1;
 
-    private File directory;
-    private List<DiagnosticsFile> diagnosticsFiles;
+    public static final String METRIC_OPERATION_INVOCATIONS_PENDING = "[unit=count,metric=operation.invocations.pending]";
+    public static final String METRIC_OPERATION_QUEUE_SIZE = "[unit=count,metric=operation.queueSize]";
+    public static final String METRIC_RUNTIME_USED_MEMORY = "[metric=runtime.usedMemory]";
+    public static final String METRIC_OPERATION_INVOCATIONS_LAST_CALL_ID = "[unit=count,metric=operation.invocations.lastCallId]";
+    public static final String METRIC_OPERATION_COMPLETED_COUNT = "[unit=count,metric=operation.completedCount]";
+    public static final String METRIC_MEMORY_USED_HEAP = "[unit=bytes,metric=memory.usedHeap]";
+    public static final String METRIC_MEMORY_MAX_HEAP = "[unit=bytes,metric=memory.maxHeap]";
+    public static final String METRIC_OS_PROCESS_CPU_LOAD = "[metric=os.processCpuLoad]";
+    public static final String METRIC_RUNTIME_TOTAL_MEMORY = "[metric=runtime.totalMemory]";
+
+    private final File directory;
+    private final Set<String> availableMetrics = new HashSet<>();
+
     private long startMs = Long.MAX_VALUE;
     private long endMs = Long.MIN_VALUE;
-    private Set<String> availableMetrics = new HashSet<>();
+
+    private final SortedMap<Long, DiagnosticsIndex> metricsIndices = new TreeMap<>();
 
     public InstanceDiagnostics(File directory) {
         this.directory = directory;
@@ -55,7 +51,7 @@ public class InstanceDiagnostics {
 
     public InstanceDiagnostics analyze() {
         try {
-            diagnosticsFiles = diagnosticsFiles();
+            List<DiagnosticsFile> diagnosticsFiles = diagnosticsFiles();
             for (DiagnosticsFile diagnosticsFile : diagnosticsFiles) {
                 analyze(diagnosticsFile);
             }
@@ -67,7 +63,6 @@ public class InstanceDiagnostics {
 
     private void analyze(DiagnosticsFile file) throws IOException {
         FileReader fr = new FileReader(file.file);
-
         int depth = 0;
         int offset = 0;
         int startOffset = 0;
@@ -79,7 +74,6 @@ public class InstanceDiagnostics {
             if (read == -1) {
                 break;
             }
-
             for (int k = 0; k < read; k++) {
                 char c = buffer[k];
                 sb.append(c);
@@ -96,7 +90,6 @@ public class InstanceDiagnostics {
                         sb.setLength(0);
                     }
                 }
-
                 offset++;
             }
         }
@@ -105,88 +98,64 @@ public class InstanceDiagnostics {
     private void analyze(StringBuilder sb, DiagnosticsFile file, int offset, int startOffset) {
         int spaces = 0;
         long timestamp = 0;
-        for (int k = 0; k < sb.length(); k++) {
+        int k;
+        for (k = 0; k < sb.length(); k++) {
             char c = sb.charAt(k);
             if (c == ' ') {
                 spaces++;
             } else if (spaces == 2) {
                 timestamp = timestamp * 10 + Character.getNumericValue(c);
+            } else if (spaces == 3) {
+                break;
             }
         }
 
-        int type;
-        // very inefficient.
-        if (sb.indexOf("Metric[") != -1) {
-            type = TYPE_METRIC;
-        } else if (sb.indexOf("BuildInfo[") != -1) {
-            type = TYPE_BUILD_INFO;
-        } else if (sb.indexOf("SystemProperties[") != -1) {
-            type = TYPE_SYSTEM_PROPERTIES;
-        } else if (sb.indexOf("ConfigProperties[") != -1) {
-            type = TYPE_CONFIG_PROPERTIES;
-        } else if (sb.indexOf("SlowOperations[") != -1) {
-            type = TYPE_SLOW_OPERATIONS;
-        } else if (sb.indexOf("Invocations[") != -1) {
-            type = TYPE_INVOCATIONS;
-        } else if (sb.indexOf("InvocationProfiler[") != -1) {
-            type = TYPE_INVOCATION_PROFILER;
-        } else if (sb.indexOf("OperationsProfiler[") != -1) {
-            type = TYPE_OPERATION_PROFILER;
-        } else if (sb.indexOf("ConnectionRemoved[") != -1) {
-            type = TYPE_CONNECTION;
-        } else if (sb.indexOf("OperationThreadSamples[") != -1) {
-            type = TYPE_OPERATION_THREAD_SAMPLES;
-        } else if (sb.indexOf("HazelcastInstance[") != -1) {
-            type = TYPE_HAZELCAST_INSTANCE;
-        } else if (sb.indexOf("MemberRemoved[") != -1) {
-            type = TYPE_MEMBER;
-        } else if (sb.indexOf("MemberAdded[") != -1) {
-            type = TYPE_MEMBER;
-        } else if (sb.indexOf("ClusterVersionChanged[") != -1) {
-            type = TYPE_CLUSTER_VERSION_CHANGE;
-        } else if (sb.indexOf("Lifecycle[") != -1) {
-            type = TYPE_LIFECYCLE;
-        } else if (sb.indexOf("ConnectionAdded[") != -1) {
-            type = TYPE_CONNECTION;
-        } else if (sb.indexOf("WAN[") != -1) {
-            type = TYPE_WAN;
-        } else if (sb.indexOf("OperationHeartbeat[") != -1) {
-            type = TYPE_HEARTBEAT;
-        } else if (sb.indexOf("MemberHeartbeats[") != -1) {
-            type = TYPE_HEARTBEAT;
+        int closeType = sb.indexOf("[");
+        DiagnosticType type;
+        if (closeType == -1) {
+            type = DiagnosticType.TYPE_UNKNOWN;
         } else {
-            System.out.println("------------------------------------");
-            System.out.println(sb.toString());
-            System.out.println("------------------------------------");
-            type = TYPE_UNKNOWN;
+            type = DiagnosticType.from(sb.substring(k, closeType));
         }
 
-        if (timestamp > file.endMs) file.endMs = timestamp;
-        if (timestamp > endMs) endMs = timestamp;
-        if (timestamp < file.startMs) file.startMs = timestamp;
-        if (timestamp < startMs) startMs = timestamp;
+        if (type == DiagnosticType.TYPE_UNKNOWN) {
+            System.out.println("------------------------------------");
+            System.out.println(sb);
+            System.out.println("------------------------------------");
+        }
 
-        DiagnosticsIndexEntry fragment = new DiagnosticsIndexEntry();
-        fragment.offset = startOffset;
-        fragment.length = (offset - startOffset) + 1;
+        if (timestamp > file.endMs) {
+            file.endMs = timestamp;
+        }
+        if (timestamp > endMs) {
+            endMs = timestamp;
+        }
+        if (timestamp < file.startMs) {
+            file.startMs = timestamp;
+        }
+        if (timestamp < startMs) {
+            startMs = timestamp;
+        }
 
-        if (type == TYPE_METRIC) {
+        DiagnosticsIndexEntry fragment = new DiagnosticsIndexEntry(file, startOffset, (offset - startOffset) + 1);
+
+        DiagnosticKey diagnosticKey;
+        if (DiagnosticType.TYPE_METRIC.equals(type)) {
             int indexLastEquals = sb.lastIndexOf("=");
             int indexFirstSquareBracket = sb.indexOf("[");
-            String key = sb.substring(indexFirstSquareBracket + 1, indexLastEquals);
-
-            //  System.out.println(key);
-            availableMetrics.add(key);
-
-            DiagnosticsIndex index = file.metricsIndices.get(key);
-            if (index == null) {
-                index = new DiagnosticsIndex(file);
-                file.metricsIndices.put(key, index);
-            }
-            index.treeMap.put(timestamp, fragment);
+            String metricName = sb.substring(indexFirstSquareBracket + 1, indexLastEquals).intern();
+            availableMetrics.add(metricName);
+            diagnosticKey = new DiagnosticKey(type, metricName);
         } else {
-            file.indices[type].treeMap.put(timestamp, fragment);
+            diagnosticKey = new DiagnosticKey(type);
         }
+
+        DiagnosticsIndex index = metricsIndices.get(timestamp);
+        if (index == null) {
+            index = new DiagnosticsIndex();
+            metricsIndices.put(timestamp, index);
+        }
+        index.add(diagnosticKey, fragment);
     }
 
     private List<DiagnosticsFile> diagnosticsFiles() {
@@ -208,7 +177,7 @@ public class InstanceDiagnostics {
         return endMs;
     }
 
-    public Iterator<Map.Entry<Long, String>> between(int type, long startMs, long endMs) {
+    public Iterator<Map.Entry<Long, String>> between(DiagnosticType type, long startMs, long endMs) {
         return new IteratorImpl(type, startMs, endMs);
     }
 
@@ -220,49 +189,73 @@ public class InstanceDiagnostics {
         if (availableMetrics.contains(metricName)) {
             return metricName;
         }
-
-        if (metricName.equals("[metric=os.processCpuLoad]")) {
-            return "os.processCpuLoad";
+        switch (metricName) {
+            case METRIC_OS_PROCESS_CPU_LOAD:
+                return "os.processCpuLoad";
+            case METRIC_RUNTIME_USED_MEMORY:
+                return "runtime.usedMemory";
+            case METRIC_OPERATION_COMPLETED_COUNT:
+                return "operation.completedCount";
+            case METRIC_OPERATION_INVOCATIONS_PENDING:
+                return "operation.invocations.pending";
+            case METRIC_OPERATION_QUEUE_SIZE:
+                return "operation.queueSize";
+            case METRIC_OPERATION_INVOCATIONS_LAST_CALL_ID:
+                return "operation.invocations.lastCallId";
         }
-
-        if(metricName.equals("[metric=runtime.usedMemory]")){
-            return "runtime.usedMemory";
-        }
-
-        if(metricName.equals("[unit=count,metric=operation.completedCount]")){
-            return "operation.completedCount";
-        }
-
-        if(metricName.equals("[unit=count,metric=operation.invocations.pending]")){
-            return "operation.invocations.pending";
-        }
-
-        if(metricName.equals("[unit=count,metric=operation.queueSize]")){
-            return "operation.queueSize";
-        }
-
-        if(metricName.equals("[unit=count,metric=operation.invocations.lastCallId]")){
-            return "operation.invocations.lastCallId";
-        }
-
         return metricName;
     }
 
+    public enum DiagnosticType {
+        TYPE_UNKNOWN("!!Unknown!!"),
+        TYPE_METRIC("Metric"),
+        TYPE_BUILD_INFO("BuildInfo"),
+        TYPE_SYSTEM_PROPERTIES("SystemProperties"),
+        TYPE_CONFIG_PROPERTIES("ConfigProperties"),
+        TYPE_SLOW_OPERATIONS("SlowOperations"),
+        TYPE_INVOCATIONS("Invocations"),
+        TYPE_INVOCATION_PROFILER("InvocationProfiler"),
+        TYPE_OPERATION_PROFILER("OperationsProfiler"),
+        TYPE_OPERATION_THREAD_SAMPLES("OperationThreadSamples"),
+        TYPE_CONNECTION("ConnectionAdded", "ConnectionRemoved"),
+        TYPE_HAZELCAST_INSTANCE("HazelcastInstance"),
+        TYPE_MEMBER("MemberAdded", "MemberRemoved"),
+        TYPE_CLUSTER_VERSION_CHANGE("ClusterVersionChanged"),
+        TYPE_LIFECYCLE("Lifecycle"),
+        TYPE_WAN("WAN"),
+        TYPE_HEARTBEAT("OperationHeartbeat");
 
+        private final String[] logPrefixes;
+
+        private static final Map<String, DiagnosticType> byPrefix = new HashMap<>();
+
+        DiagnosticType(String... logPrefixes) {
+            this.logPrefixes = logPrefixes;
+        }
+
+        static {
+            for (DiagnosticType value : DiagnosticType.values()) {
+                for (String logPrefix : value.logPrefixes) {
+                    if (byPrefix.put(logPrefix, value) != null) {
+                        throw new IllegalArgumentException("Duplicate logPrefix! " + logPrefix);
+                    }
+                }
+            }
+        }
+
+        public static DiagnosticType from(String prefix) {
+            return byPrefix.getOrDefault(prefix, TYPE_UNKNOWN);
+        }
+    }
 
     private class LongMetricsIterator implements Iterator<Map.Entry<Long, Number>> {
-        private final String name;
-        private final long startMs;
-        private final long endMs;
-        private Map.Entry<Long, Number> entry;
-        private Iterator<Map.Entry<Long, DiagnosticsIndexEntry>> iterator;
-        private Iterator<DiagnosticsFile> diagnosticsFileIterator = diagnosticsFiles.iterator();
-        private DiagnosticsFile diagnosticsFile;
+        private final Iterator<Map.Entry<Long, DiagnosticsIndex>> iterator;
+        private final DiagnosticKey diagnosticKey;
+        private Map.Entry<Long, DiagnosticsIndex> entry;
 
-        public LongMetricsIterator(String name, long startMs, long endMs) {
-            this.name = name;
-            this.startMs = startMs;
-            this.endMs = endMs;
+        public LongMetricsIterator(String metricName, long startMs, long endMs) {
+            this.diagnosticKey = new DiagnosticKey(DiagnosticType.TYPE_METRIC, metricName);
+            iterator = metricsIndices.subMap(startMs, endMs).entrySet().iterator();
         }
 
         @Override
@@ -270,63 +263,49 @@ public class InstanceDiagnostics {
             if (entry != null) {
                 return true;
             }
-
             for (; ; ) {
-                if (iterator != null && iterator.hasNext()) {
-                    Map.Entry<Long, DiagnosticsIndexEntry> e = iterator.next();
-                    DiagnosticsIndexEntry indexEntry = e.getValue();
-                    String s = diagnosticsFile.load(indexEntry.offset, indexEntry.length);
-                    int indexOfLastEquals = s.lastIndexOf('=');
-                    String value = s.substring(indexOfLastEquals + 1).replace("]", "");
-                    int indexDot = value.indexOf('.');
-                    Number n;
-                    if(indexDot == -1){
-                        n = Long.parseLong(value);
-                    }else{
-                        n = Double.parseDouble(value);
+                if (iterator.hasNext()) {
+                    Map.Entry<Long, DiagnosticsIndex> e = iterator.next();
+                    DiagnosticsIndexEntry indexEntry = e.getValue().metricsMap.get(diagnosticKey);
+                    if (indexEntry != null) {
+                        entry = e;
+                        return true;
                     }
-                    entry = new AbstractMap.SimpleEntry<>(e.getKey(), n);
-                    return true;
-                }
-
-                if (!diagnosticsFileIterator.hasNext()) {
+                } else {
                     return false;
                 }
-
-                diagnosticsFile = diagnosticsFileIterator.next();
-                DiagnosticsIndex diagnosticsIndex = diagnosticsFile.metricsIndices.get(name);
-                if (diagnosticsIndex == null) {
-                    continue;
-                }
-                iterator = diagnosticsIndex.treeMap.subMap(startMs, true, endMs, true).entrySet().iterator();
             }
         }
 
         @Override
         public Map.Entry<Long, Number> next() {
-            if (hasNext()) {
-                Map.Entry<Long, Number> tmp = entry;
-                entry = null;
-                return tmp;
+            Map.Entry<Long, DiagnosticsIndex> next = entry;
+            DiagnosticsIndex index = next.getValue();
+            DiagnosticsIndexEntry indexEntry = index.metricsMap.get(diagnosticKey);
+
+            String s = indexEntry.file.load(indexEntry.offset, indexEntry.length);
+            int indexOfLastEquals = s.lastIndexOf('=');
+            String value = s.substring(indexOfLastEquals + 1).replace("]", "");
+            int indexDot = value.indexOf('.');
+            Number n;
+            if (indexDot == -1) {
+                n = Long.parseLong(value);
+            } else {
+                n = Double.parseDouble(value);
             }
-            return null;
+            entry = null;
+            return new AbstractMap.SimpleEntry<>(next.getKey(), n);
         }
     }
 
-
     private class IteratorImpl implements Iterator<Map.Entry<Long, String>> {
-        private final int type;
-        private final long startMs;
-        private final long endMs;
-        private Map.Entry<Long, String> entry;
-        private Iterator<Map.Entry<Long, DiagnosticsIndexEntry>> iterator;
-        private Iterator<DiagnosticsFile> diagnosticsFileIterator = diagnosticsFiles.iterator();
-        private DiagnosticsFile diagnosticsFile;
+        private Map.Entry<Long, DiagnosticsIndex> entry;
+        private final Iterator<Map.Entry<Long, DiagnosticsIndex>> iterator;
+        private final DiagnosticKey diagnosticKey;
 
-        public IteratorImpl(int type, long startMs, long endMs) {
-            this.type = type;
-            this.startMs = startMs;
-            this.endMs = endMs;
+        public IteratorImpl(DiagnosticType type, long startMs, long endMs) {
+            this.diagnosticKey = new DiagnosticKey(type);
+            this.iterator = metricsIndices.subMap(startMs, endMs).entrySet().iterator();
         }
 
         @Override
@@ -334,39 +313,31 @@ public class InstanceDiagnostics {
             if (entry != null) {
                 return true;
             }
-
             for (; ; ) {
-                if (iterator != null && iterator.hasNext()) {
-                    Map.Entry<Long, DiagnosticsIndexEntry> e = iterator.next();
-                    DiagnosticsIndexEntry indexEntry = e.getValue();
-                    String value = diagnosticsFile.load(indexEntry.offset, indexEntry.length);
-                    entry = new AbstractMap.SimpleEntry<>(e.getKey(), value);
-                    return true;
-                }
-
-                if (!diagnosticsFileIterator.hasNext()) {
+                if (iterator.hasNext()) {
+                    Map.Entry<Long, DiagnosticsIndex> e = iterator.next();
+                    DiagnosticsIndexEntry indexEntry = e.getValue().metricsMap.get(diagnosticKey);
+                    if (indexEntry != null) {
+                        entry = e;
+                        return true;
+                    }
+                } else {
                     return false;
                 }
-
-                diagnosticsFile = diagnosticsFileIterator.next();
-                iterator = diagnosticsFile.indices[type].treeMap.subMap(startMs, true, endMs, true).entrySet().iterator();
             }
         }
 
         @Override
         public Map.Entry<Long, String> next() {
-            if (hasNext()) {
-                Map.Entry<Long, String> tmp = entry;
-                entry = null;
-                return tmp;
-            }
-            return null;
+            DiagnosticsIndexEntry indexEntry = entry.getValue().metricsMap.get(diagnosticKey);
+            String value = indexEntry.file.load(indexEntry.offset, indexEntry.length);
+            Long key = entry.getKey();
+            entry = null;
+            return new AbstractMap.SimpleEntry<>(key, value);
         }
     }
 
     private static class DiagnosticsFile {
-        private final DiagnosticsIndex[] indices = new DiagnosticsIndex[TYPES];
-        private final Map<String, DiagnosticsIndex> metricsIndices = new HashMap<>();
         private final File file;
         private final RandomAccessFile randomAccessFile;
         private long startMs = Long.MIN_VALUE;
@@ -374,9 +345,6 @@ public class InstanceDiagnostics {
 
         public DiagnosticsFile(File file) {
             this.file = file;
-            for (int k = 0; k < indices.length; k++) {
-                indices[k] = new DiagnosticsIndex(this);
-            }
             try {
                 randomAccessFile = new RandomAccessFile(file, "r");
             } catch (FileNotFoundException e) {
@@ -398,25 +366,64 @@ public class InstanceDiagnostics {
         }
     }
 
-    private static class DiagnosticsIndex {
-        private final DiagnosticsFile diagnosticsFile;
-        private final TreeMap<Long, DiagnosticsIndexEntry> treeMap = new TreeMap<>();
+    private static class DiagnosticKey {
+        private final DiagnosticType type;
+        private final String name;
 
-        public DiagnosticsIndex(DiagnosticsFile diagnosticsFile) {
-            this.diagnosticsFile = diagnosticsFile;
+        private DiagnosticKey(DiagnosticType type, String name) {
+            this.type = type;
+            this.name = name;
+        }
+
+        private DiagnosticKey(DiagnosticType type) {
+            this(type, null);
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (o == null || getClass() != o.getClass()) {
+                return false;
+            }
+            DiagnosticKey that = (DiagnosticKey) o;
+            return type == that.type && Objects.equals(name, that.name);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(type, name);
+        }
+
+        @Override
+        public String toString() {
+            return "DiagnosticKey{" + "type=" + type + ", name='" + name + '\'' + '}';
+        }
+    }
+
+    private static class DiagnosticsIndex {
+        private final Map<DiagnosticKey, DiagnosticsIndexEntry> metricsMap = new HashMap<>();
+
+        public void add(DiagnosticKey key, DiagnosticsIndexEntry indexEntry) {
+            metricsMap.put(key, indexEntry);
         }
     }
 
     private static class DiagnosticsIndexEntry {
-        private int offset;
-        private int length;
+        private final DiagnosticsFile file;
+        private final int offset;
+        private final int length;
+
+        private DiagnosticsIndexEntry(DiagnosticsFile file, int offset, int length) {
+            this.file = file;
+            this.offset = offset;
+            this.length = length;
+        }
 
         @Override
         public String toString() {
-            return "DiagnosticsIndexEntry{" +
-                    "offset=" + offset +
-                    ", length=" + length +
-                    '}';
+            return "DiagnosticsIndexEntry{" + "file=" + file.file + ", offset=" + offset + ", length=" + length + '}';
         }
     }
 }

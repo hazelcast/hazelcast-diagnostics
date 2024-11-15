@@ -10,10 +10,16 @@ import org.jfree.data.time.FixedMillisecond;
 import org.jfree.data.time.TimeSeries;
 import org.jfree.data.time.TimeSeriesCollection;
 
-import javax.swing.*;
-import java.awt.*;
-import java.awt.event.ActionEvent;
-import java.awt.event.ActionListener;
+import javax.swing.BoxLayout;
+import javax.swing.DefaultListModel;
+import javax.swing.JButton;
+import javax.swing.JComponent;
+import javax.swing.JList;
+import javax.swing.JOptionPane;
+import javax.swing.JPanel;
+import javax.swing.JScrollPane;
+import javax.swing.JTextField;
+import java.awt.BorderLayout;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -21,45 +27,41 @@ import java.util.Collections;
 import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
 
 public class MetricsPane {
-    private final JComboBox<Object> comboBox;
-    private final DefaultComboBoxModel comboBoxModel;
-    private LinkedHashSet<String> metricsNames = new LinkedHashSet<>();
 
-    private JPanel component;
-    private JTextField filterTextField;
-    private final JFreeChart chart;
-    private final ChartPanel chartPanel;
+    private final JList<String> metricsList;
+    private final DefaultListModel<String> metricsListModel;
+    private final LinkedHashSet<String> metricsNames = new LinkedHashSet<>();
+    private final JPanel component;
+    private final JTextField filterTextField;
+    private final Set<String> activeMetrics = new LinkedHashSet<>();
     private final TimeSeriesCollection collection;
     private Collection<InstanceDiagnostics> diagnosticsList;
     private long startMs = Long.MIN_VALUE;
     private long endMs = Long.MAX_VALUE;
-    private String activeMetric;
 
     public MetricsPane() {
-        this.comboBox = new JComboBox<>();
-        this.comboBox.grabFocus();
-        this.comboBox.addActionListener(e -> {
-            activeMetric = (String) comboBox.getSelectedItem();
+        this.metricsList = new JList<>();
+        JScrollPane metricsScrollPane = new JScrollPane(metricsList);
+        this.metricsList.grabFocus();
+        this.metricsListModel = new DefaultListModel<>();
+        this.metricsList.addListSelectionListener(e -> {
+            activeMetrics.clear();
+            for (int selectedIndex : metricsList.getSelectedIndices()) {
+                activeMetrics.add(metricsListModel.elementAt(selectedIndex));
+            }
             update();
         });
-        this.comboBoxModel = new DefaultComboBoxModel();
-        comboBox.setModel(comboBoxModel);
+        metricsList.setModel(metricsListModel);
 
         this.collection = new TimeSeriesCollection();
-        this.chart = ChartFactory.createTimeSeriesChart(
-                "Metrics",
-                "Time",
-                "Whatever",
-                collection,
-                true,
-                true,
-                false);
-        this.chartPanel = new ChartPanel(chart);
+        JFreeChart chart = ChartFactory.createTimeSeriesChart("Metrics", "Time", "Whatever", collection, true, true, false);
+        ChartPanel chartPanel = new ChartPanel(chart);
         XYPlot plot = (XYPlot) chartPanel.getChart().getPlot();
         DateAxis axis = (DateAxis) plot.getDomainAxis();
         axis.setDateFormatOverride(new SimpleDateFormat("HH:mm:ss"));
@@ -69,10 +71,23 @@ public class MetricsPane {
         filterTextField.setToolTipText("A regex based filter over the metrics.");
         filterTextField.addActionListener(e -> updateCombobox());
 
+        JButton clearButton = new JButton("Clear");
+        clearButton.addActionListener(e -> {
+            filterTextField.setText(".*");
+            activeMetrics.clear();
+            metricsList.setSelectedIndices(new int[] {});
+            updateCombobox();
+        });
+
+        JPanel filterPanel = new JPanel();
+        filterPanel.setLayout(new BoxLayout(filterPanel, BoxLayout.X_AXIS));
+        filterPanel.add(filterTextField);
+        filterPanel.add(clearButton);
+
         JPanel selectionPanel = new JPanel();
         selectionPanel.setLayout(new BoxLayout(selectionPanel, BoxLayout.Y_AXIS));
-        selectionPanel.add(filterTextField);
-        selectionPanel.add(comboBox);
+        selectionPanel.add(filterPanel);
+        selectionPanel.add(metricsScrollPane);
 
         JPanel mainPanel = new JPanel();
         mainPanel.setLayout(new BorderLayout());
@@ -98,7 +113,7 @@ public class MetricsPane {
             metricsNames.addAll(diagnostics.getAvailableMetrics());
         }
         if (diagnosticsList.isEmpty()) {
-            activeMetric = null;
+            activeMetrics.clear();
         }
 
         updateCombobox();
@@ -124,37 +139,37 @@ public class MetricsPane {
 
         Collections.sort(filteredMetrics);
 
-        comboBoxModel.removeAllElements();
+        metricsListModel.removeAllElements();
         for (String metricName : filteredMetrics) {
-            comboBoxModel.addElement(metricName);
+            metricsListModel.addElement(metricName);
         }
     }
 
     public void update() {
         collection.removeAllSeries();
-        if (activeMetric == null) {
+        if (activeMetrics.isEmpty()) {
             return;
         }
 
         for (InstanceDiagnostics diagnostics : diagnosticsList) {
-            Iterator<Map.Entry<Long, Number>> iterator = diagnostics.metricsBetween(activeMetric, startMs, endMs);
-
-            if (!iterator.hasNext()) {
-                continue;
-            }
-
-            TimeSeries series = new TimeSeries(diagnostics.getDirectory().getName());
-
-            while (iterator.hasNext()) {
-                try {
-                    Map.Entry<Long, Number> entry = iterator.next();
-                    series.add(new FixedMillisecond(entry.getKey()), entry.getValue());
-                } catch (SeriesException e) {
-                    System.err.println("Error adding to series");
+            for (String activeMetric : activeMetrics) {
+                Iterator<Map.Entry<Long, Number>> iterator = diagnostics.metricsBetween(activeMetric, startMs, endMs);
+                if (!iterator.hasNext()) {
+                    continue;
                 }
+
+                TimeSeries series = new TimeSeries(diagnostics.getDirectory().getName() + ":" + activeMetric);
+
+                while (iterator.hasNext()) {
+                    try {
+                        Map.Entry<Long, Number> entry = iterator.next();
+                        series.add(new FixedMillisecond(entry.getKey()), entry.getValue());
+                    } catch (SeriesException e) {
+                        System.err.println("Error adding to series");
+                    }
+                }
+                collection.addSeries(series);
             }
-            collection.addSeries(series);
         }
     }
-
 }

@@ -1,15 +1,15 @@
 package com.hazelcast.diagnostics;
 
-import javax.swing.*;
+import javax.swing.JComponent;
+import javax.swing.JLabel;
+import javax.swing.JPanel;
+import javax.swing.Timer;
 import javax.swing.border.EmptyBorder;
-import java.awt.*;
-import java.awt.event.ActionEvent;
-import java.awt.event.ActionListener;
+import java.awt.BorderLayout;
 
 public class StatusBar {
 
     private final JComponent component;
-    private final Timer timer;
 
     public StatusBar(){
         JPanel statusPanel = new JPanel();
@@ -22,15 +22,12 @@ public class StatusBar {
 
         this.component = statusPanel;
 
-        timer = new Timer(1000, new ActionListener() {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                Runtime runtime = Runtime.getRuntime();
-                long totalMemory = runtime.totalMemory();
-                long freeMemory = runtime.freeMemory();
-                long usedMemory = totalMemory-freeMemory;
-                label.setText(toMegabytes(usedMemory)+" of "+toMegabytes(totalMemory)+"M");
-            }
+        Timer timer = new Timer(1000, e -> {
+            Runtime runtime = Runtime.getRuntime();
+            long totalMemory = runtime.totalMemory();
+            long freeMemory = runtime.freeMemory();
+            long usedMemory = totalMemory - freeMemory;
+            label.setText(toMegabytes(usedMemory) + " of " + toMegabytes(totalMemory) + "M");
         });
         timer.setInitialDelay(0);
         timer.start();

@@ -1,18 +1,21 @@
 package com.hazelcast.diagnostics;
 
-import javax.swing.*;
+import javax.swing.JComponent;
+import javax.swing.JScrollPane;
+import javax.swing.JTable;
 import javax.swing.table.DefaultTableModel;
 import java.util.Iterator;
 import java.util.Map;
 
+import static com.hazelcast.diagnostics.InstanceDiagnostics.DiagnosticType.TYPE_SYSTEM_PROPERTIES;
+
 public class SystemPropertiesPane {
 
-    private final JTable table;
     private final DefaultTableModel model;
     private final JScrollPane panel;
 
     public SystemPropertiesPane() {
-        table = new JTable();
+        JTable table = new JTable();
         model = new DefaultTableModel();
         table.setModel(model);
         model.addColumn("Key");
@@ -30,7 +33,7 @@ public class SystemPropertiesPane {
             return;
         }
 
-        Iterator<Map.Entry<Long, String>> it = machine.between(InstanceDiagnostics.TYPE_SYSTEM_PROPERTIES, 0, Long.MAX_VALUE);
+        Iterator<Map.Entry<Long, String>> it = machine.between(TYPE_SYSTEM_PROPERTIES, 0, Long.MAX_VALUE);
         if(!it.hasNext()){
             System.out.println("No System Properties found in directory: "+machine.getDirectory());
             return;
