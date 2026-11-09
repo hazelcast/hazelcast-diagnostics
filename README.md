@@ -11,7 +11,7 @@ any current browser and can be attached to a ticket or sent by mail.
 - Charts you can zoom, filter by member and search. Measure mode gives the amount that went through any time span.
 - Light and dark themes. Works on a phone.
 
-See [`examples/sample-report.html`](examples/sample-report.html) for a report on a synthetic three-member cluster.
+See [`examples/sample-report.html`](examples/hz_diag_report_sample.html) for a report on a synthetic three-member cluster.
 
 ## Quick start
 
