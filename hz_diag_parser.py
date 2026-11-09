@@ -14,11 +14,14 @@ It reads:
   InvocationProfiler         latency of the invocations each member sent
   OperationHeartbeat         late operation heartbeats (and MemberHeartbeats)
   SlowOperations             the slow operation detector: slow invocations, their stack traces and details
+  Invocations                the invocation sampler: the invocations pending at each sample, by operation, and the
+                             ones pending longer than its slow threshold, with their details
+  MapStoreLatency            how long each map's MapStore / MapLoader methods took (QueueStoreLatency and the like too)
 
-Tabs: Overview, Latency, Slow operations, Operations, Threads (stuck IO and operation threads, per-thread metrics),
+Tabs: Overview, Latency, Slow operations, Invocations, Operations, Threads (stuck IO and operation threads, per-thread metrics),
 Network, Transfer (bytes in and out of each member, per peer), WAN (wan.* metrics per publisher, WAN traffic, WAN
 operations), Data structures (maps, queues, topics, caches, multimaps, replicated maps, executors... one kind at a
-time), System, GC (from the GC logs), Cluster, CP Subsystem (raft.* metrics per CP group, CP objects, CP operations),
+time), MapStore (the latency of the maps' MapStore / MapLoader calls), System, GC (from the GC logs), Cluster, CP Subsystem (raft.* metrics per CP group, CP objects, CP operations),
 Other. What a tab shows (operation, WAN publisher, CP group, kind, metric, pauses) is picked in a row of the bar
 that stays at the top of the page.
 
@@ -27,6 +30,12 @@ profiler bucket from 1.02 ms up is kept, so the report sets the groups: the fast
 1.02 ms ... 65.5 ms), the slowest (>= 524 ms by default, or 131 ms ... 8.39 s; the buckets are powers of 2 us,
 so 1.05 s and 2.1 s stand for 1 s and 2 s) and the slow threshold (131 ms by default); an operation list next to
 Find picks one operation.
+
+Invocations: from the invocation sampler (hazelcast.diagnostics.invocation.sample.period.seconds): the invocations
+each member was waiting on at each sample, by operation (History and SlowHistory count them since the member
+started: the growth from one dump to the next is the number at that sample), and every invocation it listed as
+pending longer than its slow threshold (5 s by default), once: operation, data structure, partition (and the
+partition thread on the target), target, how long it was seen pending, past its call timeout or not.
 
 Transfer: how many bytes each member received and sent, per peer: each other member, each client host, WAN targets
 and other clusters, from the counters of each connection (tcp.connection.in.bytesRead / out.bytesWritten, named
@@ -50,11 +59,15 @@ members, quorum failures, split brain, slow and delayed operations...), Health m
 lines charted), Exceptions (every exception, grouped by class and root cause) and CP Subsystem (groups, Raft
 roles and terms, elections, sessions, persistence). A directory with member logs only works too.
 
-GC logs: GC logs in the directory too (JDK 9+ -Xlog:gc* with the time decoration, e.g. -Xlog:gc*:file=gc.log:time,uptime; JDK 8
--XX:+PrintGCDetails -XX:+PrintGCDateStamps; rotated files) get a GC tab: every pause (kind, cause, heap before and
-after), the GCs caused by humongous allocations (and the humongous regions when gc+heap is logged), full GCs and
-evacuation failures, the heap after GC and the time in pauses. A GC log goes with the member whose files are in the
-nearest folder; on a tie with the one whose lifetime started with that JVM, then a host or port in its name.
+GC logs: GC logs in the directory too (JDK 9+ -Xlog:gc*, best with the time decoration, e.g.
+-Xlog:gc*:file=gc.log:time,uptime; JDK 8 -XX:+PrintGCDetails -XX:+PrintGCDateStamps; rotated files) get a GC tab: every
+pause (kind, cause, heap before and after), the GCs caused by humongous allocations (and the humongous regions when
+gc+heap is logged), full GCs and evacuation failures, the heap after GC and the time in pauses. A GC log goes with the
+member whose files are in the same folder; else the one whose host name is in its file name or folder names; else the
+one in the nearest folder, then the one whose lifetime started with that JVM. A GC log that matches no member is
+listed apart, not as a member. Lines with the JVM uptime only (the -Xlog default) are placed with the JVM start of
+their member's lifetime: the dump time minus runtime.uptime in the diagnostics, checked against gc.minorCount. With
+GC logs alone, the time axis is then the JVM uptime, one line per JVM.
 
 Usage
   python3 hz_diag_parser.py <input_dir> [<output_dir>] [options]
@@ -71,6 +84,7 @@ all. --points N makes a smaller file with about N points across the time range.
 import argparse
 import array
 import base64
+import bisect
 import calendar
 import datetime
 import gzip
@@ -84,7 +98,7 @@ import statistics
 import sys
 import time
 
-__version__ = "2.8.0"
+__version__ = "2.11.0"
 
 # --------------------------------------------------------------------------- line formats
 # "27-10-2026 15:21:16 1793114476412 Name[..."   (the epoch millis are optional)
@@ -98,7 +112,10 @@ ADDR_RE = re.compile(r"\[([^\]]+)\]:(\d{1,5})")
 BUCKET_RE = re.compile(r"^(\d+)\.\.(\d+)\s*(ns|us|µs|ms|s)?$")
 UNIT_US = {None: 1.0, "us": 1.0, "µs": 1.0, "ns": 0.001, "ms": 1000.0, "s": 1000000.0}
 KNOWN_SECTION_RE = re.compile(r"(?:Metric\[\[|BuildInfo\[|SystemProperties\[|ConfigProperties\[|"
-                              r"HazelcastInstance\[|OperationsProfiler\[|InvocationProfiler\[|Lifecycle\[)")
+                              r"HazelcastInstance\[|OperationsProfiler\[|InvocationProfiler\[|Lifecycle\[|"
+                              r"\w*(?:Store|Loader|Writer)Latency\[)")
+# the store latency plugin (hazelcast.diagnostics.storeLatency.period.seconds): MapStoreLatency, QueueStoreLatency...
+STORE_SECTION_RE = re.compile(r"^\w*(?:Store|Loader|Writer)Latency$")
 
 PROFILERS = {"OperationsProfiler": "O", "OperationProfiler": "O",
              "InvocationProfiler": "I", "InvocationsProfiler": "I"}
@@ -129,6 +146,17 @@ def human_size(n):
         n /= 1024.0
 
 
+def human_us(us):
+    """A duration in microseconds, in the unit that reads best."""
+    if us < 1000:
+        return "%d us" % us
+    if us < 1e6:
+        return "%.3g ms" % (us / 1000.0)
+    if us < 60e6:
+        return "%.3g s" % (us / 1e6)
+    return human_dur(us / 1e6)
+
+
 def human_dur(sec):
     sec = int(round(sec))
     if sec < 60:
@@ -149,6 +177,13 @@ def fmt_offset(minutes):
 
 def fmt_time(ms):
     return time.strftime("%d-%m-%Y %H:%M:%S", time.gmtime(ms / 1000.0)) if ms is not None else ""
+
+
+def fmt_uptime(ms):
+    """A JVM uptime: 3d 06:06:54, or 01:03:49 in the first day."""
+    sec = int(ms // 1000)
+    d, sec = divmod(sec, 86400)
+    return ("%dd " % d if d else "") + "%02d:%02d:%02d" % (sec // 3600, sec // 60 % 60, sec % 60)
 
 
 def step_name(ms):
@@ -479,7 +514,10 @@ class Unit(object):
         self.pstreams = {}          # profiler -> [last t, previous ops]
         self.prof = {}              # (profiler, op) -> ProfRow
         self.ptimes = []            # display times of profiler dumps
+        self.stot = {}              # store latency section -> [last t, last ops, carried over resets, dump times]
         self.slowops = []           # (t, [[operation, invocations counted, stack lines, [[start, duration, details]]]])
+        self.invd = []              # invocation sampler dumps: (t, list cut at the print limit, History, SlowHistory, in the window)
+        self.invs = {}              # every invocation it listed as slow, once: key -> InvRec
         self.cover = []
         self.member = None
 
@@ -569,6 +607,119 @@ class ProfilerSection(object):
         self.ctx.counters["truncated"] += 1     # cut short (crash, copy of a file being written): skipped
 
 
+def store_op(svc, ds, method):
+    """The key of a store method: section (MapStore, QueueStore...), data structure, method."""
+    return svc + "\u0001" + ds + "\u0001" + method
+
+
+class StoreLatencySection(object):
+    """MapStoreLatency[ (and QueueStoreLatency and the like): per data structure and per method of its store or
+    loader (load, loadAll, loadAllKeys, store, storeAll, delete, deleteAll) the counters of a profiler: count,
+    total and max time, latency buckets; cumulative since the member started, or since the last reset when
+    hazelcast.diagnostics.storeLatency.reset.period.seconds is set."""
+    __slots__ = ("u", "svc", "t", "ctx", "ops", "seen", "depth", "ds", "meth", "snap", "in_lat")
+
+    def __init__(self, u, svc, t, ctx):
+        self.u, self.svc, self.t, self.ctx = u, svc, t, ctx
+        self.ops = {}
+        self.seen = set()                       # every data structure listed, called or not ("orders[]")
+        self.depth = 1
+        self.ds = self.meth = None
+        self.snap = None
+        self.in_lat = False
+
+    def feed(self, line):
+        body, closes = _split_closes(line)
+        if body.endswith("["):
+            self.depth += 1
+            name = body[:-1].strip()
+            if self.depth == 2:
+                self.ds = name
+                self.seen.add(name)
+            elif self.depth == 3:
+                self.meth = name
+                self.snap = [0, 0, 0, []]           # count, total, max, [(bucket upper bound in us, calls)]
+            elif self.depth == 4:
+                self.in_lat = name == "latency-distribution"
+        elif body and self.snap is not None:
+            k, eq, v = body.partition("=")
+            if eq:
+                if self.depth == 4:
+                    if self.in_lat:
+                        hi = bucket_hi(k)
+                        if hi is not None:
+                            self.snap[3].append((hi, to_int(v)))
+                elif self.depth == 3:
+                    if k == "count":
+                        self.snap[0] = to_int(v)
+                    elif k.startswith("totalTime"):
+                        self.snap[1] = to_int(v)
+                    elif k.startswith("max"):
+                        self.snap[2] = to_int(v)
+        while closes:
+            closes -= 1
+            self.depth -= 1
+            if self.depth == 3:
+                self.in_lat = False
+            elif self.depth == 2:
+                if self.snap is not None and self.ds is not None:
+                    self.ops[store_op(self.svc, self.ds, self.meth)] = self.snap
+                self.snap = None
+            elif self.depth <= 0:
+                feed_store(self.u, self.svc, self.t, self.ops, self.ctx, self.seen)
+                return True
+        return False
+
+    def finish(self):
+        self.ctx.counters["truncated"] += 1
+
+
+def store_reset(prev, ops):
+    """Whether the store latency counters were reset after the dump before (storeLatency.reset.period.seconds
+    resets them all at once): a count, a total, a max or a bucket of some method is lower than it was."""
+    for name, s in ops.items():
+        p = prev.get(name)
+        if p is None:
+            continue
+        if s[0] < p[0] or s[1] < p[1] or s[2] < p[2]:
+            return True
+        sb = dict(s[3])
+        for hi, c in p[3]:
+            if sb.get(hi, 0) < c:
+                return True
+    return False
+
+
+def add_snap(a, b):
+    """Two store counters added: [count, total, max, {bucket exponent: calls}]."""
+    out = [0, 0, 0, {}] if a is None else [a[0], a[1], a[2], dict(a[3])]
+    out[0] += b[0]
+    out[1] += b[1]
+    out[2] = max(out[2], b[2])
+    for k, c in (b[3].items() if isinstance(b[3], dict) else ((hi.bit_length(), c) for hi, c in b[3])):
+        out[3][k] = out[3].get(k, 0) + c
+    return out
+
+
+def feed_store(u, svc, t, ops, ctx, seen=()):
+    """A store latency dump: its growth over the dump before goes with the profilers (as profiler "S"); its counters
+    are kept for the totals (what was counted before a reset is carried over)."""
+    feed_profiler(u, "S", t, ops, ctx, stream="S:" + svc)
+    st = u.stot.get(svc)
+    if st is None:
+        st = u.stot[svc] = [None, {}, {}, [], set()]
+    if (st[0] is not None and t <= st[0]) or not ctx.inside(t):
+        return
+    st[4].update(seen)
+    prev = st[1]
+    reset = store_reset(prev, ops)
+    for name, p in prev.items():
+        if reset or name not in ops:        # reset after the dump before (or gone): keep what it had counted
+            st[2][name] = add_snap(st[2].get(name), p)
+    st[0], st[1] = t, ops
+    st[3].append(t)
+
+
 class SlowOpsSection(object):
     """SlowOperations[ (the slow operation detector, every 60 s by default): for each stack trace an operation was
     seen in, how many slow invocations the detector counted, the stack trace and the invocations it still keeps
@@ -645,6 +796,134 @@ class SlowOpsSection(object):
                 invs.append((start, dur, det))
             lg[3] = invs
         self.u.slowops.append((self.t, self.logs))
+
+
+# the invocation sampler (hazelcast.diagnostics.invocation.sample.period.seconds): Invocations[ Pending[ Invocation{op=
+# com.hazelcast.map.impl.operation.GetOperation{serviceName='hz:impl:mapService', identityHash=1785082044, partitionId=125,
+# ..., callId=188105516, ..., name=orders}, tryCount=250, ..., invokeCount=1, callTimeoutMillis=60000, firstInvocationTimeMs=
+# 1793583006766, ..., lastHeartbeatMillis=..., targetAddress=[10.0.0.1]:5701, targetMember=Member [10.0.0.1]:5701 - <uuid>
+# this, ..., pendingResponse={VOID}, backupsAcksExpected=-1, backupsAcksReceived=0, connection=null} duration=63116 ms ...]
+# History[ <operation> samples=N ...] SlowHistory[ <operation> samples=N ...]]
+INV_OP_RE = re.compile(r"^Invocation\{op=([\w.$]+)")
+INV_NUM_RE = re.compile(r"[{ ,](identityHash|partitionId|replicaIndex|callId|invokeCount|callTimeoutMillis|firstInvocationTimeMs|"
+                        r"lastHeartbeatMillis|backupsAcksExpected|backupsAcksReceived)=(-?\d+)")
+INV_NAME_RE = re.compile(r", name=([^,}]*)")
+INV_TARGET_RE = re.compile(r", target(?:Address)?=\[([^\]]*)\]:(\d+)")
+INV_LOCAL_RE = re.compile(r", targetMember=Member \[[^\]]*\]:\d+ - [\w-]+ this[,}]")
+INV_RESP_RE = re.compile(r", pendingResponse=\{(.*?)\}, backupsAcks")
+INV_TAIL_RE = re.compile(r", connection=(.*)\} duration=(\d+) ms$")
+INV_FACTORY_RE = re.compile(r", operationFactory=([\w.$]+)(?:\{opFactory=([\w.$]+))?")
+INV_BACKUP_RE = re.compile(r", backupOp=([\w.$]+)")
+MAX_INV_RAW = 5000                      # per lifetime: the invocations whose whole text is kept (for the details)
+
+
+def inv_desc(cls, text):
+    """The operation of an invocation as the sampler's History names it: the class, but for a partition iterating
+    operation its factory, and for a backup the backed up operation."""
+    if cls.endswith(".PartitionIteratingOperation"):
+        f = INV_FACTORY_RE.search(text)
+        if f:
+            return "PartitionIteratingOperation(" + (f.group(2) if f.group(1).endswith("OperationFactoryWrapper") and f.group(2) else f.group(1)) + ")"
+    elif cls.endswith(".Backup"):
+        b = INV_BACKUP_RE.search(text)
+        if b:
+            return "Backup(" + b.group(1) + ")"
+    return cls
+
+
+class InvRec(object):
+    """An invocation the sampler listed as slow, over the dumps it was listed in."""
+    __slots__ = ("desc", "name", "part", "target", "local", "start", "dur", "first", "last", "n", "timeout", "invokes",
+                 "bexp", "brecv", "resp", "conn", "hb", "raw")
+
+
+class InvocationsSection(object):
+    """Invocations[ (the invocation sampler, every hazelcast.diagnostics.invocation.sample.period.seconds): Pending[ the
+    invocations pending for longer than hazelcast.diagnostics.invocation.slow.threshold.seconds (5 s), at most
+    hazelcast.diagnostics.invocation.slow.max.count - 1 of them], History[ per operation, the invocations pending at the
+    samples so far], SlowHistory[ the same for the slow ones]]. Read by indentation; ends at the next top-level line."""
+    __slots__ = ("u", "t", "ctx", "inside", "base", "mode", "trunc", "hist", "slow", "pend")
+
+    def __init__(self, u, t, ctx, inside):
+        self.u, self.t, self.ctx, self.inside = u, t, ctx, inside
+        self.base = None
+        self.mode = None
+        self.trunc = False
+        self.hist, self.slow = {}, {}
+        self.pend = []
+
+    def feed(self, line):
+        s = line.rstrip("\r\n")
+        body = s.lstrip(" \t")
+        text = body.rstrip()
+        if not text:
+            return False
+        ind = len(s) - len(body)
+        if self.base is None:
+            self.base = ind
+        if ind < self.base + 4:                 # Pending[ / History[ / SlowHistory[ (an empty one ends on the same line)
+            head = text.split("[", 1)[0]
+            self.mode = head if head in ("Pending", "History", "SlowHistory") else None
+            return False
+        v = text.rstrip("]").rstrip()
+        if self.mode == "Pending":
+            if v.startswith("Invocation{"):
+                if self.inside:
+                    self.pend.append(v)
+            elif v.startswith("max number of invocations"):
+                self.trunc = True
+        elif self.mode is not None:
+            k = v.rfind(" samples=")
+            n = to_int(v[k + 9:]) if k > 0 else None
+            if n is not None:
+                (self.hist if self.mode == "History" else self.slow)[v[:k]] = n
+        return False
+
+    def finish(self):
+        u, t = self.u, self.t
+        if u.invd and t <= u.invd[-1][0]:
+            self.ctx.counters["duplicate"] += 1
+            return                              # the same dump read twice (a copied file)
+        u.invd.append((t, self.trunc, self.hist, self.slow, self.inside))
+        for text in self.pend:
+            inv_listed(u, t, text)
+
+
+def inv_listed(u, t, text):
+    """One invocation of a Pending list: a new record, or the one it was seen as at an earlier dump (same operation
+    object and first invocation time; its call id changes when it is retried)."""
+    m = INV_OP_RE.match(text)
+    tail = INV_TAIL_RE.search(text)
+    if not m or not tail:
+        return
+    f = {}
+    for k, v in INV_NUM_RE.findall(text):
+        f.setdefault(k, int(v))
+    dur = int(tail.group(2))
+    desc = inv_desc(m.group(1), text)
+    first = f.get("firstInvocationTimeMs")
+    key = (desc, f.get("identityHash", f.get("callId")), first if first is not None else (t - dur) // 1000)
+    r = u.invs.get(key)
+    if r is None:
+        r = u.invs[key] = InvRec()
+        nm = INV_NAME_RE.search(text)
+        tg = INV_TARGET_RE.search(text)
+        r.desc, r.name, r.part = desc, (nm.group(1).strip() if nm else ""), f.get("partitionId", -1)
+        r.target = member_label(tg.group(1), int(tg.group(2))) if tg else ""
+        r.local = INV_LOCAL_RE.search(text) is not None
+        r.start, r.dur, r.first, r.n, r.raw = t - dur, dur, t, 0, None
+    r.dur = max(r.dur, dur)
+    r.last = t
+    r.n += 1
+    r.timeout, r.invokes = f.get("callTimeoutMillis"), f.get("invokeCount")
+    r.bexp, r.brecv = f.get("backupsAcksExpected"), f.get("backupsAcksReceived")
+    rp = INV_RESP_RE.search(text)
+    r.resp = rp.group(1)[:80] if rp else ""
+    r.conn = tail.group(1)[:200]
+    hb = f.get("lastHeartbeatMillis")
+    r.hb = (first + dur - hb) if hb and first else None     # how long since the target's last heartbeat for it
+    if r.raw is not None or len(u.invs) <= MAX_INV_RAW:
+        r.raw = text[:1500]
 
 
 class InstanceSection(object):
@@ -839,12 +1118,14 @@ def bucket_growth(cb, pb):
     return fine, (top if top >= 0 else None)
 
 
-def feed_profiler(u, prof, t, ops, ctx):
+def feed_profiler(u, prof, t, ops, ctx, stream=None):
     """Diff a profiler dump with the previous dump of the same lifetime; bin the deltas.
-    The counters are cumulative since the member started, so the first dump is only a baseline."""
-    st = u.pstreams.get(prof)
+    The counters are cumulative since the member started, so the first dump is only a baseline. The store latency
+    counters ("S") can be reset after a dump: counters lower than at the dump before are all new."""
+    key = stream or prof
+    st = u.pstreams.get(key)
     if st is None:
-        st = u.pstreams[prof] = [None, None]
+        st = u.pstreams[key] = [None, None]
     if st[0] is not None and t <= st[0]:
         ctx.counters["duplicate"] += 1
         return
@@ -857,6 +1138,8 @@ def feed_profiler(u, prof, t, ops, ctx):
     if not ctx.inside(t):
         return
     dt = t - prev_t
+    if prof == "S" and store_reset(prev, ops):
+        prev = {}                           # reset after the dump before: everything counted is new
     for name, s in ops.items():
         p = prev.get(name, ZERO_SNAP)
         dn = s[0] - p[0]
@@ -942,6 +1225,10 @@ def parse_file(lf, u, ctx):
                 handler = 4
             elif name == "SlowOperations":
                 handler = 5
+            elif STORE_SECTION_RE.match(name):
+                handler = 6
+            elif name == "Invocations":
+                handler = 7
             else:
                 continue
             t = ctx.tdisp(m)
@@ -953,6 +1240,21 @@ def parse_file(lf, u, ctx):
                     feed_profiler(u, PROFILERS[name], t, {}, ctx)
                     continue
                 sec = ProfilerSection(u, PROFILERS[name], t, ctx)
+                continue
+            if handler == 6:
+                svc = name[:-len("Latency")]
+                if rest.rstrip("]"):
+                    continue
+                if rest:                                # "MapStoreLatency[]": no store called yet
+                    feed_store(u, svc, t, {}, ctx)
+                    continue
+                sec = StoreLatencySection(u, svc, t, ctx)
+                continue
+            if handler == 7:                            # read outside --from/--to too: the dump before is the baseline
+                sec = InvocationsSection(u, t, ctx, ctx.inside(t))
+                if rest.rstrip("]") == "" and rest:
+                    sec.finish()
+                    sec = None
                 continue
             if not ctx.inside(t):
                 continue
@@ -1104,7 +1406,7 @@ def finish_members(units):
     """After parsing: the lifetimes of one address make one member, unless their times overlap
     (other machines reusing the address): those are labelled by directory."""
     for u in units:
-        u.cover = coverage(u.mtimes + u.ptimes + [c[0] for c in u.cluster])
+        u.cover = coverage(u.mtimes + u.ptimes + [c[0] for c in u.cluster] + [d[0] for d in u.invd if d[4]])
     by_key = {}
     order = []
     for u in units:
@@ -1788,15 +2090,49 @@ def export_one(mi, stats, moving, hidden, grid, ub, filled, gaps, top_n, fct):
 
 
 # --------------------------------------------------------------------------- other exports
-def profiler_period(units):
-    """The profilers' dump period (ms), from the intervals seen."""
+def profiler_period(units, store=False):
+    """The profilers' dump period (ms), from the intervals seen; store: the store latency dumps'."""
     vals = []
     for u in units:
-        for r in u.prof.values():
-            vals.extend(r.dt[:2000])
+        for (prof, _op), r in u.prof.items():
+            if (prof == "S") == store:
+                vals.extend(r.dt[:2000])
+        if store:
+            for st in u.stot.values():
+                vals.extend(b - a for a, b in zip(st[3], st[3][1:]) if b > a)
         if len(vals) > 200000:
             break
-    return float(statistics.median(vals)) if vals else 5000.0
+    return float(statistics.median(vals)) if vals else (60000.0 if store else 5000.0)
+
+
+def export_store(members):
+    """Per member, data structure and method: the store latency counters since the member started (each lifetime's
+    last dump, plus what was counted before each reset), and the dumps seen."""
+    ops, opi, tot, dumps, seen = [], {}, [], [], set()
+    for mi, m in enumerate(members):
+        agg, times = {}, []
+        for u in m.units:
+            for svc, st in u.stot.items():
+                times.extend(st[3])
+                seen.update((svc, ds) for ds in st[4])
+                cur = dict(st[2])
+                for name, snap in st[1].items():
+                    cur[name] = add_snap(cur.get(name), snap)
+                for name, snap in cur.items():
+                    agg[name] = add_snap(agg.get(name), snap)
+        for name in sorted(agg):
+            c = agg[name]
+            if not c[0]:
+                continue
+            if name not in opi:
+                opi[name] = len(ops)
+                ops.append(name)
+            tot.append([mi, opi[name], c[0], c[1], c[2], [[k, c[3][k]] for k in sorted(c[3])]])
+        if times:
+            dumps.append([mi, len(times), int(min(times)), int(max(times))])
+    called = set(tuple(o.split("\u0001")[:2]) for o in ops)
+    idle = sorted(x for x in seen if x not in called)       # a store that was never called
+    return {"ops": ops, "tot": tot, "dumps": dumps, "idle": [list(x) for x in idle]}
 
 
 def split_interval(a, b, step):
@@ -1967,6 +2303,145 @@ def export_slowops(members):
     inv.sort(key=lambda r: (r[2], r[0]))
     return {"ops": ops, "stacks": stacks, "inv": inv, "capped": capped, "dumps": dumps,
             "logs": [[k[0], k[1], k[2], n] for k, n in sorted(counted.items())]}
+
+
+MAX_INVOCATIONS = 20000                 # invocations listed as slow kept in the report (the longest pending)
+MAX_INV_DETAILS = 400                   # of which the whole text is kept for the details
+
+
+def export_invocations(members):
+    """The invocation sampler's dumps. Per member: the invocations pending at each sample by operation (what History
+    grew by since the dump before; the first dump of a lifetime is the baseline) and those pending longer than the
+    slow threshold (SlowHistory); the totals since each lifetime started; every invocation listed as slow, once, with
+    the longest it was seen pending and whether it was still pending at the member's last dump, gone by the next dump,
+    or unknown (the next dump's list was cut at the print limit)."""
+    tot_h, tot_s = {}, {}
+    ser, dumps, recs = [], [], []
+    addr = {}
+    for mi, m in enumerate(members):
+        if m.key[0] == "addr":
+            addr[(norm_host(m.key[1]), m.key[2])] = mi
+    for mi, m in enumerate(members):
+        pts, times, ntrunc, gaps = [], [], 0, []
+        for u in m.units:
+            ds = u.invd
+            if not ds:
+                continue
+            iv = [b[0] - a[0] for a, b in zip(ds, ds[1:]) if b[0] > a[0]]
+            per = sorted(iv)[len(iv) // 2] if iv else 0
+            if per:
+                gaps.append(per)
+            for j, (t, trunc, hist, slow, inside) in enumerate(ds):
+                if inside:
+                    times.append(t)
+                    ntrunc += 1 if trunc else 0
+                if j == 0 or not inside:
+                    continue
+                pt, ph, ps = ds[j - 1][0], ds[j - 1][2], ds[j - 1][3]
+                k = max(1, int(round((t - pt) / float(per)))) if per else 1
+                dh, dsl = {}, {}
+                for src, prev, out in ((hist, ph, dh), (slow, ps, dsl)):
+                    for op, n in src.items():
+                        d = n - prev.get(op, 0)
+                        if d < 0:
+                            d = n                       # lower than before: counted again from 0
+                        if d > 0:
+                            out[op] = d / float(k)
+                pts.append((t, k, dh, dsl))
+            last = ds[-1]
+            for op, n in last[2].items():
+                tot_h[(mi, op)] = tot_h.get((mi, op), 0) + n
+            for op, n in last[3].items():
+                tot_s[(mi, op)] = tot_s.get((mi, op), 0) + n
+            dtimes = [d[0] for d in ds]
+            for r in u.invs.values():
+                if not r.n:
+                    continue
+                j = bisect.bisect_right(dtimes, r.last)
+                state = 2 if j >= len(ds) else (0 if ds[j][1] else 1)
+                tm = addr.get(inv_target_key(r.target), -1) if not r.local else mi
+                recs.append((mi, r, state, tm))
+        if times:
+            per = min(gaps) if gaps else 60000
+            cov = []
+            for t in sorted(times):                     # where the sampler wrote: dumps closer than 2.5 periods
+                if cov and t - cov[-1][1] <= max(2.5 * per, 90000):
+                    cov[-1][1] = int(t)
+                else:
+                    cov.append([int(t), int(t)])
+            dumps.append([mi, len(times), int(min(times)), int(max(times)), ntrunc, int(min(gaps)) if gaps else 0, cov])
+        if pts:
+            ser.append((mi, pts))
+    # the operations, the slowest first: SlowHistory totals, then History
+    names = set(op for _mi, op in tot_h) | set(op for _mi, op in tot_s) | set(r.desc for _mi, r, _s, _t in recs)
+    rank = dict((op, (sum(v for (mi, o), v in tot_s.items() if o == op), sum(v for (mi, o), v in tot_h.items() if o == op))) for op in names)
+    ops = sorted(names, key=lambda op: (-rank[op][0], -rank[op][1], op))
+    oi = dict((op, i) for i, op in enumerate(ops))
+    out_ser = []
+    for mi, pts in ser:
+        pts.sort(key=lambda x: x[0])
+        col = {"m": mi, "t": [], "p": {}, "s": {}}
+        prev = 0
+        anyk = any(k > 1 for _t, k, _h, _s in pts)
+        if anyk:
+            col["k"] = []
+        for i, (t, k, dh, dsl) in enumerate(pts):
+            col["t"].append(int(t) - prev)
+            prev = int(t)
+            if anyk:
+                col["k"].append(k)
+            for src, dst in ((dh, col["p"]), (dsl, col["s"])):
+                for op, v in src.items():
+                    dst.setdefault(oi[op], []).extend([i, int(v) if v == int(v) else round(v, 2)])
+        col["p"] = [[o, v] for o, v in sorted(col["p"].items())]
+        col["s"] = [[o, v] for o, v in sorted(col["s"].items())]
+        out_ser.append(col)
+    capped = len(recs) > MAX_INVOCATIONS
+    recs.sort(key=lambda x: -x[1].dur)
+    recs = recs[:MAX_INVOCATIONS]
+    raw = []
+    inv = []
+    for mi, r, state, tm in recs:
+        ri = -1
+        if r.raw is not None and len(raw) < MAX_INV_DETAILS:
+            ri = len(raw)
+            raw.append(r.raw)
+        inv.append([mi, oi[r.desc], r.name, r.part, r.target, 1 if r.local else 0, tm, int(r.start), r.dur, int(r.first), int(r.last), r.n,
+                    r.timeout, r.invokes, r.bexp, r.brecv, r.resp, r.conn, r.hb, state, ri])
+    inv.sort(key=lambda x: (x[7], x[0]))
+    tot = [[mi, oi[op], n, tot_s.get((mi, op), 0)] for (mi, op), n in sorted(tot_h.items())]
+    tot += [[mi, oi[op], 0, n] for (mi, op), n in sorted(tot_s.items()) if (mi, op) not in tot_h]
+    return {"ops": ops, "ser": out_ser, "tot": tot, "inv": inv, "raw": raw, "dumps": dumps, "capped": capped}
+
+
+def inv_totals(col):
+    """The times of a member's sampler points and, at each, the invocations pending and the slow ones (all operations)."""
+    times, t = [], 0
+    for dt in col["t"]:
+        t += dt
+        times.append(t)
+    out = []
+    for key in ("p", "s"):
+        tot = [0.0] * len(times)
+        for _o, flat in col[key]:
+            for j in range(0, len(flat), 2):
+                tot[flat[j]] += flat[j + 1]
+        out.append(list(zip(times, tot)))
+    return out
+
+
+def inv_short(desc):
+    """GetOperation, PartitionIteratingOperation(MapGetAllOperationFactory)."""
+    if "(" in desc:
+        a, _p, b = desc.partition("(")
+        return a.rsplit(".", 1)[-1] + "(" + b.rstrip(")").rsplit(".", 1)[-1] + ")"
+    return desc.rsplit(".", 1)[-1]
+
+
+def inv_target_key(label):
+    """(host, port) of an address label, as the members are keyed: for the target of an invocation."""
+    h, _sep, p = label.rpartition(":")
+    return (norm_host(h), int(p)) if p.isdigit() else None
 
 
 def export_cluster(members):
@@ -2661,7 +3136,7 @@ GC_PAUSE_RE = re.compile(r"^(Pause [A-Za-z ]+?)((?: \((?:[^()]|\([^()]*\))*\))*)
 GC_PAREN_RE = re.compile(r"\(((?:[^()]|\([^()]*\))*)\)")
 GC_HREG_RE = re.compile(r"^Humongous regions: (\d+)->(\d+)")
 GC_REGION_RE = re.compile(r"[Hh]eap [Rr]egion [Ss]ize: (\d+)([KMG])")
-GC8_RE = re.compile(r"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d[.,]\d+[+-]\d{4}): (\d+[.,]\d+): \[(GC pause|GC remark|GC cleanup|Full GC|GC)\b(.*)$")
+GC8_RE = re.compile(r"(?:(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d[.,]\d+[+-]\d{4}): )?(?<![\d.,])(\d+[.,]\d+): \[(GC pause|GC remark|GC cleanup|Full GC|GC)\b(.*)$")
 GC8_SECS_RE = re.compile(r", (\d+[.,]\d+) secs\]")
 GC8_HEAP_RE = re.compile(r"(\d+(?:\.\d+)?)([BKMG])->(\d+(?:\.\d+)?)([BKMG])\((\d+(?:\.\d+)?)([BKMG])\)")
 GC8_HEAPLINE_RE = re.compile(r"Heap: (\d+(?:\.\d+)?)([BKMG])\(\d+(?:\.\d+)?[BKMG]\)->(\d+(?:\.\d+)?)([BKMG])\((\d+(?:\.\d+)?)([BKMG])\)")
@@ -2710,6 +3185,10 @@ class GcFile(object):
         self.how = ""
         self.no_time = 0
         self.drop = False
+        self.up_runs = []           # pauses with the JVM uptime only: [{first, last, events, fresh}], one per JVM run
+        self.placed = []            # how each of those runs was placed in time: [(pauses, how, JVM start)]
+        self.unplaced = 0           # pauses of runs that could not be placed
+        self.lane = None            # GC logs alone with the uptime only: the line (JVM) of this file
 
     def jvm_key(self, start):
         """The run a line belongs to: its JVM start, to the nearest 10 s (uptime and wall time round a little)."""
@@ -2739,11 +3218,30 @@ def gc_disp(text, ctx):
 
 def parse_gc_file(gf, ctx):
     """Pauses of a GC log; a To-space exhausted line and the humongous region counts go with the pause of the same
-    GC id that follows them."""
+    GC id that follows them. Lines with the JVM uptime only (no date-time decoration) are kept per JVM run, to be
+    placed in time later with the JVM start of their member (anchor_gc)."""
     pending = {}
-    cstart = {}                         # GC id of the last concurrent start pause -> its index in gf.events
+    cstart = {}                         # GC id of the last concurrent start pause -> (event list, index)
     run = None
     last8 = None
+
+    def add(t, up, gid, kind, cause, before, after, heap, pause, fl, hr):
+        """A pause: in gf.events when its time is known, else in the current uptime-only run. (list, index) or None."""
+        if t is not None:
+            j = gc_add(gf, ctx, t, run, gid, kind, cause, before, after, heap, pause, fl, hr)
+            return None if j is None else (gf.events, j)
+        r = gf.up_runs[-1]
+        r["events"].append((up, None, gid, kind, cause, before, after, heap, pause, fl, hr))
+        return r["events"], len(r["events"]) - 1
+
+    def up_run(up, fresh=False):
+        """The uptime-only run a line belongs to: a new one when the uptime goes back (a JVM restart)."""
+        r = gf.up_runs[-1] if gf.up_runs else None
+        if r is None or up < r["last"] - 1000 or (fresh and r["events"]):
+            r = {"first": up, "last": up, "events": [], "fresh": fresh or up < 120000}
+            gf.up_runs.append(r)
+        r["last"] = max(r["last"], up)
+        return r
     try:
         with open_text(gf.lf.path) as f:
             for line in f:
@@ -2766,6 +3264,8 @@ def parse_gc_file(gf, ctx):
                                 t = int(d[:-2]) + (ctx.offset if ctx.use_epoch else 0)
                     if msg.startswith("Using "):
                         gf.collector = msg[6:].strip()
+                        if t is None and up is not None:
+                            up_run(up, fresh=True)      # the first line of a JVM run
                         continue
                     r = GC_REGION_RE.search(msg)
                     if r:
@@ -2774,9 +3274,11 @@ def parse_gc_file(gf, ctx):
                     if not e:
                         continue
                     if t is None:
-                        gf.no_time += 1
-                        continue
-                    if up is not None:
+                        if up is None:
+                            gf.no_time += 1
+                            continue
+                        up_run(up)
+                    elif up is not None:
                         run = gf.jvm_key(t - up)
                     gid, body = int(e.group(1)), e.group(2)
                     if body.startswith("To-space exhausted"):
@@ -2788,10 +3290,11 @@ def parse_gc_file(gf, ctx):
                         continue
                     if body.startswith(("Concurrent Undo Cycle", "Concurrent Mark Cycle")):
                         # the cycle's first line (no duration) follows the pause that started it, GC id - 1
-                        j = None if GC_DUR_TAIL_RE.search(body) else cstart.pop(gid - 1, None)
-                        if j is not None:
-                            ev = gf.events[j]
-                            gf.events[j] = ev[:9] + (ev[9] | (GC_UNDO if "Undo" in body else GC_MARK),) + ev[10:]
+                        ref = None if GC_DUR_TAIL_RE.search(body) else cstart.pop(gid - 1, None)
+                        if ref is not None:
+                            lst, j = ref
+                            ev = lst[j]
+                            lst[j] = ev[:9] + (ev[9] | (GC_UNDO if "Undo" in body else GC_MARK),) + ev[10:]
                         continue
                     p = GC_PAUSE_RE.match(body)
                     if not p:
@@ -2805,21 +3308,24 @@ def parse_gc_file(gf, ctx):
                     fl, hr = pending.pop(gid, (0, None))
                     if any(x.startswith("Evacuation Failure") for x in parens):
                         fl |= GC_TOSPACE                # JDK 21+: (Evacuation Failure[: Allocation / Pinned]) on the pause line
-                    j = gc_add(gf, ctx, t, run, gid, kind, cause, before, after, heap, float(p.group(9)), fl, hr)
-                    if j is not None and "Concurrent Start" in kind:
+                    ref = add(t, up, gid, kind, cause, before, after, heap, float(p.group(9)), fl, hr)
+                    if ref is not None and "Concurrent Start" in kind:
                         cstart.clear()
-                        cstart[gid] = j
+                        cstart[gid] = ref
                 else:
                     m = GC8_RE.search(line)
                     if m:
-                        t = gc_disp(m.group(1).replace(",", "."), ctx)
+                        t = gc_disp(m.group(1).replace(",", "."), ctx) if m.group(1) else None
                         up = float(m.group(2).replace(",", ".")) * 1000.0
-                        if t is None:
+                        if t is not None:
+                            run = gf.jvm_key(t - up)
+                        elif m.group(1):
                             continue
-                        run = gf.jvm_key(t - up)
                         what, rest = m.group(3), m.group(4)
                         if rest.lstrip().startswith("concurrent"):
                             continue                    # [GC concurrent-mark-end, 0.0012 secs]: not a pause
+                        if t is None:
+                            up_run(up)
                         parens = GC_PAREN_RE.findall(GC8_HEAP_RE.sub("", rest.split(",")[0]))   # not the (4096M) of a heap size
                         cause = next((x for x in parens if gc_is_cause(x)), "")
                         flags = [x for x in parens if not gc_is_cause(x)]
@@ -2845,16 +3351,18 @@ def parse_gc_file(gf, ctx):
                         pause = float(secs[-1].replace(",", ".")) * 1000.0 if secs else None
                         if pause is None:
                             continue
-                        last8 = gc_add(gf, ctx, t, run, None, kind, cause, before, after, heap, pause, fl, None)
+                        last8 = add(t, up, None, kind, cause, before, after, heap, pause, fl, None)
                     elif last8 is not None and "Heap:" in line:
                         h = GC8_HEAPLINE_RE.search(line)
                         if h:                           # the details of the pause just read (G1 with PrintGCDetails)
-                            ev = gf.events[last8]
-                            gf.events[last8] = ev[:5] + (gc_mb(h.group(1), h.group(2)), gc_mb(h.group(3), h.group(4)),
-                                                         gc_mb(h.group(5), h.group(6))) + ev[8:]
+                            lst, j = last8
+                            ev = lst[j]
+                            lst[j] = ev[:5] + (gc_mb(h.group(1), h.group(2)), gc_mb(h.group(3), h.group(4)),
+                                               gc_mb(h.group(5), h.group(6))) + ev[8:]
                             last8 = None
     except (OSError, EOFError) as e:
         warn("cannot read %s: %s" % (gf.lf.path, e))
+    gf.up_runs = [r for r in gf.up_runs if r["events"]]
 
 
 def gc_is_cause(text):
@@ -2882,15 +3390,32 @@ def gc_dist(a, b):
     return (len(pa) - c) + (len(pb) - c)
 
 
+def gc_name_score(label, text):
+    """How well a member's address matches a file or folder name: 2 for its host (or its first label: uklpapscl101a
+    of uklpapscl101a.example.com), 1 more for its port."""
+    host = label.split(" · ")[0].rsplit(":", 1)[0].strip("[]").lower()
+    port = label.split(" · ")[0].rsplit(":", 1)[-1] if ":" in label else ""
+    short = None if re.match(r"^[\d.]+$", host) else host.split(".")[0]
+    return (2 if host and (host in text or (short and re.search(r"(?:^|[^a-z0-9])%s(?:$|[^a-z0-9])" % re.escape(short), text))) else 0) + \
+        (1 if port.isdigit() and re.search(r"[_:.-]%s(?:$|[^0-9])" % re.escape(port), text) else 0)
+
+
 def gc_pick(gf, owners):
     """The owner of a GC log among owners {key: [folders, JVM start times, label]}: the one whose files are in the
-    nearest folder; on a tie, the one with a lifetime that started with that JVM (the GC log's wall time minus its
-    uptime), then a host or port in the file name. Returns (key, how) or (None, "")."""
+    same folder; else the one whose host is in the GC log's file name, then in its folder names; else the one in the
+    nearest folder; on a tie there, the one with a lifetime that started with that JVM (the GC log's wall time minus
+    its uptime). Returns (key, how) or (None, "")."""
     dist = dict((k, min(gc_dist(gf.lf.reldir, d) for d in o[0])) for k, o in owners.items() if o[0])
     if not dist:
         return None, ""
     best = min(dist.values())
     near = sorted((k for k, d in dist.items() if d == best), key=str)
+    if best == 0 and len(near) == 1:
+        return near[0], "same folder"
+    for text, how in ((gf.lf.name.lower(), "file name"), (gf.lf.reldir.lower(), "folder name")):
+        hit = sorted(((gc_name_score(o[2], text), str(k), k) for k, o in owners.items()), reverse=True)
+        if hit and hit[0][0] >= 2 and (len(hit) == 1 or hit[0][0] > hit[1][0]):
+            return hit[0][2], how
     if len(near) == 1:
         return near[0], "same folder" if best == 0 else "nearest folder"
     if gf.jvm_starts:
@@ -2902,20 +3427,6 @@ def gc_pick(gf, owners):
         score.sort()
         if score and score[0][0] < 600000 and (len(score) == 1 or score[1][0] - score[0][0] > 60000):
             return score[0][2], "JVM start time"
-    low = gf.lf.name.lower()
-    hit = []
-    for k in near:
-        label = owners[k][2]
-        host = label.rsplit(":", 1)[0].strip("[]").lower()
-        port = label.rsplit(":", 1)[-1] if ":" in label else ""
-        short = None if re.match(r"^[\d.]+$", host) else host.split(".")[0]
-        sc = (2 if host and (host in low or (short and re.search(r"(?:^|[^a-z0-9])%s(?:$|[^a-z0-9])" % re.escape(short), low))) else 0) + \
-            (1 if port.isdigit() and re.search(r"[_:.-]%s(?:$|[^0-9])" % re.escape(port), low) else 0)
-        if sc:
-            hit.append((sc, str(k), k))
-    hit.sort(reverse=True)
-    if hit and (len(hit) == 1 or hit[0][0] > hit[1][0]):
-        return hit[0][2], "file name"
     return None, ""
 
 
@@ -2936,6 +3447,216 @@ def assign_gc(gcfiles, members, lms, ctx):
         k, how = gc_pick(gf, owners)
         if k is not None:
             gf.member, gf.how = k, how
+
+
+def unit_series(u, metric):
+    """[(display time, value)] of a member-level metric of one lifetime (runtime.uptime, gc.minorCount...)."""
+    pat = re.compile(r"(?:^|,)metric=%s(?:,|$)" % re.escape(metric))
+    for attrs, ms in u.series.items():
+        if not pat.search(attrs) or any(kv.split("=", 1)[0] not in ("unit", "metric") for kv in attrs.split(",")):
+            continue
+        vals = ms.vals if ms.vals is not None else [ms.cval] * ms.count
+        return [(u.mtimes[ms.first + i], v) for i, v in enumerate(vals) if v == v and ms.first + i < len(u.mtimes)]
+    return []
+
+
+def gc_count_fit(run, start, counts):
+    """How well the young pauses of an uptime-only run line up with the member's gc.minorCount (young collections
+    since the JVM started) when the JVM started at `start`: the share of the dumps in the run's span where the count
+    minus the young pauses logged so far stays the same, give or take one; and that difference (0 when the log has
+    every pause since the start); and the number of dumps. None when fewer than 3 dumps fall in the run."""
+    young = sorted(ev[0] for ev in run["events"] if ev[3].startswith("Pause Young"))
+    diffs = []
+    for t, c in counts:
+        up = t - start
+        if run["first"] - 1000 <= up <= run["last"] + 1000:
+            diffs.append(int(round(c)) - bisect.bisect_right(young, up))
+    if len(diffs) < 3:
+        return None
+    med = sorted(diffs)[len(diffs) // 2]
+    return sum(1 for x in diffs if abs(x - med) <= 1) / float(len(diffs)), med, len(diffs)
+
+
+def gc_count_start(run, counts, approx, before=0):
+    """The JVM start that makes a run's young pauses match gc.minorCount at every dump near the run (a dump showing c
+    comes after the run's (c - before)-th young pause and before the next one; `before`: the young GCs before the
+    file, 0 for a run that starts with the JVM), near `approx` (the member's start); None when no start does."""
+    young = sorted(ev[0] for ev in run["events"] if ev[3].startswith("Pause Young"))
+    if not young:
+        return None
+    lo, hi, n = float("-inf"), float("inf"), 0
+    for t, c in counts:
+        if not approx + run["first"] - 3600000 <= t <= approx + run["last"] + 60000:
+            continue
+        k = min(len(young), max(0, int(round(c)) - before))
+        if k >= 1:
+            hi = min(hi, t - young[k - 1])
+        if k < len(young):
+            lo = max(lo, t - young[k])
+        n += 0 < k < len(young)
+    if n >= 3 and lo < hi and hi - lo < 600000 and approx - 3600000 <= (lo + hi) / 2 <= approx + 60000:
+        return (lo + hi) / 2.0
+    return None
+
+
+def gc_lifetimes(m, ctx):
+    """The JVM starts of a member's lifetimes, as candidates for its uptime-only GC logs: [(start, cover start,
+    cover end, gc.minorCount points, how)] by start. The start is the dump time minus runtime.uptime; without that
+    metric, the lifetime's start in the file names (when the member started, a little after its JVM)."""
+    out = []
+    for u in m.units:
+        ups = [t - v for t, v in unit_series(u, "runtime.uptime") if v > 0]
+        counts = unit_series(u, "gc.minorCount")
+        c0 = u.cover[0][0] if u.cover else None
+        c1 = u.cover[-1][1] if u.cover else None
+        if ups:
+            out.append((statistics.median(ups), c0, c1, counts, "JVM uptime in the diagnostics"))
+            continue
+        fs = [f.start_ms for f in u.files if f.start_ms]
+        if fs:
+            out.append((min(fs) + (ctx.offset if ctx.use_epoch else 0), c0, c1, counts, "approx"))
+        elif c0 is not None:
+            out.append((c0, c0, c1, counts, "approx"))
+    return sorted(out, key=lambda x: x[0])
+
+
+def gc_score(run, cands, j):
+    """Whether an uptime-only run can be the JVM of the j-th lifetime of its member, and how sure: (rank, start, how)
+    or None. Where the diagnostics have the GC counts over the run, they decide: they must line up with its young
+    pauses (all of them since the start for a run that starts with the JVM). Without them, the run must overlap the
+    lifetime's diagnostics. A JVM can't go on past the start of the next lifetime."""
+    start, c0, c1, counts, how = cands[j]
+    if how == "approx" and counts:              # no runtime.uptime: the start that lines up with the GC counts
+        refined = None
+        if run["fresh"]:
+            refined = gc_count_start(run, counts, start)
+        else:                                   # the young GCs before the file: about the median difference
+            fit0 = gc_count_fit(run, start, counts)
+            for k in sorted(range(fit0[1] - 3, fit0[1] + 4), key=lambda x: abs(x - fit0[1])) if fit0 else ():
+                refined = gc_count_start(run, counts, start, k)
+                if refined is not None:
+                    break
+        if refined is not None:
+            start, how = refined, "GC counts in the diagnostics"
+    a, b = start + run["first"], start + run["last"]
+    if j + 1 < len(cands) and b > cands[j + 1][0] + 120000:
+        return None
+    fit = gc_count_fit(run, start, counts) if counts else None
+    if fit is not None:
+        if fit[0] < 0.9 or (run["fresh"] and abs(fit[1]) > 1):
+            return None
+        return (2, fit[0], fit[2], -abs(fit[1])), start, how
+    ov = min(b, c1) - max(a, c0) if c0 is not None else -1
+    return ((1, 0, ov, 0), start, how) if ov > 0 else None
+
+
+def gc_same_jvm(r1, r2):
+    """Two uptime-only runs from the same JVM (copies of a file, or files that overlap): their common GCs have the
+    same uptime. GC ids start again from 0 at each JVM start, so another JVM's GC(7) has another uptime."""
+    a = dict(((ev[2], ev[3]), ev[0]) for ev in r1["events"] if ev[2] is not None)
+    common = [(a[(ev[2], ev[3])], ev[0]) for ev in r2["events"] if (ev[2], ev[3]) in a]
+    return bool(common) and all(abs(x - y) <= 1 for x, y in common)
+
+
+def anchor_gc(gcfiles, members, ctx):
+    """GC logs with the JVM uptime only on their lines: each JVM run placed in time with the JVM start of one of
+    its member's lifetimes. Runs go to lifetimes surest first, and two runs of one lifetime can't overlap in uptime
+    unless they are the same JVM's (a restarted JVM logs from 0 again: gc.log and gc.log.1 can both start at 0 and
+    can't both be one lifetime's). A file that matched no member goes to the one member whose GC counts match it."""
+    cands = dict((i, gc_lifetimes(m, ctx)) for i, m in enumerate(members))
+    left = {}
+    for gf in gcfiles:
+        if gf.up_runs and gf.member is None:    # the member whose GC counts line up with the pauses, if only one does
+            fits = [i for i, cs in cands.items()
+                    if any((gc_score(r, cs, j) or ((0,),))[0][0] == 2 for r in gf.up_runs for j in range(len(cs)))]
+            if len(fits) == 1:
+                gf.member, gf.how = fits[0], "GC counts"
+    groups = {}
+    for gf in gcfiles:
+        for r in gf.up_runs:
+            mi = gf.member if gf.member is not None and gf.member < len(members) else None
+            groups.setdefault(mi, []).append((gf, r))
+    for mi, runs in groups.items():
+        cs = cands.get(mi) or []
+        opts = []
+        for k, (_gf, r) in enumerate(runs):
+            for j in range(len(cs)):
+                x = gc_score(r, cs, j)
+                if x is not None:
+                    opts.append((x[0], -k, k, j, x[1], x[2]))
+        opts.sort(reverse=True)
+        done, taken = {}, {}
+        for _rank, _nk, k, j, start, how in opts:
+            r = runs[k][1]
+            if k in done:
+                continue
+            clash = [q for q in taken.get(j, []) if r["first"] <= runs[q][1]["last"] and runs[q][1]["first"] <= r["last"]]
+            if clash and not all(gc_same_jvm(runs[q][1], r) for q in clash):
+                continue
+            if clash:
+                start, how = done[clash[0]]
+            done[k] = (start, how)
+            taken.setdefault(j, []).append(k)
+        for k, (gf, r) in enumerate(runs):
+            if k not in done:
+                left.setdefault(id(gf), []).append(r)
+                continue
+            start, how = done[k]
+            key = gf.jvm_key(start)
+            n = 0
+            for ev in r["events"]:
+                if gc_add(gf, ctx, start + ev[0], key, *ev[2:]) is not None:
+                    n += 1
+            gf.placed.append((n, how, start))
+    for gf in gcfiles:
+        gf.up_runs = left.get(id(gf), [])
+
+
+def gc_follows(a, b):
+    """Uptime-only run b is the next file of run a's JVM (rotated files): b doesn't start with the JVM, starts
+    where a ended, and its first GC id follows a's last one (GC ids go on across a JVM's files, from 0 at its start)."""
+    ga = [ev[2] for ev in a["events"] if ev[2] is not None]
+    gb = [ev[2] for ev in b["events"] if ev[2] is not None]
+    return bool(ga and gb) and not b["fresh"] and b["first"] >= a["last"] - 1000 and max(ga) <= min(gb) <= max(ga) + 3
+
+
+def place_uptime(gcfiles, ctx):
+    """GC logs alone with the JVM uptime only on their lines: nothing gives the JVM start, so the time axis is the
+    uptime (0 is each JVM's start) and each JVM has a line of its own. A log's rotated files are one JVM when they
+    follow each other (gc_follows) or are copies; a file that starts from 0 again is another JVM."""
+    groups = {}
+    for gf in gcfiles:
+        for r in gf.up_runs:
+            groups.setdefault((gf.lf.reldir, gc_stem(gf.lf.name)), []).append((gf, r))
+    nchain = 0
+    for key in sorted(groups):
+        chains = []
+        for gf, r in sorted(groups[key], key=lambda x: (x[1]["first"], x[0].lf.name)):
+            for ch in chains:
+                if any(gc_same_jvm(r0, r) for _g, r0 in ch) or gc_follows(ch[-1][1], r):
+                    ch.append((gf, r))
+                    break
+            else:
+                chains.append([(gf, r)])
+        for ch in chains:
+            nchain += 1
+            names = []
+            for gf, _r in ch:
+                if gf.lf.name not in names:
+                    names.append(gf.lf.name)
+            label = "GC log " + (key[0] + "/" if key[0] != "." else "") + names[0] + \
+                (" + %d rotated file%s" % (len(names) - 1, "" if len(names) == 2 else "s") if len(names) > 1 else "")
+            for gf, r in ch:
+                gf.lane = gf.lane or label
+                gf.jvm_starts.append(0)
+                n = 0
+                for ev in r["events"]:
+                    if gc_add(gf, ctx, ev[0], -nchain, *ev[2:]) is not None:
+                        n += 1
+                gf.placed.append((n, "uptime axis", None))
+                r["events"] = []
+    for gf in gcfiles:
+        gf.up_runs = [r for r in gf.up_runs if r["events"]]
 
 
 def gc_addr_key(host, port):
@@ -2988,6 +3709,27 @@ def gc_stem(name):
     return GC_ROTATED_RE.sub(r"\1", name)
 
 
+GC_PLACED = {"JVM uptime in the diagnostics": "uptime + JVM start (runtime.uptime)",
+             "GC counts in the diagnostics": "uptime + JVM start (GC counts)", "approx": "uptime + member start (approximate)",
+             "uptime axis": "JVM uptime (no date-time in the log)"}
+
+
+def gc_time_source(gf):
+    """Where the times of a GC log's pauses come from: its date-time decorations, or its uptime placed with the JVM
+    start of its member (runtime.uptime in the diagnostics, the GC counts, or roughly the member's start)."""
+    out = []
+    placed = sum(n for n, _h, _s in gf.placed)
+    if len(gf.events) > placed:
+        out.append("date-time in the log")
+    for h in sorted(set(h for _n, h, _s in gf.placed)):
+        out.append(GC_PLACED.get(h, h))
+    if gf.unplaced:
+        out.append("uptime only: %s pause%s not placed in time" % (format(gf.unplaced, ","), "" if gf.unplaced == 1 else "s"))
+    if gf.no_time:
+        out.append("%d line%s with no time" % (gf.no_time, "" if gf.no_time == 1 else "s"))
+    return "; ".join(out)
+
+
 def export_gc(gcfiles, nmembers):
     """Per member, every pause once (rotated files and copies overlap), in time order, as columns. The GC logs of no
     member get a lane per folder and name (their rotated files together)."""
@@ -2997,11 +3739,14 @@ def export_gc(gcfiles, nmembers):
     lanes = {}
     for gf in gcfiles:
         mi = gf.member
+        if mi is None and not gf.events:
+            gf.how = "no member found"
+            continue                            # nothing to chart (uptime only, not placed): listed, without a lane
         if mi is None:
-            key = (gf.lf.reldir, gc_stem(gf.lf.name))
+            key = ("lane", gf.lane) if gf.lane else (gf.lf.reldir, gc_stem(gf.lf.name))
             if key not in lanes:
                 lanes[key] = nmembers + len(extra)
-                extra.append("GC log " + (key[0] + "/" if key[0] != "." else "") + key[1])
+                extra.append(gf.lane or "GC log " + (key[0] + "/" if key[0] != "." else "") + key[1])
             mi = gf.member = lanes[key]
             gf.how = "no member found"
         by.setdefault(mi, {})
@@ -3035,8 +3780,10 @@ def export_gc(gcfiles, nmembers):
             if fl or hr:
                 col["f"].append([j, fl, hr[0] if hr else None, hr[1] if hr else None])
         out.append(col)
-    files = [[gf.member, (gf.lf.reldir + "/" if gf.lf.reldir != "." else "") + gf.lf.name, gf.how, gf.first, gf.last,
-              len(gf.events), gf.collector, gf.region_mb, gf.fmt, len(gf.jvm_starts), gf.lf.size] for gf in gcfiles]
+    files = [[-1 if gf.member is None else gf.member, (gf.lf.reldir + "/" if gf.lf.reldir != "." else "") + gf.lf.name, gf.how,
+              None if gf.first is None else int(round(gf.first)), None if gf.last is None else int(round(gf.last)),
+              len(gf.events), gf.collector, gf.region_mb, gf.fmt, len(gf.jvm_starts), gf.lf.size, gc_time_source(gf),
+              gf.unplaced, gf.no_time] for gf in gcfiles]
     return {"kinds": kinds, "causes": causes, "mem": out, "files": files, "extra": extra}
 
 
@@ -3820,8 +4567,8 @@ def write_report(path, payload, rows_json):
     else:
         data = raw.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
         enc = "json"
-    title = "Hazelcast diagnostics · %d member%s" % (len(payload["members"]),
-                                                          "" if len(payload["members"]) == 1 else "s")
+    nreal = sum(1 for m in payload["members"] if not m.get("gcOnly"))
+    title = "Hazelcast diagnostics · %d member%s" % (nreal, "" if nreal == 1 else "s") if nreal else "Hazelcast GC logs"
     doc = (HTML_TEMPLATE.replace("__TITLE__", html.escape(title))
            .replace("__ENC__", enc).replace("__DATA__", data))
     with open(path, "w", encoding="utf-8") as f:
@@ -3836,8 +4583,9 @@ def build_arg_parser():
         description="Read Hazelcast diagnostics logs (all members under a directory) and write one interactive\n"
                     "HTML report: cluster, latency profilers (latency groups and slow threshold chosen in the report),\n"
                     "slow operations, operations, stuck threads, saturated executors, network, data transfer per member\n"
-                    "and peer, WAN per publisher, data structures (maps, queues, topics...), system, CP Subsystem (CP\n"
-                    "objects too) and other metrics, with a Measure mode that gives the amount (MB/GB...) in any span.\n"
+                    "and peer, WAN per publisher, data structures (maps, queues, topics...), MapStore latency, system,\n"
+                    "CP Subsystem (CP objects too) and other metrics, with a Measure mode that gives the amount\n"
+                    "(MB/GB...) in any span.\n"
                     "Member logs found there too (hazelcast.log, console output) get their own tabs: health monitor,\n"
                     "exceptions, OutOfMemoryError, notable lines and CP Subsystem activity; GC logs get a GC tab: every\n"
                     "pause, humongous allocations, full GCs and evacuation failures, heap after GC.",
@@ -3988,14 +4736,23 @@ def run(args):
         parse_gc_file(gf, ctx)
     if args.member:                             # only the GC logs of the members asked for
         assign_gc_selected(gcfiles, members, lms, files, logfiles, ctx)
+        anchor_gc(gcfiles, members, ctx)
         gcfiles = [gf for gf in gcfiles if gf.member is not None and not gf.drop]
     else:
         assign_gc(gcfiles, members, lms, ctx)
+        anchor_gc(gcfiles, members, ctx)
+    uptime_axis = not files and not lms and not any(gf.events for gf in gcfiles) and any(gf.up_runs for gf in gcfiles)
+    if uptime_axis:                             # GC logs alone, with the uptime only: an uptime axis
+        place_uptime(gcfiles, ctx)
+        time_note = "JVM uptime: the GC logs have no date-time and no diagnostics came with them (0 is each JVM's start)"
+    for gf in gcfiles:
+        gf.unplaced = sum(len(r["events"]) for r in gf.up_runs)
+        gf.up_runs = []
     total += sum(gf.lf.size for gf in gcfiles)
     nmem = max([len(members)] + [lm.index + 1 for lm in lms])
     gc = export_gc(gcfiles, nmem)
     parsed_s = time.time() - started
-    if (lo is not None or hi is not None) and not any(u.mtimes or u.prof or u.cluster or u.events or u.hb or u.slowops for u in units) \
+    if (lo is not None or hi is not None) and not any(u.mtimes or u.prof or u.cluster or u.events or u.hb or u.slowops or u.stot for u in units) \
             and not any(lm.records for lm in lms) and not any(gf.events for gf in gcfiles):
         raise UsageError("no data between --from and --to; these logs cover %s .. %s"
                          % (fmt_time(min(firsts + log_firsts)), fmt_time(max(lasts + firsts + log_firsts))))
@@ -4009,7 +4766,10 @@ def run(args):
     covered = [c for m in members for c in m.cover] + [[lm.first, lm.last] for lm in lms if lm.first is not None]
     slowops = export_slowops(members)
     covered += [[r[2], r[2] + r[3]] for r in slowops["inv"]]    # a slow invocation can start before the first dump
-    covered += [[gf.first, gf.last] for gf in gcfiles if gf.first is not None]
+    invs = export_invocations(members)
+    covered += [[r[7], r[10]] for r in invs["inv"]]
+    if not covered:                             # GC logs alone; with diagnostics or member logs, those set the range
+        covered = [[gf.first, gf.last] for gf in gcfiles if gf.first is not None]
     rng = [min(c[0] for c in covered), max(c[1] for c in covered)] if covered else [span0, span1]
     if lo is not None:
         rng[0] = max(rng[0], lo)
@@ -4025,6 +4785,8 @@ def run(args):
     else:
         mx = {"metrics": [], "static": [], "flat": [], "timestamps": [], "efactor": 1}
     pnative = max(1000, int(round(profiler_period(units) / 1000.0)) * 1000)
+    store = export_store(members)
+    snative = max(1000, int(round(profiler_period(units, store=True) / 1000.0)) * 1000)
     pbin = None
     if args.points is not None:
         pbin = nice_step(max(pnative * 0.95, (rng[1] - rng[0]) / float(args.points)))
@@ -4043,11 +4805,11 @@ def run(args):
         "bytes": sum(f.size for m in members for f in m.files), "skipped": [f.name for f in skipped][:50],
         "logfiles": sum(len(lm.files) for lm in lms), "logbytes": sum(f.size for lm in lms for f in lm.files),
         "gcfiles": len(gcfiles), "gcbytes": sum(gf.lf.size for gf in gcfiles),
-        "tz": tz, "timeNote": time_note, "range": [int(rng[0]), int(rng[1])],
+        "tz": tz, "timeNote": time_note, "range": [int(rng[0]), int(rng[1])], "uptime": uptime_axis,
         "window": [lo, hi] if (lo is not None or hi is not None) else None,
         "counters": c, "dropped": dropped, "top": args.top, "efactor": mx["efactor"],
         "timestamps": mx["timestamps"], "points": "max" if args.points is None else args.points,
-        "pt0": prof["pt0"], "pstep": pbin or pnative, "pnative": pnative, "pfine": FINE_LO,
+        "pt0": prof["pt0"], "pstep": pbin or pnative, "pnative": pnative, "pfine": FINE_LO, "sstep": max(pbin or 0, snative),
     }
     plist = [{"label": m.label, "files": len(m.files), "bytes": sum(f.size for f in m.files),
               "dirs": m.dirs, "lifetimes": [[int(u.cover[0][0]), int(u.cover[-1][1])] for u in m.units if u.cover],
@@ -4065,7 +4827,7 @@ def run(args):
         "metrics": mx["metrics"], "static": mx["static"], "flat": mx["flat"],
         "ops": prof["ops"],
         "events": events, "cluster": runs, "lists": lists, "hb": hb, "threads": stuck, "pools": pools, "transfer": transfer,
-        "slowops": slowops, "gc": gc, "logs": logs,
+        "slowops": slowops, "inv": invs, "gc": gc, "store": store, "logs": logs,
     }
     os.makedirs(args.output_dir, exist_ok=True)
     report = os.path.join(args.output_dir, "report.html")
@@ -4080,9 +4842,12 @@ def run(args):
          "; %d GC log files, %s" % (meta["gcfiles"], human_size(meta["gcbytes"])) if gcfiles else ""))
     if skipped:
         p("  skipped  : %d file(s) that are neither diagnostics, member logs nor GC logs" % len(skipped))
-    p("  members  : %d  (%s)" % (len(labels), ", ".join(labels)))
-    p("  window   : %s .. %s (%s), %s" % (fmt_time(rng[0]), fmt_time(rng[1]), human_dur((rng[1] - rng[0]) / 1000.0),
-                                         time_note))
+    real = [x["label"] for x in plist if not x.get("gcOnly")]
+    p("  members  : %s" % ("%d  (%s)" % (len(real), ", ".join(real)) if real else "none (GC logs only)"))
+    if len(real) < len(labels):
+        p("             + %d GC log(s) not linked to any member: %s" % (len(labels) - len(real), ", ".join(labels[len(real):])))
+    ft = fmt_uptime if uptime_axis else fmt_time
+    p("  window   : %s .. %s (%s), %s" % (ft(rng[0]), ft(rng[1]), human_dur((rng[1] - rng[0]) / 1000.0), time_note))
     if members:
         nmaps = [r for r in mx["metrics"] if r["c"] == "maps"]
         hidden_maps = set(h for r in nmaps for h in r.get("hidden", []))
@@ -4145,15 +4910,33 @@ def run(args):
         tosp = sum(1 for col_ in gc["mem"] for f_ in col_["f"] if f_[1] & GC_TOSPACE)
         undo = sum(1 for col_ in gc["mem"] for f_ in col_["f"] if f_[1] & GC_UNDO)
         w = max(evs, key=lambda e: e[3]) if evs else None
-        p("  gc logs  : %d file(s) for %d member(s): %s pause(s)%s; %d humongous allocation GC(s)%s, %d full GC(s), %d evacuation failure(s)"
-          % (len(gcfiles), len(set(gf.member for gf in gcfiles)), format(len(evs), ","),
+        linked = set(gf.member for gf in gcfiles if gf.how != "no member found")
+        nfree = sum(1 for gf in gcfiles if gf.how == "no member found")
+        p("  gc logs  : %d file(s), %s: %s pause(s)%s; %d humongous allocation GC(s)%s, %d full GC(s), %d evacuation failure(s)"
+          % (len(gcfiles), "for %d member(s)%s" % (len(linked), " and %d not linked to any" % nfree if nfree else "") if linked else
+             "%d JVM(s) on the uptime axis" % len(gc["extra"]) if uptime_axis else "none linked to a member", format(len(evs), ","),
              ", longest %s ms (%s, %s)" % (format(w[3] / 1000.0, ".1f"), gc["kinds"][w[1]], labels[w[0]]) if w else "", hum,
              " (%d undone: the humongous objects were gone by the pause)" % undo if undo else "", full, tosp))
+        if uptime_axis:
+            p("             the GC logs have the JVM uptime only and no diagnostics came with them: the time axis is the JVM uptime,"
+              " one line per JVM (log with -Xlog:gc*:file=...:time,uptime for the date and time)")
         for gf in gcfiles:
-            if gf.how == "no member found":
-                p("             %s: no member's files near it; shown as %s" % (gf.lf.name, labels[gf.member]))
+            rel = (gf.lf.reldir + "/" if gf.lf.reldir != "." else "") + gf.lf.name
+            if gf.how == "no member found" and gf.member is not None and not uptime_axis:
+                p("             %s: no member's files near it; shown as %s" % (rel, labels[gf.member]))
+            for n, how, start in gf.placed:
+                if start is not None:
+                    p("             %s: %s pause(s) with the JVM uptime only, placed with the JVM start %s (%s)"
+                      % (rel, format(n, ","), fmt_time(start), "from runtime.uptime" if how.startswith("JVM uptime") else
+                         "from the GC counts" if how.startswith("GC counts") else "approximately: the member's start"))
+            if gf.unplaced:
+                p("             %s: %s pause(s) with the JVM uptime only, not placed in time: %s (log with -Xlog:gc*:file=...:time,uptime)"
+                  % (rel, format(gf.unplaced, ","), "they match none of the lifetimes of %s in the diagnostics" % labels[gf.member]
+                     if gf.member is not None and gf.member < len(members) else
+                     "no member matches the log (folder, host name, GC counts)" if gf.member is None and members else
+                     "no member's diagnostics to place them with"))
             if gf.no_time:
-                p("             %s: %d line(s) without a date-time, skipped (log with -Xlog:gc*:file=...:time,uptime)" % (gf.lf.name, gf.no_time))
+                p("             %s: %d line(s) without a date-time, skipped (log with -Xlog:gc*:file=...:time,uptime)" % (rel, gf.no_time))
     if slowops["dumps"]:
         si = slowops["inv"]
         if si:
@@ -4163,6 +4946,50 @@ def run(args):
                  slowops["ops"][w[1]].rsplit(".", 1)[-1], labels[w[0]], " (still running at its last dump)" if w[7] else ""))
         else:
             p("  slow ops : none in %s SlowOperations section(s)" % format(sum(d[1] for d in slowops["dumps"]), ","))
+    if invs["dumps"]:
+        per = min([d[5] for d in invs["dumps"] if d[5]] or [0])
+        peaks = []
+        for icol in invs["ser"]:                # (not col: the member logs' collector, used below)
+            tp, ts = inv_totals(icol)
+            for key, tot in (("p", tp), ("s", ts)):
+                if tot:
+                    i = max(range(len(tot)), key=lambda j: tot[j][1])
+                    peaks.append((key, tot[i][1], icol["m"], tot[i][0]))
+        pk = max((x for x in peaks if x[0] == "p"), key=lambda x: x[1], default=None)
+        sk = max((x for x in peaks if x[0] == "s"), key=lambda x: x[1], default=None)
+        p("  invocations: %s sampler dump(s) on %d member(s)%s%s%s"
+          % (format(sum(d[1] for d in invs["dumps"]), ","), len(invs["dumps"]), " (every %s)" % human_dur(per / 1000.0) if per else "",
+             "; at most %s pending at a sample (%s at %s)" % (format(int(round(pk[1])), ","), labels[pk[2]], fmt_time(pk[3])) if pk else "",
+             ", %s of them pending longer than the slow threshold (%s at %s)" % (format(int(round(sk[1])), ","), labels[sk[2]], fmt_time(sk[3]))
+             if sk and sk[1] > 0 else ""))
+        iv = invs["inv"]
+        if iv:
+            w = max(iv, key=lambda r: r[8])
+            late = sum(1 for r in iv if r[12] and r[8] > r[12])
+            parts = {}
+            for r in iv:
+                if r[3] >= 0:
+                    parts[r[3]] = parts.get(r[3], 0) + 1
+            top = sorted(parts.items(), key=lambda x: -x[1])[:3]
+            p("             %s invocation(s) listed as slow%s; longest pending %s: %s%s%s on %s%s%s%s"
+              % (format(len(iv), ","), " (the longest %s kept)" % format(len(iv), ",") if invs["capped"] else "", human_dur(w[8] / 1000.0),
+                 inv_short(invs["ops"][w[1]]), " " + w[2] if w[2] else "", " partition %d" % w[3] if w[3] >= 0 else "", labels[w[0]],
+                 " (still pending at its last dump)" if w[19] == 2 else "",
+                 "; %s past their call timeout" % format(late, ",") if late else "",
+                 "; most listed: " + ", ".join("partition %d (%s)" % (pt, format(n, ",")) for pt, n in top) if top and top[0][1] > 1 else ""))
+        nt = sum(d[4] for d in invs["dumps"])
+        if nt:
+            p("             %s dump(s) listed only the first 99 slow invocations (hazelcast.diagnostics.invocation.slow.max.count)" % format(nt, ","))
+    if store["dumps"]:
+        sops = [o.split("\u0001") for o in store["ops"]]
+        calls = sum(r[2] for r in store["tot"])
+        stime = sum(r[3] for r in store["tot"])
+        w = max(store["tot"], key=lambda r: r[4]) if store["tot"] else None
+        p("  stores   : %d data structure(s) with a store or loader, %d method(s); %s call(s), %s in them (since the members "
+          "started)%s; %s dump(s)"
+          % (len(set((o[0], o[1]) for o in sops)), len(sops), format(calls, ","), human_us(stime),
+             "; slowest %s: %s %s on %s" % (human_us(w[4]), sops[w[1]][1], sops[w[1]][2], labels[w[0]]) if w else "",
+             format(sum(d[1] for d in store["dumps"]), ",")))
     if logs:
         nrec = sum(lm.records for lm in lms)
         nexc = sum(g.n for g in col.excs.values())
@@ -4247,6 +5074,7 @@ body { margin: 0; color: var(--ink); font: 14px/1.45 var(--font); -webkit-text-s
 header.head { padding: 22px 0 6px; }
 .eyebrow { font-size: 12px; color: var(--muted); letter-spacing: .02em; }
 h1 { font-size: 22px; line-height: 1.25; font-weight: 600; margin: 2px 0 6px; overflow-wrap: anywhere; }
+h1 .title-note { font-size: 14px; font-weight: 400; color: var(--muted); }
 h2 { font-size: 16px; font-weight: 600; margin: 26px 0 0; }
 h2 + .lead { margin-top: 2px; }
 .lead { font-size: 13px; color: var(--ink-2); margin: 6px 0 0; max-width: 860px; }
@@ -4291,8 +5119,9 @@ td.msg { white-space: normal; overflow-wrap: anywhere; min-width: 280px; font-si
 .toolbar { border-bottom: 1px solid var(--border); padding: 8px 0; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; }
 .ctxbar { border-bottom: 1px solid var(--border); padding: 7px 0; }
 .ctxbar .tabctl { margin: 0; }
-.ctxbar select { max-width: min(300px, 100%); }
-.ctxbar select.opsel { max-width: min(380px, 100%); }
+.ctxbar .ctl { min-width: 0; max-width: 100%; }
+.ctxbar .ctxrow select { max-width: min(300px, calc(100vw - 110px)); }
+.ctxbar .ctxrow select.opsel { max-width: min(380px, calc(100vw - 110px)); }
 .ctl { display: inline-flex; align-items: center; gap: 8px; }
 .ctl-label { font-size: 12px; color: var(--muted); }
 .seg { display: inline-flex; background: var(--chip); border-radius: 8px; padding: 2px; flex-wrap: wrap; }
@@ -4426,11 +5255,18 @@ tr.click:hover td { background: var(--chip); }
 tr.sel td { background: var(--row-sel); }
 td.op { font-weight: 600; }
 td.op .ptag { font-weight: 400; font-size: 11px; color: var(--muted); margin-left: 6px; }
+td.op .meth { font-weight: 400; color: var(--ink-2); }
+td .share { color: var(--muted); font-size: 11px; margin-left: 6px; }
+svg.hist { display: block; }
+svg.hist .hist-tick { fill: var(--axis); }
 td .pkg { font-weight: 400; color: var(--muted); }
 .chips { display: inline-flex; flex-wrap: wrap; gap: 2px 10px; }
 .chip { display: inline-flex; align-items: center; gap: 5px; font-variant-numeric: tabular-nums; }
 .chip span { color: var(--muted); }
 .empty-note { color: var(--muted); font-size: 13px; padding: 6px 0; }
+dl.kv { display: grid; grid-template-columns: minmax(90px, max-content) 1fr; gap: 4px 14px; font-size: 13px; margin: 12px 0; }
+dl.kv dt { color: var(--ink-2); }
+dl.kv dd { margin: 0; overflow-wrap: anywhere; }
 .selbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; font-size: 13px; color: var(--ink-2); margin: 10px 0 0; }
 .selbar b { color: var(--ink); overflow-wrap: anywhere; }
 .tabctl { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; margin: 14px 0 0; }
@@ -4531,12 +5367,46 @@ details.sect p { color: var(--ink-2); font-size: 13px; margin: 8px 0; }
         ran, so the report keeps each invocation once (by operation, start and identity hash), with the longest
         duration seen; one that ended less than 3 s before its member's last dump is marked still running. The end of
         an invocation is its start plus its duration.</li>
-      <li><b>GC logs</b> found under the input folder are read too: JDK 9+ unified logging (<code>-Xlog:gc*</code>, with the
-        <code>time</code> decoration, e.g. <code>-Xlog:gc*:file=gc.log:time,uptime</code>; lines with the uptime only
-        can't be placed in time) and JDK 8 <code>-XX:+PrintGCDetails -XX:+PrintGCDateStamps</code>.
-        A GC log goes with the member whose diagnostics or member logs are in the nearest folder; when several are as near,
-        with the one whose lifetime started with that JVM (wall time minus uptime), then the one whose host or port is in the
-        file name; else it gets a lane of its own. Rotated files and copies are read once (by JVM run and GC id). Each pause is
+      <li><b>Invocations</b> come from the Invocations sections of the invocation sampler, written every
+        <code>hazelcast.diagnostics.invocation.sample.period.seconds</code> when it is above 0. At each sample it goes
+        through every invocation the member is waiting on (from the call until the response and the backup
+        acknowledgements arrive) and adds one per operation to <i>History</i>, and to <i>SlowHistory</i> when it has
+        been pending for longer than <code>hazelcast.diagnostics.invocation.slow.threshold.seconds</code> (5 s by
+        default). Both count since the member started, so the growth from one dump to the next is the number pending
+        at that sample; the first dump of each lifetime is the baseline, and a gap of several periods (a file
+        missing) is shared out evenly. The slow ones are also listed with their details (<i>Pending</i>), the first
+        <code>hazelcast.diagnostics.invocation.slow.max.count</code> - 1 (99) of them: an invocation listed at several
+        dumps (its call id changes when it is retried) is shown once, from its first invocation to the last dump that
+        listed it, with the longest duration seen. It is still pending at the member's last dump, or gone by the next
+        dump, or not known when that dump's list was cut at 99. Past its call timeout, an invocation waits on because
+        the target keeps answering its heartbeats: the operation is still queued or running there. The partition
+        thread of a partition is <code>partition-operation.thread-</code> (partition id modulo
+        <code>operation.partitionThreadCount</code> of the target).</li>
+      <li><b>MapStore</b> comes from the MapStoreLatency sections (and QueueStoreLatency and the like), written when
+        <code>hazelcast.diagnostics.storeLatency.period.seconds</code> is above 0: for each map and each method of its
+        MapStore or MapLoader (load, loadAll, loadAllKeys, store, storeAll, delete, deleteAll), the same counters as
+        the profilers: calls, total and max time, calls per power-of-2 µs bucket. They are cumulative since the member
+        started, so the charts use the growth between two dumps, and the table <i>Since the members started</i> has
+        the counters themselves. With <code>hazelcast.diagnostics.storeLatency.reset.period.seconds</code> the counters
+        are reset after some dumps: a dump with a count, a total, a max or a bucket lower than at the dump before
+        counts as reset, everything in it is new, and the totals keep what was counted before. The latency groups and
+        the slow threshold are the Latency tab's.</li>
+      <li><b>GC logs</b> found under the input folder are read too: JDK 9+ unified logging (<code>-Xlog:gc*</code>) and
+        JDK 8 <code>-XX:+PrintGCDetails</code>. A line with a date-time (the <code>time</code> decoration, e.g.
+        <code>-Xlog:gc*:file=gc.log:time,uptime</code>, or <code>-XX:+PrintGCDateStamps</code>) is placed by it. A line
+        with the JVM uptime only (the default decorations of <code>-Xlog</code>: uptime, level, tags) is placed with
+        the JVM start of its member: in the diagnostics, the dump time minus <code>runtime.uptime</code> (without that
+        metric, the lifetime's start in the file names, refined with the GC counts). Each JVM run of the log (at a
+        restart the uptime starts again from 0) goes to the member's lifetime whose <code>gc.minorCount</code> lines up
+        with its young pauses or, with no counts over it, whose diagnostics it overlaps; two runs that both start from 0
+        can't be one lifetime. A run that matches no lifetime isn't placed: the GC log files table counts its pauses.
+        With GC logs alone and the uptime only, the time axis is the JVM uptime (0 is each JVM's start) and each JVM
+        has a line of its own.
+        A GC log goes with the member whose diagnostics or member logs are in the same folder; else with the member whose
+        host name (and port) is in the GC log's file name, then in its folder names (<code>gc_logs_uklpapscl101a/gc.log</code>);
+        else with the one in the nearest folder, and when several are as near, the one whose lifetime started with that JVM
+        (wall time minus uptime). A GC log that matches no member gets a line of its own on the GC tab, but it isn't
+        counted as a member. Rotated files and copies are read once (by JVM run and GC id). Each pause is
         a dot on the GC tab, coloured by its kind: young and mixed, remark / cleanup / other, and the ones caused by a
         humongous allocation; full GCs and evacuation failures (to-space exhausted) are marked with a red line and cross.
         The heap is the one printed on the pause line (before → after (committed)); the time in pauses is the pauses' sum
@@ -4606,7 +5476,7 @@ try { D = await loadData(); }
 catch (e) { $("title").textContent = "Could not read the report data"; $("subtitle").textContent = String((e && e.message) || e); return; }
 $("hz-data").textContent = "";
 
-const META = D.meta, MEMBERS = D.members, NM = MEMBERS.length;
+const META = D.meta, MEMBERS = D.members, NM = MEMBERS.length, NDIAG = MEMBERS.filter(m => !m.logsOnly).length;
 // short member labels for tables and row labels: without the domain every host name shares (.example.com)
 const MSHORT = (() => {
   const hp = MEMBERS.map(m => { const i = m.label.lastIndexOf(":"); return m.gcOnly || i <= 0 ? null : [m.label.slice(0, i), m.label.slice(i)]; });
@@ -4756,9 +5626,12 @@ function tickVal(v, u, rate, s) {
   if (u === "s") return sig3(v) + " s";
   return compact(v);
 }
+// GC logs alone with the JVM uptime only: times are uptimes (3d 06:06:54), 0 being each JVM's start
+const UPTIME = !!META.uptime;
 function clock(ms, sec) { const d = new Date(ms); return pad2(d.getUTCHours()) + ":" + pad2(d.getUTCMinutes()) + (sec ? ":" + pad2(d.getUTCSeconds()) : ""); }
-function dayLabel(ms) { const d = new Date(ms); return pad2(d.getUTCDate()) + " " + MON[d.getUTCMonth()]; }
-function logTime(ms) { const d = new Date(ms); return pad2(d.getUTCDate()) + "-" + pad2(d.getUTCMonth() + 1) + "-" + d.getUTCFullYear() + " " + clock(ms, true); }
+function upTime(ms) { const d = Math.floor(ms / 86400000); return (d ? d + "d " : "") + clock(ms, true); }
+function dayLabel(ms) { if (UPTIME) return Math.floor(ms / 86400000) + "d"; const d = new Date(ms); return pad2(d.getUTCDate()) + " " + MON[d.getUTCMonth()]; }
+function logTime(ms) { if (UPTIME) return upTime(ms); const d = new Date(ms); return pad2(d.getUTCDate()) + "-" + pad2(d.getUTCMonth() + 1) + "-" + d.getUTCFullYear() + " " + clock(ms, true); }
 function dur(sec) {
   sec = Math.round(sec);
   if (sec < 60) return sec + " s";
@@ -4772,11 +5645,13 @@ function dur(sec) {
 const MULTI_DAY = Math.floor(X_MIN / 86400000) !== Math.floor(X_MAX / 86400000);
 function shortTime(ms) {
   if (ms == null) return "–";
+  if (UPTIME) return upTime(ms);
   if (!MULTI_DAY) return clock(ms, true);
   const d = new Date(ms);
   return pad2(d.getUTCDate()) + "-" + pad2(d.getUTCMonth() + 1) + " " + clock(ms, true);
 }
 function span(a, b) {
+  if (UPTIME) return upTime(a) + " → " + upTime(b);
   return Math.floor(a / 86400000) === Math.floor(b / 86400000) ? logTime(a) + " → " + clock(b, true) : logTime(a) + " → " + logTime(b);
 }
 function stepName(ms) { return ms % 3600000 === 0 ? (ms / 3600000) + " h" : ms % 60000 === 0 ? (ms / 60000) + " min" : (ms / 1000) + " s"; }
@@ -4810,7 +5685,13 @@ const HASLOGS = !!(D.logs && D.logs.info && D.logs.info.length);
 const HASDIAG = MEMBERS.some(m => !m.logsOnly);
 const GCD = D.gc || { kinds: [], causes: [], mem: [], files: [], extra: [] };
 const HASGC = GCD.files.length > 0;
+const ST = D.store || { ops: [], tot: [], dumps: [], idle: [] };
+const HASSTORE = ST.dumps.length > 0;
+const IV = D.inv || { ops: [], ser: [], tot: [], inv: [], raw: [], dumps: [], capped: false };
+const HASINV = IV.dumps.length > 0;
 if (HASGC && HASDIAG) TABS.splice(TABS.findIndex(t => t[0] === "system") + 1, 0, ["gc", "GC"]);
+if (HASSTORE) TABS.splice(TABS.findIndex(t => t[0] === "maps") + 1, 0, ["mapstore", "MapStore"]);
+if (HASINV) TABS.splice(TABS.findIndex(t => t[0] === "slowops") + 1, 0, ["invocations", "Invocations"]);
 const ALLTABS = TABS.concat(HASLOGS ? LOGTABS : []).concat(HASGC && !HASDIAG ? [["gc", "GC"]] : []);
 const DEFTAB = HASDIAG ? "overview" : HASLOGS ? "logs" : "gc";
 const groupOf = id => id === "logs" || id.indexOf("logs-") === 0 || (id === "gc" && !HASDIAG && HASLOGS) ? "logs" : id === "gc" && !HASDIAG ? "gc" : "diag";
@@ -5167,6 +6048,10 @@ function measureReadout(p, spec, orig) {
 }
 // "15:10", "15:10:30", "27-10 15:10", "27-10-2026 15:10:30" (display time), the date from ref when not given
 function parseWhen(text, ref) {
+  if (UPTIME) {                                   // "06:10", "3d 06:10:30": uptime, the day of ref when not given
+    const u = /^\s*(?:(\d+)\s*d\s*)?(\d{1,2}):(\d{2})(?::(\d{2}))?\s*$/.exec(text || "");
+    return u ? (u[1] != null ? +u[1] : Math.floor(ref / 86400000)) * 86400000 + ((+u[2] * 60 + +u[3]) * 60 + (u[4] ? +u[4] : 0)) * 1000 : null;
+  }
   const m = /^\s*(?:(\d{1,2})[-/.](\d{1,2})(?:[-/.](\d{4}))?\s+)?(\d{1,2}):(\d{2})(?::(\d{2}))?\s*$/.exec(text || "");
   if (!m) return null;
   const r = new Date(ref);
@@ -5707,7 +6592,13 @@ function prettyName(n) {
 }
 
 /* ---------- profilers: every interval in which an operation ran (end time, length, counts) */
-const PROWS = D.prof.map(r => {
+// a store method ("MapStore\u0001orders\u0001load"): its data structure as shown (a map by its name, others with
+// their kind: "queue jobs") and the method
+const storeParts = op => { const x = op.split("\u0001"); return { svc: x[0], ds: x[1] || "", meth: x[2] || "" }; };
+const storeName = (svc, ds) => svc === "MapStore" ? ds : svc.replace(/(Store|Loader|Writer)$/, "").toLowerCase() + " " + ds;
+const opLabel = op => { if (op.indexOf("\u0001") < 0) return shortOp(op); const k = storeParts(op); return storeName(k.svc, k.ds) + " · " + k.meth; };
+const opFull = op => { if (op.indexOf("\u0001") < 0) return op; const k = storeParts(op); return k.svc + " of " + storeName(k.svc, k.ds) + " · " + k.meth; };
+const ALLROWS = D.prof.map(r => {
   const n = r.e.length, E = new Float64Array(n), DU = new Float64Array(n);
   let t = PT0;
   for (let k = 0; k < n; k++) { t += r.e[k]; E[k] = t; DU[k] = r.e[k]; }
@@ -5728,15 +6619,16 @@ const PROWS = D.prof.map(r => {
     SO[j + 1] = o;
   }
   const op = OPS[r.o];
-  return { m: r.m, p: r.p, op, short: shortOp(op), E, D: DU, maxD, N, U, X, XE, SI, SB, SO, SC, GC: null, SL: null, SW: null,
+  return { m: r.m, p: r.p, op, short: opLabel(op), full: opFull(op), E, D: DU, maxD, N, U, X, XE, SI, SB, SO, SC, GC: null, SL: null, SW: null,
     key: "m:" + r.m + "|" + r.p + "|" + op, okey: "o:" + r.p + "|" + op };
 });
+const PROWS = ALLROWS.filter(r => r.p !== "S"), SROWS = ALLROWS.filter(r => r.p === "S");
 // the calls of each interval in the latency groups in use: GC[g][j] for group g >= 1 (group 0 is the rest of
 // the calls), SL[j] the calls at or above the slow threshold, SW[j] the slowest group with calls
 function regroupRows() {
   const L = latGroups();
   if (L.rows) return;
-  for (const r of PROWS) {
+  for (const r of ALLROWS) {
     const ns = r.SI.length, GC = [null];
     for (let g = 1; g < L.G; g++) GC.push(new Float32Array(ns));
     const SL = new Float32Array(ns), SW = new Int8Array(ns);
@@ -5756,15 +6648,15 @@ function regroupRows() {
   }
   L.rows = true;
 }
-const PNAME = { O: "Operations", I: "Invocation" };
-const PTAG = { O: "Op", I: "Inv" };
+const PNAME = { O: "Operations", I: "Invocation", S: "store latency" };
+const PTAG = { O: "Op", I: "Inv", S: "Store" };
 // the rows a latency block shows (its operations, the Find text, the operation picked in its list; with
 // ignoreSel, also the other rows than the one picked in its table); ignoreOp: every operation of the block
 function profRows(ignoreSel, blk, ignoreOp) {
-  const sel = selSet(), q = findQ();
-  return PROWS.filter(r => sel.has(r.m) && (state.prof === "both" || r.p === state.prof) &&
+  const sel = selSet(), q = findQ(), own = blk && blk.rows;
+  return (own || PROWS).filter(r => sel.has(r.m) && (own || state.prof === "both" || r.p === state.prof) &&
     (!blk || !blk.pred || blk.pred(r.op)) &&
-    (!q || r.op.toLowerCase().indexOf(q) >= 0 || MEMBERS[r.m].label.toLowerCase().indexOf(q) >= 0) &&
+    (!q || r.short.toLowerCase().indexOf(q) >= 0 || r.op.toLowerCase().indexOf(q) >= 0 || MEMBERS[r.m].label.toLowerCase().indexOf(q) >= 0) &&
     (ignoreOp || !blk || !blk.op || r.op === blk.op) &&
     (ignoreSel || !blk || !blk.sel || r.okey === blk.sel || r.key === blk.sel));
 }
@@ -5791,11 +6683,11 @@ function rowStats(r, x0, x1) {
   return o;
 }
 // bucket size for a chart: one profiler dump when zoomed in, coarser when the points outnumber the pixels
-function pickBucket(plotW, pxPer) {
-  const want = (state.x1 - state.x0) / Math.max(20, plotW / pxPer);
-  if (want <= PSTEP) return PSTEP;
-  for (const s of TSTEPS) if (s >= want && s % PSTEP === 0) return s;
-  return Math.ceil(want / PSTEP) * PSTEP;
+function pickBucket(plotW, pxPer, base) {
+  const step = base || PSTEP, want = (state.x1 - state.x0) / Math.max(20, plotW / pxPer);
+  if (want <= step) return step;
+  for (const s of TSTEPS) if (s >= want && s % step === 0) return s;
+  return Math.ceil(want / step) * step;
 }
 const plotWidth = p => p.width - tsMargins(p.width, false).l - 14;
 // counts per bucket: an interval that straddles two buckets is shared out by overlap; the max goes
@@ -5894,7 +6786,9 @@ const TABINFO = {
   threads: { find: "thread, member or metric", item: "By name" }, other: { find: "metric or name", item: "By name" },
   transfer: { find: "member, peer or kind" }, slowops: { find: "operation, name or member", item: "By operation" },
   logs: { find: "text, logger or member" }, "logs-health": { find: "value name" }, "logs-exceptions": { find: "exception, text or logger" },
-  "logs-cp": { find: "group, member or text" }, gc: { find: "kind, cause or member" }
+  "logs-cp": { find: "group, member or text" }, gc: { find: "kind, cause or member" },
+  mapstore: { find: "map, method or member", item: "By map" },
+  invocations: { find: "operation, name or partition", item: "By operation" }
 };
 const sections = {};
 // what a tab shows (operation, WAN publisher, CP group, kind, metric...): picked in a row of the bar that stays at the top
@@ -5952,8 +6846,10 @@ function buildTabs() {
 }
 function tabCount(id) {
   if (id === "maps") { const n = structCount(DS_KINDS, "maps"); return n ? String(n) : ""; }
-  if (id === "latency") return OPS.length ? String(OPS.length) : "";
+  if (id === "latency") { const n = new Set(PROWS.map(r => r.op)).size; return n ? String(n) : ""; }
+  if (id === "mapstore") { const n = new Set(ST_TOT.map(r => r.dsKey).concat(SROWS.map(r => r.op.split("\u0001").slice(0, 2).join("\u0001")))).size; return n ? String(n) : ""; }
   if (id === "slowops") return SO.inv.length ? String(SO.inv.length) : "";
+  if (id === "invocations") return IV.inv.length ? String(IV.inv.length) : "";
   if (id === "wan") { const n = itemCount(r => r.c === "wan", ["replication", "publisherId"]); return n ? String(n) : ""; }
   if (id === "cp") { const n = itemCount(r => r.n.indexOf("raft.group.") === 0, ["groupId"]); return n ? String(n) : ""; }
   if (id === "threads") return STUCK_TOTAL ? STUCK_TOTAL + " stuck" : "";
@@ -5991,8 +6887,13 @@ function buildToolbar() {
     const wrap = el("label", "ctl", tb);
     el("span", "ctl-label", wrap, "Member");
     const sel = el("select", null, wrap);
-    el("option", null, sel, "All " + NM + " members").value = "all";
-    MEMBERS.forEach((m, i) => { const o = el("option", null, sel, m.label); o.value = String(i); });
+    const nreal = MEMBERS.filter(m => !m.gcOnly).length;
+    el("option", null, sel, "All " + (nreal === NM ? NM + " members" : (nreal ? nreal + " member" + (nreal === 1 ? "" : "s") + " + " : "") + (NM - nreal) + " GC log" + (NM - nreal === 1 ? "" : "s"))).value = "all";
+    let grp = null;
+    MEMBERS.forEach((m, i) => {
+      if (m.gcOnly && !grp && nreal) { grp = el("optgroup", null, sel); grp.label = "GC logs not linked to a member"; }
+      const o = el("option", null, grp || sel, m.label); o.value = String(i);
+    });
     sel.addEventListener("change", () => { state.member = sel.value; update(); });
     syncers.push(() => { sel.value = state.member; });
   }
@@ -6017,7 +6918,7 @@ function buildToolbar() {
   mbar.insertBefore(document.createTextNode("→"), toIn);
   for (const [inp2, lab] of [[fromIn, "Measured span from"], [toIn, "Measured span to"]]) {
     inp2.type = "text"; inp2.setAttribute("aria-label", lab); inp2.spellcheck = false; inp2.autocomplete = "off";
-    inp2.placeholder = MULTI_DAY ? "dd-mm hh:mm:ss" : "hh:mm:ss";
+    inp2.placeholder = MULTI_DAY ? (UPTIME ? "Nd hh:mm:ss" : "dd-mm hh:mm:ss") : "hh:mm:ss";
     inp2.addEventListener("change", () => {
       const a = parseWhen(fromIn.value, state.msel ? state.msel[0] : X_MIN);
       let b = parseWhen(toIn.value, a != null ? a : (state.msel ? state.msel[1] : X_MIN));
@@ -6025,16 +6926,20 @@ function buildToolbar() {
         if (!x.value.trim() || parseWhen(x.value, X_MIN) != null) x.removeAttribute("aria-invalid"); else x.setAttribute("aria-invalid", "true");
       }
       if (a == null || b == null) return;
-      if (b <= a && !/\d+[-/.]\d+/.test(toIn.value)) b += 86400000;      // a time-only end before the start: the next day
+      if (b <= a && !/\d+[-/.]\d+|\d\s*d/.test(toIn.value)) b += 86400000;      // a time-only end before the start: the next day
       if (b > a) setMeasure(a, b);
     });
   }
   const mdur = el("span", "mdur", mbar);
   const mclear = el("button", "btn btn-s", mbar, "Clear");
   mclear.type = "button";
-  mclear.addEventListener("click", clearMeasure);
+  const clearSpan = () => {                       // the typed times too, even in the box being typed in
+    for (const x of [fromIn, toIn]) { x.value = ""; x.removeAttribute("aria-invalid"); }
+    clearMeasure();
+  };
+  mclear.addEventListener("click", clearSpan);
   const hint = el("span", "hint", tb);
-  document.addEventListener("keydown", e => { if (e.key === "Escape" && state.msel) clearMeasure(); });
+  document.addEventListener("keydown", e => { if (e.key === "Escape" && (state.msel || fromIn.value || toIn.value)) clearSpan(); });
   el("span", "spacer", tb);
   const theme = el("button", "btn", tb);
   theme.type = "button";
@@ -6046,8 +6951,8 @@ function buildToolbar() {
   });
   syncers.push(() => {
     const info = TABINFO[state.tab];
-    prof.wrap.hidden = !(state.tab === "overview" || hasLatency(state.tab)) || !PROWS.length;
-    scale.wrap.hidden = state.tab !== "gc" && (!hasLatency(state.tab) || !PROWS.length);
+    prof.wrap.hidden = !(state.tab === "overview" || hasLatency(state.tab)) || state.tab === "mapstore" || !PROWS.length;
+    scale.wrap.hidden = state.tab !== "gc" && (!hasLatency(state.tab) || !(PROWS.length || SROWS.length));
     lines.wrap.hidden = !info.item || !tabHasItems(state.tab);
     lines.btns[1][1].textContent = info.item || "By name";
     inp.placeholder = info.find;
@@ -6069,7 +6974,9 @@ function buildToolbar() {
 }
 function tabHasItems(tab) {
   if (tab === "latency") return PROWS.length > 0;
+  if (tab === "mapstore") return HASSTORE;
   if (tab === "slowops") return SO_INV.length > 0;
+  if (tab === "invocations") return HASINV;
   return D.metrics.some(r => r.c === tab && r.e && r.e.length) || hasLatency(tab);
 }
 function kpi(host, label, value, sub) {
@@ -6262,6 +7169,25 @@ function buildOverview(sec) {
         : "none reported by the detector"), "slowops", "Open the Slow operations tab");
       if (run) { k.classList.add("alert"); k.querySelector(".kpi-value").classList.add("bad"); }
     }
+    if (HASINV) {
+      const sk = ivPeak("s"), rows = ivRows(true, true), w = rows.length ? rows.reduce((a, b) => b.dur > a.dur ? b : a) : null, late = rows.filter(ivLate).length;
+      const k = linkKpi(kpi(kp, "Slow pending invocations", sk ? fmtCount(sk.v) : fmtInt(rows.length), (sk ? (sk.v > 0 ? "the most at once, " + shortTime(sk.t) + " · " + mShort(sk.m) : "at any sample") + " · " : "listed · ") +
+        (w ? "longest " + dur(w.dur / 1000) + ": " + w.short + (w.name ? " " + w.name : "") : "none listed by the sampler") +
+        (late ? " · " + fmtInt(late) + " past their call timeout" : "")), "invocations", "Open the Invocations tab");
+      if (late) { k.classList.add("alert"); k.querySelector(".kpi-value").classList.add("bad"); }
+    }
+    if (HASSTORE) {
+      // the store calls at or above the slow threshold: in the time range in view, or since the members started (one dump)
+      const L = latGroups();
+      let n = 0, slow = 0, mx = 0, w = null;
+      if (SROWS.length) {
+        for (const r of SROWS) { if (!ss.has(r.m)) continue; const o = rowStats(r, state.x0, state.x1); n += o.n; slow += o.slow; if (o.mx > mx) { mx = o.mx; w = r.short; } }
+      } else {
+        for (const r of ST_TOT) { if (!ss.has(r.m)) continue; n += r.n; slow += slowOf(Object.fromEntries(r.b), state.lat.t); if (r.mx > mx) { mx = r.mx; w = r.name + " · " + r.meth; } }
+      }
+      linkKpi(kpi(kp, (ST_ALLMAP ? "MapStore" : "Store") + " calls " + L.slowLabel, fmtInt(slow),
+        (w ? "slowest " + fmtUs(mx) + ": " + w + " · " : "") + fmtInt(n) + " calls " + (SROWS.length ? "in the time range in view" : "since the members started")), "mapstore", "Open the MapStore tab");
+    }
     if (THREADS.length) {
       const eps = stuckInView(false), n = new Set(eps.map(e => e.th.i)).size;
       const w = eps.length ? eps.reduce((a, b) => epDur(b) > epDur(a) ? b : a) : null;
@@ -6347,7 +7273,7 @@ function buildOverview(sec) {
     for (const g of groups.slice(0, 200)) {
       const tr = el("tr", null, tb);
       el("td", "num", tr, shortTime(g.t)); el("td", null, tr, g.kind); el("td", "wide", tr, g.text);
-      el("td", "wide", tr, g.seen.length === NM && NM > 1 ? "all members" : g.seen.map(m => MEMBERS[m].label).join(", "));
+      el("td", "wide", tr, g.seen.length === NDIAG && NDIAG > 1 ? "all members" : g.seen.map(m => MEMBERS[m].label).join(", "));
     }
     if (groups.length > 200) el("div", "hint", wrap, "First 200 of " + fmtInt(groups.length) + "; zoom in to see the rest.");
   };
@@ -6379,7 +7305,7 @@ function latViews(blk) {
     if (!o.n) continue;
     const k = latGroupKey(r);
     let v = by.get(k);
-    if (!v) { v = { key: k, p: r.p, op: r.op, short: r.short, m: state.group === "name" ? null : r.m, members: new Set(), n: 0, t: 0, g: new Array(G).fill(0), slow: 0, mx: 0, mxe: 0, rows: [], slowFirst: null, slowLast: null }; by.set(k, v); }
+    if (!v) { v = { key: k, p: r.p, op: r.op, short: r.short, full: r.full, m: state.group === "name" ? null : r.m, members: new Set(), n: 0, t: 0, g: new Array(G).fill(0), slow: 0, mx: 0, mxe: 0, rows: [], slowFirst: null, slowLast: null }; by.set(k, v); }
     v.members.add(r.m); v.rows.push(r);
     v.n += o.n; v.t += o.t; v.slow += o.slow;
     for (let q = 0; q < G; q++) v.g[q] += o.g[q];
@@ -6415,6 +7341,7 @@ function setLat(k, v) {
 }
 function latControls(sec, blk) {
   const ol = el("label", "ctl", ctxRow(blk.tab)), what = blk.what || "operation";
+  ol.hidden = !!blk.noOps;
   el("span", "ctl-label", ol, what.charAt(0).toUpperCase() + what.slice(1));
   const os = el("select", "opsel latop", ol);
   os.addEventListener("change", () => { blk.op = os.value || null; blk.sel = null; update(); });
@@ -6440,7 +7367,7 @@ function latControls(sec, blk) {
   let opsKey = null;
   syncers.push(() => {
     fs.value = String(state.lat.f); ss.value = String(state.lat.s); ts.value = String(state.lat.t);
-    if (state.tab !== blk.tab) return;
+    if (state.tab !== blk.tab || blk.noOps) return;
     const ops = blockOps(blk);
     if (blk.op && !ops.some(o => o[0] === blk.op)) { blk.op = null; blk.sel = null; }    // Find or the filters left it out
     const q = findQ(), key = q + "\n" + ops.map(o => o[0]).join("\n");
@@ -6465,8 +7392,9 @@ function latencyBlock(tab, sec, blk) {
   const selName = () => {
     if (!blk.sel) return null;
     const parts = blk.sel.slice(2).split("|");
-    return blk.sel[0] === "o" ? shortOp(parts.slice(1).join("|")) + " · " + PNAME[parts[0]]
-      : shortOp(parts.slice(2).join("|")) + " · " + PNAME[parts[1]] + " · " + MEMBERS[+parts[0]].label;
+    const tag = pp => blk.rows ? "" : " · " + PNAME[pp];
+    return blk.sel[0] === "o" ? opLabel(parts.slice(1).join("|")) + tag(parts[0])
+      : opLabel(parts.slice(2).join("|")) + tag(parts[1]) + " · " + MEMBERS[+parts[0]].label;
   };
   tabUpdaters.push(Object.assign(() => {
     clear(selbar);
@@ -6480,18 +7408,18 @@ function latencyBlock(tab, sec, blk) {
   }, { tab }));
   const word = blk.what || "operation";
   addPanel(tab, sec, { title: blk.pred ? "Calls per latency group, " + word + "s" : "Calls per latency group", height: 230, render: p => {
-    const B = profBuckets(profRows(false, blk), pickBucket(plotWidth(p), 2)), mask = coveredBuckets(B), L = LG;
+    const B = profBuckets(profRows(false, blk), pickBucket(plotWidth(p), 2, blk.step)), mask = coveredBuckets(B), L = LG;
     const series = [];
     for (let g = 0; g < L.G; g++) series.push(Object.assign(profSeries(B.g[g], mask, B, L.labels[g], latColor(g), "g" + g), { amount: profAmount(() => profRows(false, blk), g) }));
-    drawTS(p, { series, unit: "count", log: state.log, logMin: 1, baseStep: PSTEP, note: "calls per {step}" + (state.log ? " · log scale" : "") + " · slow (" + L.slowLabel + ") in red", fmt: fmtCount, legendAlways: true, noDirect: true, measure: "sum", ordered: true });
+    drawTS(p, { series, unit: "count", log: state.log, logMin: 1, baseStep: blk.step || PSTEP, note: "calls per {step}" + (state.log ? " · log scale" : "") + " · slow (" + L.slowLabel + ") in red", fmt: fmtCount, legendAlways: true, noDirect: true, measure: "sum", ordered: true });
   } });
   addPanel(tab, sec, { title: blk.pred ? "Average and max latency, " + word + "s" : "Average and max latency", height: 210, render: p => {
-    const B = profBuckets(profRows(false, blk), pickBucket(plotWidth(p), 2)), mask = coveredBuckets(B), n = B.nb;
+    const B = profBuckets(profRows(false, blk), pickBucket(plotWidth(p), 2, blk.step)), mask = coveredBuckets(B), n = B.nb;
     const avg = new Float64Array(n), mx = new Float64Array(n);
     for (let i = 0; i < n; i++) { avg[i] = B.n[i] > 0 ? B.u[i] / B.n[i] : NaN; mx[i] = B.mx[i] > 0 ? B.mx[i] : NaN; }
     const sa = profSeries(avg, mask, B, "average", catColor(0), "avg"), sm = profSeries(mx, mask, B, "max", catColor(1), "max");
     sm.fmt = (v, r) => (r && !B.mxe[r.i] ? "≤ " : "") + fmtUs(v);
-    drawTS(p, { series: [sm, sa], unit: "us", log: state.log, baseStep: PSTEP, note: "per {step} · a max marked ≤ is an upper bound", fmt: v => fmtUs(v), noDirect: true,
+    drawTS(p, { series: [sm, sa], unit: "us", log: state.log, baseStep: blk.step || PSTEP, note: "per {step} · a max marked ≤ is an upper bound", fmt: v => fmtUs(v), noDirect: true,
       measure: profLatency(() => profRows(false, blk)) });
   } });
   // timeline: when each operation had slow executions
@@ -6507,7 +7435,7 @@ function latencyBlock(tab, sec, blk) {
   const columns = () => {
     const L = latGroups(), cols = [
       { key: "member", label: "Member", val: v => v.m == null ? v.members.size : MEMBERS[v.m].label, fmt: v => v.m == null ? v.members.size + " member" + (v.members.size === 1 ? "" : "s") : mShort(v.m) },
-      { key: "op", label: "Operation", val: v => v.short + " " + v.p },
+      { key: "op", label: blk.opLabel || "Operation", val: v => v.short + " " + v.p },
       { key: "n", label: "Calls", num: true, val: v => v.n, fmt: v => fmtInt(v.n) },
       { key: "avg", label: "Avg", num: true, val: v => v.avg, fmt: v => fmtUs(v.avg) },
       { key: "max", label: "Max", num: true, val: v => v.mx, fmt: v => (v.mxe ? "" : "≤ ") + fmtUs(v.mx) },
@@ -6523,7 +7451,7 @@ function latencyBlock(tab, sec, blk) {
     const views = latViews(blk), COLS = columns(), both = new Set(views.map(v => v.p)).size > 1 || state.prof === "both" && new Set(PROWS.map(r => r.p)).size > 1;
     const col = COLS.find(c => c.key === blk.sort.key) || COLS.find(c => c.key === "slow");
     views.sort((a, b) => { const x = col.val(a), y = col.val(b); return (x < y ? -1 : x > y ? 1 : 0) * blk.sort.dir || b.slow - a.slow || b.n - a.n; });
-    tnote.textContent = fmtInt(views.length) + " row" + (views.length === 1 ? "" : "s") + " for the time range in view · " + (state.group === "name" ? "one row per operation" : "one row per member and operation") + " · slow: " + latGroups().slowLabel + " · click to select";
+    tnote.textContent = fmtInt(views.length) + " row" + (views.length === 1 ? "" : "s") + " for the time range in view · " + (state.group === "name" ? "one row per " + (blk.unit || "operation") : "one row per member and " + (blk.unit || "operation")) + " · slow: " + latGroups().slowLabel + " · click to select";
     const t = el("table", null, wrap), hr = el("tr", null, el("thead", null, t));
     for (const c of COLS) {
       const th = el("th", c.num ? "num" : null, hr);
@@ -6541,7 +7469,8 @@ function latencyBlock(tab, sec, blk) {
       tr.tabIndex = 0;
       for (const c of COLS) {
         const td = el("td", c.num ? "num" : c.key === "op" ? "op" : null, tr);
-        if (c.key === "op") { td.textContent = v.short; td.title = v.op + " · " + PNAME[v.p] + " profiler"; if (both) el("span", "ptag", td, PTAG[v.p]); }
+        if (c.key === "op" && v.p === "S") { const k = storeParts(v.op); td.textContent = storeName(k.svc, k.ds); el("span", "meth", td, " · " + k.meth); td.title = v.full; }
+        else if (c.key === "op") { td.textContent = v.short; td.title = v.op + " · " + PNAME[v.p] + " profiler"; if (both) el("span", "ptag", td, PTAG[v.p]); }
         else td.textContent = c.fmt ? c.fmt(v) : c.val(v);
         if (c.key === "member" && v.m != null) td.title = MEMBERS[v.m].label;
       }
@@ -6589,10 +7518,10 @@ function renderSlowTimeline(p, blk) {
   });
   rows.forEach((v, ri) => {
     const cy = M.t + ri * rowH + rowH / 2;
-    const label = PTAG[v.p] + " · " + v.short + (state.group === "name" ? "" : " · " + mShort(v.m));
+    const label = (v.p === "S" ? "" : PTAG[v.p] + " · ") + v.short + (state.group === "name" ? "" : " · " + mShort(v.m));
     const t = svgEl("text", { x: M.l - 10, y: cy + 4, class: "row-label", "text-anchor": "end" }, p.g.axes);
     t.textContent = trimText(label, Math.max(6, Math.floor((M.l - 14) / 6.4)));
-    svgEl("title", null, t).textContent = v.op + " · " + PNAME[v.p] + (v.m != null ? " · " + MEMBERS[v.m].label : "");
+    svgEl("title", null, t).textContent = (v.p === "S" ? v.full : v.op + " · " + PNAME[v.p]) + (v.m != null ? " · " + MEMBERS[v.m].label : "");
     svgEl("line", { x1: M.l, x2: W - M.r, y1: Math.round(cy) + 0.5, y2: Math.round(cy) + 0.5, class: "cover" }, p.g.events);
     for (const g of dots[ri]) {
       g.cx = p.sx(g.wt / g.n); g.cy = cy; g.r = 4 + 5 * Math.sqrt(g.n / maxN);
@@ -6600,7 +7529,7 @@ function renderSlowTimeline(p, blk) {
     }
   });
   if (!rows.length) emptyNote(p, "No execution " + L.slowLabel + " in this selection");
-  p.note.textContent = views.length > LIMIT ? "the " + LIMIT + " with the most slow executions, of " + views.length : views.length ? views.length + " operation" + (views.length === 1 ? "" : "s") : "";
+  p.note.textContent = views.length > LIMIT ? "the " + LIMIT + " with the most slow executions, of " + views.length : views.length ? views.length + " " + (blk.unit || "operation") + (views.length === 1 ? "" : "s") : "";
   clear(p.legend);
   p.legend.hidden = !rows.length;
   if (L.G - L.tg > 1) el("span", "lg-note", p.legend, "slowest call in the dot:");
@@ -6621,11 +7550,11 @@ function renderSlowTimeline(p, blk) {
     svgEl("circle", { cx: best.cx, cy: best.cy, r: best.r + 2.5, class: "dot-hot" }, p.hot);
     const v = rows[ri];
     return box => {
-      el("div", "tip-t", box, v.short + " · " + PNAME[v.p] + (v.m != null ? " · " + MEMBERS[v.m].label : ""));
+      el("div", "tip-t", box, v.short + (v.p === "S" ? "" : " · " + PNAME[v.p]) + (v.m != null ? " · " + MEMBERS[v.m].label : ""));
       el("div", "tip-sub", box, span(best.t0, best.t1));
       for (let g = L.G - 1; g >= L.tg; g--) if (best.ng[g] > 0) tipRow(box, latColor(g), fmtCount(best.ng[g]), L.labels[g], false);
       el("div", "tip-foot", box, fmtPct(100 * best.n / Math.max(1, best.calls)) + " of the " + fmtInt(best.calls) + " calls in this time were " + L.slowLabel);
-      el("div", "tip-sub", box, v.op);
+      el("div", "tip-sub", box, v.p === "S" ? v.full : v.op);
     };
   };
   finish(p);
@@ -6647,7 +7576,8 @@ function soRows(ignoreOp) {
 const soEnd = r => r.running ? "running at " + shortTime(r.last) : shortTime(r.end);
 function soLog() { return HASLOGS ? LOGS.events.filter(e => LOGCATS[e[2]][0] === "slowop" && selSet().has(e[1]) && inView(e[0])) : []; }
 // rows of bars on a time axis, one per operation (and member), the bars that overlap in sub-rows
-function renderSlowLanes(p, rows) {
+function renderSlowLanes(p, rows, o) {
+  o = o || {};
   const W = p.width, M = laneMargins(W), BAR = 6, GAP = 3, MAXSUB = 6;
   let y = M.t;
   for (const r of rows) {
@@ -6682,12 +7612,12 @@ function renderSlowLanes(p, rows) {
       if (e.running && e.end <= state.x1) svgEl("path", { d: "M" + (A + w + 1).toFixed(1) + " " + (yy - 1).toFixed(1) + "l5 " + (BAR / 2 + 1) + "l-5 " + (BAR / 2 + 1) + "z", class: "run-mark" }, p.g.marks).style.fill = memberColor(e.m);
     }
   }
-  if (!rows.length) emptyNote(p, "No slow invocation in this selection");
+  if (!rows.length) emptyNote(p, o.empty || "No slow invocation in this selection");
   clear(p.legend);
   const ms = Array.from(new Set(rows.reduce((a, r) => a.concat(r.items.map(e => e.m)), []))).sort((a, b) => a - b);
   for (const m of ms) { const it = el("span", "lg lg-static", p.legend), s = el("span", "sw", it); s.style.background = memberColor(m); el("span", null, it, MEMBERS[m].label); }
-  if (rows.some(r => r.items.some(e => e.running))) el("span", "lg-note", p.legend, "▸ still running at the member's last dump");
-  el("span", "lg-note", p.legend, "one bar per invocation, from its start to its end");
+  if (rows.some(r => r.items.some(e => e.running))) el("span", "lg-note", p.legend, o.run || "▸ still running at the member's last dump");
+  el("span", "lg-note", p.legend, o.bars || "one bar per invocation, from its start to its end");
   oomeLegend(p.legend);
   p.legend.hidden = !rows.length;
   p.tipAt = (t, py, px) => {
@@ -6702,7 +7632,7 @@ function renderSlowLanes(p, rows) {
     if (!best) return null;
     clear(p.hot);
     svgEl("rect", { x: best._x0 - 2, y: best._y0 - 3, width: best._x1 - best._x0 + 4, height: BAR + 6, rx: 3, class: "bar-hot" }, p.hot);
-    return box => soTip(box, best);
+    return box => (o.tip || soTip)(box, best);
   };
   finish(p);
 }
@@ -6859,6 +7789,356 @@ function buildSlowOps(sec) {
     el("pre", "sample wrappre", c, r.det);
     if (shown !== r.i) { shown = r.i; c.scrollIntoView({ block: "nearest" }); }
   }, { tab: "slowops" }));
+}
+
+/* ---------- Invocations: what the members were waiting on (the invocation sampler's Invocations sections) */
+const ivShort = d => { const i = d.indexOf("("); return i > 0 ? shortOp(d.slice(0, i)) + "(" + shortOp(d.slice(i + 1).replace(/\)$/, "")) + ")" : shortOp(d); };
+const IV_PER = new Map(IV.dumps.map(d => [d[0], d[5] || 60000]));
+const IV_COVER = new Map(IV.dumps.map(d => [d[0], d[6] || [[d[2], d[3]]]]));
+const IV_SER = IV.ser.map(c => {
+  const n = c.t.length, t = new Float64Array(n);
+  let x = 0;
+  for (let i = 0; i < n; i++) { x += c.t[i]; t[i] = x; }
+  const dec = list => list.map(([o, flat]) => {
+    const idx = new Int32Array(flat.length / 2), val = new Float64Array(flat.length / 2);
+    for (let j = 0; j < flat.length; j += 2) { idx[j / 2] = flat[j]; val[j / 2] = flat[j + 1]; }
+    return [o, idx, val];
+  });
+  return { m: c.m, t, p: dec(c.p), s: dec(c.s) };
+});
+const IV_INV = IV.inv.map((x, i) => ({ i, m: x[0], oi: x[1], op: IV.ops[x[1]], short: ivShort(IV.ops[x[1]]), name: x[2] || "", part: x[3], target: x[4] || "",
+  local: !!x[5], tm: x[6], start: x[7], dur: x[8], first: x[9], last: x[10], end: x[10], n: x[11], timeout: x[12], invokes: x[13], bexp: x[14], brecv: x[15],
+  resp: x[16] || "", conn: x[17] || "", hb: x[18], state: x[19], running: x[19] === 2, raw: x[20] >= 0 ? IV.raw[x[20]] : null }));
+const IV_TRUNC = IV.dumps.reduce((a, d) => a + d[4], 0);
+const ivState = { op: null, part: null, sel: null, sort: { key: "dur", dir: -1 }, osort: { key: "slow", dir: -1 }, psort: { key: "n", dir: -1 } };
+const ivTarget = e => e.local ? "this member" : e.tm >= 0 ? MEMBERS[e.tm].label : e.target || "unknown";
+const ivLate = e => e.timeout > 0 && e.dur > e.timeout;
+const ivStateText = e => e.state === 2 ? "still pending at the member's last dump" : e.state === 1 ? "gone by the next dump (answered, failed or timed out)" :
+  "not known after its last listing: the next dump listed only the first 99";
+// the partition thread that runs a partition's operations on a member: partition id modulo operation.partitionThreadCount
+function ivPartThread(part, m) {
+  if (part == null || part < 0 || m == null || m < 0) return "";
+  let n = staticValue("operation.partitionThreadCount", m);
+  if (!(n > 0)) {
+    const r = MREC.get("operation.partitionThreadCount"), s = r ? mSeries(r).find(x => x.m === m) : null;
+    if (s) for (let i = s.v.length - 1; i >= 0; i--) if (s.v[i] === s.v[i]) { n = s.v[i]; break; }
+  }
+  return n > 0 ? "partition-operation.thread-" + (part % n) : "";
+}
+// Find narrows the charts to the operations it matches (to none: it leaves them), the lists to what it matches
+function ivOpFilter() {
+  const q = findQ(), qs = q ? new Set(IV.ops.map((o, i) => o.toLowerCase().indexOf(q) >= 0 ? i : -1).filter(i => i >= 0)) : null;
+  return oi => (!ivState.op || IV.ops[oi] === ivState.op) && (!qs || !qs.size || qs.has(oi));
+}
+function ivMatch(r, q) {
+  return !q || r.op.toLowerCase().indexOf(q) >= 0 || r.name.toLowerCase().indexOf(q) >= 0 || MEMBERS[r.m].label.toLowerCase().indexOf(q) >= 0 ||
+    r.target.toLowerCase().indexOf(q) >= 0 || (r.part >= 0 && (q === String(r.part) || q === "partition " + r.part));
+}
+// the invocations listed as slow in view: pending at some time in the range, on the members picked, matching the lists and Find
+function ivRows(ignoreOp, ignorePart) {
+  const ss = selSet(), q = findQ();
+  return IV_INV.filter(r => ss.has(r.m) && r.start <= state.x1 && r.last >= state.x0 && (ignoreOp || !ivState.op || r.op === ivState.op) &&
+    (ignorePart || ivState.part == null || r.part === ivState.part) && ivMatch(r, q));
+}
+// per member and sample in view: the invocations pending (kind "p") or pending longer than the slow threshold ("s"), the operations picked
+function ivTotals(kind) {
+  const ss = selSet(), ok = ivOpFilter(), out = [];
+  for (const c of IV_SER) {
+    if (!ss.has(c.m)) continue;
+    const tot = new Float64Array(c.t.length);
+    for (const [oi, idx, val] of c[kind]) if (ok(oi)) for (let j = 0; j < idx.length; j++) tot[idx[j]] += val[j];
+    out.push({ m: c.m, t: c.t, v: tot });
+  }
+  return out;
+}
+// many points for the width: the highest of each pixel or two
+function ivThin(pts, width) {
+  if (pts.length <= 2 * width) return { pts, bw: 0 };
+  const bw = (state.x1 - state.x0) / Math.max(100, width), out = [];
+  let cur = null, key = null;
+  for (const q of pts) { const k = Math.floor(q[0] / bw); if (k !== key) { if (cur) out.push(cur); cur = q; key = k; } else if (q[1] > cur[1]) cur = q; }
+  if (cur) out.push(cur);
+  return { pts: out, bw };
+}
+// the chart lines: one per member (the operations picked, added up) or, Lines: By operation, one per operation (the members picked, added up)
+function ivSeries(kind, width) {
+  const x0 = state.x0, x1 = state.x1, pad = (x1 - x0) * 0.02 + 120000, out = [];
+  if (state.group !== "name") {
+    for (const c of ivTotals(kind)) {
+      const pts = [];
+      for (let i = 0; i < c.t.length; i++) if (c.t[i] >= x0 - pad && c.t[i] <= x1 + pad) pts.push([c.t[i], c.v[i]]);
+      const th = ivThin(pts, width), P = IV_PER.get(c.m) || 60000;
+      out.push({ key: "m:" + c.m, label: MEMBERS[c.m].label, color: memberColor(c.m), faint: c.m >= 8, pts: th.pts, join: Math.max(2.5 * P, 2.5 * th.bw) });
+    }
+    return out;
+  }
+  const ss = selSet(), ok = ivOpFilter(), sers = IV_SER.filter(c => ss.has(c.m));
+  if (!sers.length) return out;
+  const P = Math.min.apply(null, sers.map(c => IV_PER.get(c.m) || 60000)), slots = new Set(), per = new Map();
+  for (const c of sers) {
+    for (let i = 0; i < c.t.length; i++) if (c.t[i] >= x0 - pad && c.t[i] <= x1 + pad) slots.add(Math.floor(c.t[i] / P));
+    for (const [oi, idx, val] of c[kind]) {
+      if (!ok(oi)) continue;
+      const mine = new Map();                       // a member's value in each slot (the highest, should two samples share one)
+      for (let j = 0; j < idx.length; j++) {
+        const t = c.t[idx[j]];
+        if (t < x0 - pad || t > x1 + pad) continue;
+        const b = Math.floor(t / P);
+        mine.set(b, Math.max(mine.get(b) || 0, val[j]));
+      }
+      let mp = per.get(oi);
+      if (!mp) per.set(oi, mp = new Map());
+      for (const [b, v] of mine) mp.set(b, (mp.get(b) || 0) + v);
+    }
+  }
+  const sl = Array.from(slots).sort((a, b) => a - b);
+  const ops = Array.from(per.keys()).filter(oi => Array.from(per.get(oi).values()).some(v => v > 0)).sort((a, b) => a - b);
+  for (const oi of ops.slice(0, 12)) {
+    const mp = per.get(oi), th = ivThin(sl.map(b => [b * P, mp.get(b) || 0]), width);
+    out.push({ key: "o:" + IV.ops[oi], label: ivShort(IV.ops[oi]), color: oi < 8 ? catColor(oi) : null, faint: oi >= 8, pts: th.pts, join: Math.max(2.5 * P, 2.5 * th.bw) });
+  }
+  return out;
+}
+const ivCover = () => unionCover(selMembers().filter(m => IV_COVER.has(m)), m => IV_COVER.get(m));
+// the highest value at one sample in view, over the members picked: [value, member, time], and the average per member and sample
+function ivPeak(kind) {
+  let best = null, sum = 0, n = 0;
+  for (const c of ivTotals(kind)) for (let i = 0; i < c.t.length; i++) {
+    if (c.t[i] < state.x0 || c.t[i] > state.x1) continue;
+    sum += c.v[i]; n++;
+    if (!best || c.v[i] > best[0]) best = [c.v[i], c.m, c.t[i]];
+  }
+  return best ? { v: best[0], m: best[1], t: best[2], avg: sum / n } : null;
+}
+function ivTip(box, e) {
+  el("div", "tip-t", box, e.short + (e.name ? " · " + e.name : "") + " · " + MEMBERS[e.m].label);
+  el("div", "tip-sub", box, "invoked " + shortTime(e.start) + " · last listed " + shortTime(e.last));
+  tipRow(box, memberColor(e.m), "≥ " + dur(e.dur / 1000), "pending" + (ivLate(e) ? ", past its call timeout of " + dur(e.timeout / 1000) : ""), false);
+  el("div", "tip-sub", box, (e.part >= 0 ? "partition " + e.part + " · " : "") + "target: " + ivTarget(e));
+  el("div", "tip-foot", box, ivStateText(e) + " · listed in " + e.n + " dump" + (e.n === 1 ? "" : "s") + " · click the table row for its details");
+}
+function buildInvocations(sec) {
+  const per = Math.min.apply(null, IV.dumps.map(d => d[5] || 60000)), once = IV.dumps.every(d => d[1] <= 1);
+  el("p", "lead", sec, "From the Invocations sections of the invocation sampler (hazelcast.diagnostics.invocation.sample.period.seconds" +
+    (once ? "" : ", every " + stepName(per) + " here") + "): at each sample, the invocations each member was waiting on, counted by operation, and " +
+    "the ones pending for longer than the slow threshold (hazelcast.diagnostics.invocation.slow.threshold.seconds, 5 s by default), listed with " +
+    "their data structure, partition, target and how long they had been pending. An invocation is pending from the call until its response and " +
+    "backup acknowledgements arrive: a long one usually waits on a partition thread that is busy or blocked on its target (a slow MapStore, a " +
+    "lock, a long query or entry processor), or on a target that is gone. Each listed invocation is shown once, with the longest it was seen pending." +
+    (IV_TRUNC ? " " + fmtInt(IV_TRUNC) + " dump" + (IV_TRUNC === 1 ? " had" : "s had") + " more slow invocations than the sampler prints " +
+      "(hazelcast.diagnostics.invocation.slow.max.count, 100): " + (IV_TRUNC === 1 ? "its list has" : "their lists have") + " the first 99, the counts have them all." : "") +
+    (once ? " With one dump per member, the counts are the totals since the members started: the charts need two dumps or more." : ""));
+  // the operation list (top bar) and the partition picked in the Partitions table
+  const ol = el("label", "ctl", ctxRow("invocations"));
+  el("span", "ctl-label", ol, "Operation");
+  const os = el("select", "opsel ivop", ol);
+  os.addEventListener("change", () => { ivState.op = os.value || null; ivState.sel = null; update(); });
+  let opsKey = null;
+  syncers.push(() => {
+    if (state.tab !== "invocations") return;
+    const ss = selSet(), seen = new Set();
+    for (const c of IV_SER) if (ss.has(c.m)) for (const [oi] of c.p.concat(c.s)) seen.add(oi);
+    for (const r of IV_INV) if (ss.has(r.m)) seen.add(r.oi);
+    for (const x of IV.tot) if (ss.has(x[0])) seen.add(x[1]);
+    const ops = Array.from(seen).map(oi => IV.ops[oi]).sort((a, b) => ivShort(a).toLowerCase() < ivShort(b).toLowerCase() ? -1 : 1);
+    if (ivState.op && ops.indexOf(ivState.op) < 0) ivState.op = null;
+    const key = ops.join("\n");
+    if (key !== opsKey) {
+      opsKey = key;
+      clear(os);
+      el("option", null, os, ops.length === 1 ? "The only operation" : "All " + ops.length + " operations").value = "";
+      for (const op of ops) { const o = el("option", null, os, ivShort(op)); o.value = op; o.title = op; }
+    }
+    os.value = ivState.op || "";
+  });
+  const bar = el("div", "selbar", sec); bar.hidden = true;
+  tabUpdaters.push(Object.assign(() => {
+    clear(bar);
+    bar.hidden = ivState.part == null;
+    if (bar.hidden) return;
+    bar.appendChild(document.createTextNode("Showing the invocations listed for "));
+    el("b", null, bar, "partition " + ivState.part);
+    const b = el("button", "btn btn-s", bar, "Show all"); b.type = "button";
+    b.addEventListener("click", () => { ivState.part = null; ivState.sel = null; update(); });
+  }, { tab: "invocations" }));
+  const kp = el("div", "kpis", sec);
+  tabUpdaters.push(Object.assign(() => {
+    clear(kp);
+    const pk = ivPeak("p"), sk = ivPeak("s"), rows = ivRows();
+    const at = x => x.v > 0 ? "at " + shortTime(x.t) + " · " + mShort(x.m) + " · " : "";
+    if (pk) kpi(kp, "Pending at a sample", fmtCount(pk.v), at(pk) + "average " + fmtCount(pk.avg));
+    if (sk) {
+      const k = kpi(kp, "Pending longer than the slow threshold", fmtCount(sk.v), at(sk) + "average " + fmtCount(sk.avg));
+      if (sk.v > 0) k.querySelector(".kpi-value").classList.add("bad");
+    }
+    if (!pk && !sk) {
+      const tot = IV.tot.filter(x => selSet().has(x[0]) && (!ivState.op || IV.ops[x[1]] === ivState.op));
+      kpi(kp, "Pending, counted since start", fmtInt(tot.reduce((a, x) => a + x[2], 0)), fmtInt(tot.reduce((a, x) => a + x[3], 0)) + " of them slow · one dump: no change to chart");
+    }
+    if (rows.length) {
+      const w = rows.reduce((a, b) => b.dur > a.dur ? b : a);
+      const k = kpi(kp, "Longest pending", dur(w.dur / 1000), w.short + (w.name ? " · " + w.name : "") + (w.part >= 0 ? " · partition " + w.part : "") + " · " + mShort(w.m) + (w.running ? " · still pending" : ""));
+      if (ivLate(w)) k.querySelector(".kpi-value").classList.add("bad");
+      const late = rows.filter(ivLate).length;
+      const kl = kpi(kp, "Past their call timeout", fmtInt(late), late ? "pending longer than their call timeout: the target still runs or queues them" : "none of the " + fmtInt(rows.length) + " listed");
+      if (late) { kl.classList.add("alert"); kl.querySelector(".kpi-value").classList.add("bad"); }
+    }
+    kpi(kp, "Listed as slow", fmtInt(rows.length), (IV.capped ? "the longest " + fmtInt(IV.inv.length) + " kept · " : "") + "invocations in the time range in view");
+    const parts = new Map();
+    for (const r of rows) if (r.part >= 0) parts.set(r.part, (parts.get(r.part) || 0) + 1);
+    if (parts.size) {
+      const top = Array.from(parts.entries()).sort((a, b) => b[1] - a[1]).slice(0, 3);
+      kpi(kp, "Partitions", fmtInt(parts.size), "most listed: " + top.map(x => x[0] + " (" + fmtInt(x[1]) + ")").join(", "));
+    }
+  }, { tab: "invocations" }));
+  const chart = (kind, title, code, note) => {
+    const p = addPanel("invocations", sec, { title, code, height: 210, render: p => {
+      const series = ivSeries(kind, plotWidth(p));
+      drawTS(p, { series, unit: "count", fmt: fmtCount, cover: ivCover, coverLabel: "no sampler dump",
+        note: note + (state.group === "name" ? " · one line per operation" : " · one line per member") });
+    } });
+    p.fixed = true;
+    return p;
+  };
+  chart("p", "Pending invocations", "History", "at each sample");
+  chart("s", "Pending longer than the slow threshold", "SlowHistory", "at each sample, pending for 5 s or more by default");
+  const lanes = addPanel("invocations", sec, { title: "Invocations listed as slow", code: "Pending", height: 140, noTable: true, render: p => {
+    const by = new Map(), byName = state.group === "name";
+    for (const r of ivRows()) {
+      const k = r.op + "\u0001" + r.name + (byName ? "" : "\u0001" + r.m);
+      let g = by.get(k);
+      if (!g) { g = { label: r.short + (r.name ? " · " + r.name : "") + (byName ? "" : " · " + mShort(r.m)), title: r.op + (r.name ? " · " + r.name : "") + (byName ? "" : " · " + MEMBERS[r.m].label), items: [], tot: 0 }; by.set(k, g); }
+      g.items.push(r); g.tot += r.dur;
+    }
+    const all = Array.from(by.values()).sort((a, b) => b.tot - a.tot), rows = all.slice(0, 40);
+    p.note.textContent = (all.length > rows.length ? "the " + rows.length + " with the most pending time, of " + all.length : all.length + " row" + (all.length === 1 ? "" : "s")) +
+      (byName ? " · one row per operation and data structure" : " · one row per operation, data structure and member");
+    renderSlowLanes(p, rows, { tip: ivTip, run: "▸ still pending at the member's last dump", bars: "one bar per invocation, from its call to the last dump that listed it",
+      empty: "No invocation listed as slow in this selection" });
+  } });
+  lanes.fixed = true;
+  // per operation
+  const ocard = el("section", "card", sec), ocap = el("div", "cap", ocard);
+  el("h3", null, ocap, "Operations");
+  const onote = el("span", "note", ocap);
+  const owrap = el("div", "table-wrap", ocard);
+  tabUpdaters.push(Object.assign(() => {
+    clear(owrap);
+    const ss = selSet(), q = findQ(), by = new Map();
+    const get = oi => { let g = by.get(oi); if (!g) { g = { oi, op: IV.ops[oi], short: ivShort(IV.ops[oi]), pmx: 0, psum: 0, smx: 0, n: 0, mx: 0, late: 0, th: 0, ts: 0, ms: new Set() }; by.set(oi, g); } return g; };
+    let samples = 0;
+    for (const c of IV_SER) {
+      if (!ss.has(c.m)) continue;
+      const lo = lowerBound(c.t, state.x0), hi = upperBound(c.t, state.x1);
+      samples += Math.max(0, hi - lo);
+      for (const [kind, list] of [["p", c.p], ["s", c.s]]) for (const [oi, idx, val] of list) {
+        for (let j = 0; j < idx.length; j++) {
+          const i = idx[j];
+          if (i < lo || i >= hi) continue;
+          const g = get(oi);
+          g.ms.add(c.m);
+          if (kind === "p") { g.psum += val[j]; g.pmx = Math.max(g.pmx, val[j]); } else g.smx = Math.max(g.smx, val[j]);
+        }
+      }
+    }
+    for (const r of ivRows(true, true)) { const g = get(r.oi); g.ms.add(r.m); g.n++; g.mx = Math.max(g.mx, r.dur); if (ivLate(r)) g.late++; }
+    for (const x of IV.tot) if (ss.has(x[0])) { const g = get(x[1]); g.th += x[2]; g.ts += x[3]; }
+    const rows = Array.from(by.values()).filter(g => !q || g.op.toLowerCase().indexOf(q) >= 0 || g.n);
+    onote.textContent = fmtInt(rows.length) + " operation" + (rows.length === 1 ? "" : "s") + " · at a sample: on one member · click one to show only it";
+    sortableTable(owrap, [
+      { key: "op", label: "Operation", val: g => g.short, cls: "op", title: g => g.op },
+      { key: "pmx", label: "Most pending", num: true, val: g => g.pmx, fmt: g => g.pmx ? fmtCount(g.pmx) : "" },
+      { key: "avg", label: "Average pending", num: true, val: g => samples ? g.psum / samples : 0, fmt: g => samples && g.psum ? fmtCount(g.psum / samples) : "" },
+      { key: "slow", label: "Most slow", num: true, val: g => g.smx * 1e6 + g.n, fmt: g => g.smx ? fmtCount(g.smx) : "" },
+      { key: "n", label: "Listed", num: true, val: g => g.n, fmt: g => g.n ? fmtInt(g.n) + (g.late ? " (" + fmtInt(g.late) + " past timeout)" : "") : "" },
+      { key: "mx", label: "Longest", num: true, val: g => g.mx, fmt: g => g.mx ? dur(g.mx / 1000) : "" },
+      { key: "th", label: "Counted since start", num: true, val: g => g.th, fmt: g => fmtInt(g.th) + (g.ts ? " · " + fmtInt(g.ts) + " slow" : "") }
+    ], rows, ivState.osort, () => update(), g => { ivState.op = ivState.op === g.op ? null : g.op; ivState.sel = null; update(); },
+    "No invocation in this selection.", g => ivState.op === g.op);
+  }, { tab: "invocations" }));
+  // per partition
+  const pcard = el("section", "card", sec), pcap = el("div", "cap", pcard);
+  el("h3", null, pcap, "Partitions");
+  const pnote = el("span", "note", pcap);
+  const pwrap = el("div", "table-wrap", pcard);
+  tabUpdaters.push(Object.assign(() => {
+    clear(pwrap);
+    const by = new Map();
+    for (const r of ivRows(false, true)) {
+      let g = by.get(r.part);
+      if (!g) { g = { part: r.part, n: 0, mx: 0, late: 0, ops: new Set(), names: new Set(), tg: new Map(), ms: new Set() }; by.set(r.part, g); }
+      g.n++; g.mx = Math.max(g.mx, r.dur); if (ivLate(r)) g.late++;
+      g.ops.add(r.short); if (r.name) g.names.add(r.name); g.ms.add(r.m);
+      const tk = r.local ? r.m : r.tm >= 0 ? r.tm : r.target;
+      const c = g.tg.get(tk) || { n: 0, local: 0 };
+      c.n++; if (r.local) c.local++;
+      g.tg.set(tk, c);
+    }
+    const rows = Array.from(by.values());
+    for (const g of rows) {
+      const tg = Array.from(g.tg.entries()).sort((a, b) => b[1].n - a[1].n);
+      g.target = tg.map(x => (typeof x[0] === "number" ? mShort(x[0]) : x[0]) + (x[1].local === x[1].n ? " (local calls)" : "")).join(", ");
+      g.thread = typeof tg[0][0] === "number" ? ivPartThread(g.part, tg[0][0]) : "";
+    }
+    const anyThread = rows.some(g => g.thread);
+    pnote.textContent = fmtInt(rows.length) + " partition" + (rows.length === 1 ? "" : "s") + " with invocations listed as slow · click one to show only its invocations";
+    sortableTable(pwrap, [
+      { key: "part", label: "Partition", num: true, val: g => g.part, fmt: g => g.part >= 0 ? String(g.part) : "none (generic)" },
+      { key: "n", label: "Listed", num: true, val: g => g.n, fmt: g => fmtInt(g.n) + (g.late ? " (" + fmtInt(g.late) + " past timeout)" : "") },
+      { key: "mx", label: "Longest", num: true, val: g => g.mx, fmt: g => dur(g.mx / 1000) },
+      { key: "ops", label: "Operations", val: g => Array.from(g.ops).join(", "), cls: "wrapcell" },
+      { key: "names", label: "Data structures", val: g => Array.from(g.names).join(", "), cls: "wrapcell" },
+      { key: "tg", label: "Target", val: g => g.target, cls: "wrapcell" },
+      anyThread ? { key: "th", label: "Partition thread", val: g => g.thread } : null
+    ].filter(Boolean), rows, ivState.psort, () => update(), g => { ivState.part = ivState.part === g.part ? null : g.part; ivState.sel = null; update(); },
+    "No invocation listed as slow in this selection.", g => ivState.part === g.part);
+  }, { tab: "invocations" }));
+  // every invocation listed
+  const card = el("section", "card", sec), cap = el("div", "cap", card);
+  el("h3", null, cap, "Listed invocations");
+  const tnote = el("span", "note", cap);
+  const wrap = el("div", "table-wrap", card);
+  const detail = el("div", null, sec);
+  let shown = null;
+  tabUpdaters.push(Object.assign(() => {
+    clear(wrap); clear(detail);
+    const rows = ivRows();
+    tnote.textContent = fmtInt(rows.length) + " invocation" + (rows.length === 1 ? "" : "s") + " · ▸ still pending at the member's last dump · click one for its details";
+    sortableTable(wrap, [
+      { key: "m", label: "Member", val: r => MEMBERS[r.m].label, fmt: r => mShort(r.m), title: r => MEMBERS[r.m].label },
+      { key: "op", label: "Operation", val: r => r.short, cls: "op", title: r => r.op },
+      { key: "name", label: "Name", val: r => r.name },
+      { key: "part", label: "Partition", num: true, val: r => r.part, fmt: r => r.part >= 0 ? String(r.part) : "" },
+      { key: "tg", label: "Target", val: r => ivTarget(r), fmt: r => r.local ? "this member" : r.tm >= 0 ? mShort(r.tm) : r.target, title: r => ivTarget(r) },
+      { key: "start", label: "Invoked", num: true, val: r => r.start, fmt: r => shortTime(r.start) },
+      { key: "last", label: "Last listed", num: true, val: r => r.last, fmt: r => shortTime(r.last) + (r.running ? " ▸" : "") },
+      { key: "dur", label: "Pending for", num: true, val: r => r.dur, fmt: r => "≥ " + dur(r.dur / 1000) },
+      { key: "to", label: "Call timeout", num: true, val: r => r.timeout || 0, fmt: r => r.timeout > 0 ? dur(r.timeout / 1000) + (ivLate(r) ? " · past" : "") : "" },
+      { key: "n", label: "Dumps", num: true, val: r => r.n }
+    ], rows, ivState.sort, () => update(), r => { ivState.sel = ivState.sel === r.i ? null : r.i; update(); }, "No invocation listed as slow in this selection.", r => ivState.sel === r.i, 1000);
+    const r = ivState.sel != null ? IV_INV[ivState.sel] : null;
+    if (!r || rows.indexOf(r) < 0) { shown = null; return; }
+    const c = el("section", "card", detail), cc = el("div", "cap", c);
+    el("h3", null, cc, r.short + (r.name ? " · " + r.name : "") + " · " + MEMBERS[r.m].label);
+    el("span", "note", cc, shortTime(r.start) + " → " + shortTime(r.last) + " · ≥ " + dur(r.dur / 1000));
+    el("p", "lead", c, "Invoked at " + shortTime(r.start) + " and listed in " + fmtInt(r.n) + " dump" + (r.n === 1 ? "" : "s") + ", the last at " + shortTime(r.last) +
+      ", when it had been pending for " + dur(r.dur / 1000) + ": " + ivStateText(r) + "." + (ivLate(r) ? " That is past its call timeout (" + dur(r.timeout / 1000) +
+      "): the target kept answering the invocation's heartbeats, so the operation was still queued or running there." : ""));
+    const dl = el("dl", "kv", c);
+    const kv = (k, v) => { if (v === "" || v == null) return; el("dt", null, dl, k); el("dd", null, dl, v); };
+    kv("Operation", r.op);
+    kv("Data structure", r.name);
+    kv("Partition", r.part >= 0 ? String(r.part) + (ivPartThread(r.part, r.local ? r.m : r.tm) ? " · " + ivPartThread(r.part, r.local ? r.m : r.tm) + " on the target" : "") : "none: a generic operation");
+    kv("Target", ivTarget(r) + (r.local ? " (" + MEMBERS[r.m].label + ")" : ""));
+    kv("Call timeout", r.timeout > 0 ? dur(r.timeout / 1000) : "");
+    kv("Invoked", r.invokes != null ? r.invokes + " time" + (r.invokes === 1 ? "" : "s") + (r.invokes > 1 ? " (retried)" : "") : "");
+    kv("Response", r.resp === "VOID" ? "none yet" : r.resp ? "received (" + r.resp + "): waiting for backup acknowledgements" : "");
+    kv("Backup acks", r.bexp != null && r.bexp >= 0 ? fmtInt(r.brecv || 0) + " of " + fmtInt(r.bexp) : "");
+    kv("Last heartbeat", r.hb != null ? (r.hb < 60000 ? fmtMs(r.hb) : dur(r.hb / 1000)) + " before the last listing" : "none yet");
+    kv("Connection", r.conn === "null" ? "none: the target is this member" : r.conn);
+    if (r.raw) { el("div", "ctl-label", c, "As listed the last time"); el("pre", "sample wrappre", c, r.raw); }
+    if (shown !== r.i) { shown = r.i; c.scrollIntoView({ block: "nearest" }); }
+  }, { tab: "invocations" }));
 }
 
 /* ---------- Data structures (maps, queues, topics...) and CP objects: one kind at a time, the way the Maps tab was */
@@ -7121,8 +8401,171 @@ function structView(tab, sec, kinds, cat, o) {
 }
 function buildMaps(sec) {
   const v = structView("maps", sec, DS_KINDS, "maps");
+  if (HASSTORE) {                       // how long the maps' MapStore calls took: the next tab
+    const b = el("button", "btn btn-s", ctxRow("maps"), "MapStore latency →"); b.type = "button";
+    b.title = "How long the maps' MapStore and MapLoader calls took";
+    b.addEventListener("click", () => setTab("mapstore"));
+  }
   if (!v) el("p", "lead", sec, "No data structure metrics in these files" + (D.flat.some(f => f.c === "maps") || D.static.some(f => f.c === "maps") ? " that changed." : "."));
   unchangedSection("maps", sec);
+}
+
+/* ---------- MapStore: how long the maps' MapStore / MapLoader methods took (MapStoreLatency sections; the queue,
+   ringbuffer and JCache stores the same way when the diagnostics have them) */
+const SSTEP = META.sstep || 60000;
+const ST_TOT = ST.tot.map(x => {
+  const op = ST.ops[x[1]], k = storeParts(op);
+  return { m: x[0], op, svc: k.svc, meth: k.meth, dsKey: k.svc + "\u0001" + k.ds, name: storeName(k.svc, k.ds), n: x[2], t: x[3], mx: x[4], b: x[5] };
+});
+const ST_ALLMAP = ST_TOT.every(r => r.svc === "MapStore") && SROWS.every(r => r.op.indexOf("MapStore\u0001") === 0);
+const stState = { ds: "", meth: "", sort: { key: "t", dir: -1 } };
+const storeOk = op => { const k = storeParts(op); return (!stState.ds || stState.ds === k.svc + "\u0001" + k.ds) && (!stState.meth || stState.meth === k.meth); };
+const fmtLongUs = us => us >= 6e7 ? dur(us / 1e6) : fmtUs(us);
+// calls at or above 2^t us: the buckets whose exponent is above t (bucket e holds 2^(e-1) .. 2^e - 1 us)
+const slowOf = (b, t) => { let s = 0; for (const e in b) if (+e > t) s += b[e]; return s; };
+const bucketLabel = e => e <= 1 ? "0–1 µs" : fmtUs(Math.pow(2, e - 1)) + "–" + fmtUs(Math.pow(2, e));
+// the totals since the members started, for the members, Find and lists in use: by member or by name
+function storeTotRows() {
+  const ss = selSet(), q = findQ(), by = new Map(), byName = state.group === "name";
+  for (const r of ST_TOT) {
+    if (!ss.has(r.m) || !storeOk(r.op)) continue;
+    if (q && r.name.toLowerCase().indexOf(q) < 0 && r.meth.toLowerCase().indexOf(q) < 0 && MEMBERS[r.m].label.toLowerCase().indexOf(q) < 0) continue;
+    const key = byName ? r.op : r.m + "|" + r.op;
+    let v = by.get(key);
+    if (!v) { v = { key, op: r.op, name: r.name, meth: r.meth, dsKey: r.dsKey, m: byName ? null : r.m, ms: new Set(), n: 0, t: 0, mx: 0, b: {} }; by.set(key, v); }
+    v.ms.add(r.m); v.n += r.n; v.t += r.t; v.mx = Math.max(v.mx, r.mx);
+    for (const [e, c] of r.b) v.b[e] = (v.b[e] || 0) + c;
+  }
+  return Array.from(by.values());
+}
+// calls by duration: one bar per latency bucket, its height on a log scale, in the colour of its latency group
+function histCell(td, b, eMax) {
+  const L = latGroups(), W = 4, G = 1, H = 16;
+  const svg = svgEl("svg", { width: eMax * (W + G), height: H + 4, class: "hist", role: "img" }, td);
+  let mx = 0;
+  for (const e in b) mx = Math.max(mx, b[e]);
+  const lines = [];
+  for (const e of [11, 21]) if (e <= eMax) svgEl("rect", { x: (e - 1) * (W + G) - 1, y: H + 1, width: 1, height: 3, class: "hist-tick" }, svg);
+  for (let e = 1; e <= eMax; e++) {
+    const c = b[e] || 0;
+    if (!c) continue;
+    const h = Math.max(2, H * Math.log10(c + 1) / Math.log10(mx + 1));
+    svgEl("rect", { x: (e - 1) * (W + G), y: (H - h).toFixed(1), width: W, height: h.toFixed(1), rx: 1, fill: latColor(L.gof[Math.min(63, e)]) }, svg);
+    lines.push(bucketLabel(e) + ": " + fmtInt(c));
+  }
+  svg.setAttribute("aria-label", "Calls by duration");
+  svgEl("title", null, svg).textContent = "Calls by duration (bar height on a log scale; ticks at 1 ms and 1 s)\n" + lines.join("\n");
+}
+function buildMapStore(sec) {
+  const what = ST_ALLMAP ? "MapStore" : "store";
+  const idle = ST.idle.map(x => storeName(x[0], x[1]));
+  const once = ST.dumps.every(d => d[1] <= 1);
+  el("p", "lead", sec, "From the " + (ST_ALLMAP ? "MapStoreLatency" : "store latency") + " sections (hazelcast.diagnostics.storeLatency.period.seconds" +
+    (once ? "" : ", every " + stepName(SSTEP) + " here") + "): how long each map's MapStore and MapLoader methods took, timed around your implementation, so mostly the database. load and loadAll " +
+    "(a get or getAll that misses) and, with write-through, store and delete run inside the operation, on its partition thread: a slow database there " +
+    "holds up every other operation of that partition. loadAllKeys and loadAll during the initial load, and the batches of write-behind " +
+    "(storeAll, deleteAll), run in the background: when they are slow, the entries waiting to be written (Dirty entries, on the Data structures tab) grow." + (idle.length ? " " + fmtInt(idle.length) + " map" + (idle.length === 1 ? " has a store that was" : "s have a store that was") +
+    " never called: " + idle.slice(0, 12).join(", ") + (idle.length > 12 ? ", …" : "") + "." : ""));
+  // the lists: a map (or other data structure) and a method
+  const row = ctxRow("mapstore");
+  const ml = el("label", "ctl", row);
+  el("span", "ctl-label", ml, ST_ALLMAP ? "Map" : "Data structure");
+  const msel = el("select", "opsel stmap", ml);
+  const tl = el("label", "ctl", row);
+  el("span", "ctl-label", tl, "Method");
+  const tsel = el("select", "stmeth", tl);
+  const names = new Map();
+  for (const r of ST_TOT) names.set(r.dsKey, r.name);
+  for (const r of SROWS) { const k = storeParts(r.op); names.set(k.svc + "\u0001" + k.ds, storeName(k.svc, k.ds)); }
+  const dsList = Array.from(names.entries()).sort((a, b) => a[1].toLowerCase() < b[1].toLowerCase() ? -1 : 1);
+  el("option", null, msel, "All " + fmtInt(dsList.length) + " " + (ST_ALLMAP ? "maps" : "data structures")).value = "";
+  for (const [k, n] of dsList) { const o = el("option", null, msel, n); o.value = k; }
+  msel.addEventListener("change", () => { stState.ds = msel.value; stState.meth = ""; update(); });
+  tsel.addEventListener("change", () => { stState.meth = tsel.value; update(); });
+  let methFor = null;
+  syncers.push(() => {
+    msel.value = stState.ds;
+    if (methFor !== stState.ds) {
+      methFor = stState.ds;
+      const ms = new Set();
+      for (const r of ST_TOT) if (!stState.ds || r.dsKey === stState.ds) ms.add(r.meth);
+      for (const r of SROWS) { const k = storeParts(r.op); if (!stState.ds || k.svc + "\u0001" + k.ds === stState.ds) ms.add(k.meth); }
+      clear(tsel);
+      el("option", null, tsel, "All methods").value = "";
+      for (const m of Array.from(ms).sort()) { const o = el("option", null, tsel, m); o.value = m; }
+    }
+    tsel.value = stState.meth;
+  });
+  const bar = el("div", "selbar", sec); bar.hidden = true;
+  tabUpdaters.push(Object.assign(() => {
+    clear(bar);
+    bar.hidden = !stState.ds && !stState.meth;
+    if (bar.hidden) return;
+    bar.appendChild(document.createTextNode("Showing "));
+    el("b", null, bar, (stState.ds ? names.get(stState.ds) : "every " + (ST_ALLMAP ? "map" : "data structure")) + (stState.meth ? " · " + stState.meth : ""));
+    const b = el("button", "btn btn-s", bar, "Show all"); b.type = "button";
+    b.addEventListener("click", () => { stState.ds = ""; stState.meth = ""; update(); });
+  }, { tab: "mapstore" }));
+  const blk = { rows: SROWS, pred: storeOk, step: SSTEP, title: "In the time range in view", what: what + " call", unit: "method",
+    opLabel: ST_ALLMAP ? "Map · method" : "Data structure · method", noOps: true };
+  const kp = el("div", "kpis", sec);
+  tabUpdaters.push(Object.assign(() => {
+    clear(kp);
+    const L = latGroups();
+    let n = 0, t = 0, slow = 0, mx = 0, w = null, since = "";
+    if (SROWS.length) {
+      for (const r of profRows(true, blk)) {
+        const o = rowStats(r, state.x0, state.x1);
+        n += o.n; t += o.t; slow += o.slow;
+        if (o.mx > mx) { mx = o.mx; w = r.short + " · " + mShort(r.m); }
+      }
+      since = "in the time range in view";
+    } else {
+      for (const v of storeTotRows()) { n += v.n; t += v.t; slow += slowOf(v.b, state.lat.t); if (v.mx > mx) { mx = v.mx; w = v.name + " · " + v.meth + (v.m != null ? " · " + mShort(v.m) : ""); } }
+      since = "since the members started";
+    }
+    kpi(kp, (ST_ALLMAP ? "MapStore" : "Store") + " calls", fmtInt(n), since);
+    kpi(kp, "Time in these calls", fmtLongUs(t), n ? "average " + fmtUs(t / n) : "");
+    if (w) kpi(kp, "Slowest call", fmtUs(mx), w);
+    const k = kpi(kp, "Calls " + L.slowLabel, fmtInt(slow), n ? fmtPct(100 * slow / n) + " of the calls · slow threshold set with the latency groups" : "");
+    if (slow) k.querySelector(".kpi-value").classList.add("bad");
+    const nds = new Set(ST_TOT.map(r => r.dsKey)).size;
+    kpi(kp, ST_ALLMAP ? "Maps with a store" : "Data structures with a store", fmtInt(nds + idle.length), idle.length ? fmtInt(idle.length) + " never called" : "every one called");
+  }, { tab: "mapstore" }));
+  if (SROWS.length) latencyBlock("mapstore", sec, blk);
+  else el("p", "lead", sec, "One dump per member here: no change over time to show, so the table below has the totals since each member started. A longer " +
+    "capture (more than one period of the store latency plugin) also gives the charts: calls per latency group, average and max, and when the " + what + " calls were slow.");
+  // totals since the members started (the counters of each lifetime's last dump, and what was counted before a reset)
+  const card = el("section", "card", sec), cap = el("div", "cap", card);
+  el("h3", null, cap, "Since the members started");
+  const note = el("span", "note", cap);
+  const wrap = el("div", "table-wrap tall", card);
+  tabUpdaters.push(Object.assign(() => {
+    clear(wrap);
+    const L = latGroups(), rows = storeTotRows(), byName = state.group === "name";
+    const all = rows.reduce((a, v) => a + v.t, 0);
+    let eMax = 12;
+    for (const v of rows) for (const e in v.b) if (+e > eMax) eMax = +e;
+    note.textContent = fmtInt(rows.length) + " row" + (rows.length === 1 ? "" : "s") + (byName ? " · one per " + (ST_ALLMAP ? "map" : "data structure") + " and method" : " · one per member, " +
+      (ST_ALLMAP ? "map" : "data structure") + " and method") + " · as the members counted them, whatever the time range in view · click one to chart only it";
+    const cols = [
+      { key: "name", label: blk.opLabel, val: v => v.name.toLowerCase() + " " + v.meth, cls: "op", cellFn: v => td => { td.textContent = v.name; el("span", "meth", td, " · " + v.meth); td.title = opFull(v.op); } }];
+    if (byName) cols.push({ key: "ms", label: "Members", num: true, val: v => v.ms.size });
+    else cols.push({ key: "m", label: "Member", val: v => MEMBERS[v.m].label, fmt: v => mShort(v.m), title: v => MEMBERS[v.m].label });
+    cols.push(
+      { key: "n", label: "Calls", num: true, val: v => v.n, fmt: v => fmtInt(v.n) },
+      { key: "t", label: "Total time", num: true, val: v => v.t, fmt: v => fmtLongUs(v.t), cellFn: v => td => { if (all > 0) el("span", "share", td, fmtPct(100 * v.t / all)); } },
+      { key: "avg", label: "Avg", num: true, val: v => v.t / v.n, fmt: v => fmtUs(v.t / v.n) },
+      { key: "mx", label: "Max", num: true, val: v => v.mx, fmt: v => fmtUs(v.mx) },
+      { key: "slow", label: L.slowLabel, num: true, val: v => slowOf(v.b, state.lat.t), fmt: v => { const s = slowOf(v.b, state.lat.t); return s ? fmtInt(s) : ""; } },
+      { key: "pct", label: "Slow %", num: true, val: v => slowOf(v.b, state.lat.t) / v.n, fmt: v => { const s = slowOf(v.b, state.lat.t); return s ? fmtPct(100 * s / v.n) : ""; } },
+      { key: "hist", label: "Calls by duration", val: v => v.mx, fmt: () => "", cellFn: v => td => histCell(td, v.b, eMax) });
+    sortableTable(wrap, cols, rows, stState.sort, () => update(), v => {
+      const same = stState.ds === v.dsKey && stState.meth === v.meth;
+      stState.ds = same ? "" : v.dsKey; stState.meth = same ? "" : v.meth;
+      update();
+    }, "No " + what + " call in this selection.", v => stState.ds === v.dsKey && stState.meth === v.meth, 1000);
+  }, { tab: "mapstore" }));
 }
 
 /* ---------- Cluster */
@@ -9061,17 +10504,30 @@ function renderGcPauses(p) {
   };
   finish(p);
 }
+// GC logs whose lines have the JVM uptime only: placed in time with the JVM start of their member, else not
+const GC_UNPLACED = GCD.files.reduce((a, f) => a + (f[12] || 0), 0);
+const GC_UPFILES = GCD.files.filter(f => /JVM start/.test(f[11] || "")).length;
+const GC_UPTIME_HOW = "A GC log with the JVM uptime only on its lines (the default of -Xlog) is placed in time with its member's JVM start: the dump time " +
+  "minus runtime.uptime in the diagnostics, checked against the GC counts (gc.minorCount).";
 function buildGc(sec) {
   if (!GCEV.length) {
-    el("p", "lead", sec, "GC log files were found (listed below), but no GC pause in them" + (META.window ? " between --from and --to." : ": " +
-      "they need a date-time on each line (JDK 9+: -Xlog:gc*:file=gc.log:time,uptime; JDK 8: -XX:+PrintGCDetails -XX:+PrintGCDateStamps)."));
+    el("p", "lead", sec, "GC log files were found (listed below), but no GC pause in them" + (META.window ? " between --from and --to." : GC_UNPLACED ?
+      " could be placed in time: their lines have the JVM uptime only, and " + (NDIAG ? "they match none of their member's lifetimes in the diagnostics. " :
+        "there are no diagnostics to place them with. ") + GC_UPTIME_HOW + " With -Xlog:gc*:file=gc.log:time,uptime each line has the date and time." :
+      ": they need a date-time on each line (JDK 9+: -Xlog:gc*:file=gc.log:time,uptime; JDK 8: -XX:+PrintGCDetails -XX:+PrintGCDateStamps)."));
     gcFilesCard(sec);
     return;
   }
   const coll = Array.from(new Set(GCD.files.map(f => f[6]).filter(x => x)));
-  el("p", "lead", sec, "From the GC logs found with the diagnostics and member logs (" + (coll.length ? coll.join(", ") : "collector not in the log") +
-    "): every stop-the-world pause, its kind and cause, the heap before and after it. A GC log goes with the member whose files are in the nearest " +
-    "folder (then the JVM start time, then a host or port in its name); the GC log files table says which.");
+  if (UPTIME) el("p", "lead", sec, "From the GC logs (" + (coll.length ? coll.join(", ") : "collector not in the log") + "): every stop-the-world pause, " +
+    "its kind and cause, the heap before and after it. Their lines have the JVM uptime only and no diagnostics came with them, so the time axis is " +
+    "the JVM uptime (0 is the JVM start, 3d 06:00 is 3 days and 6 hours later) and each JVM has a line of its own: a log's rotated files go " +
+    "together when each starts where the one before ended (GC ids go on), and a file that starts from 0 again is another JVM.");
+  else el("p", "lead", sec, "From the GC logs found with the diagnostics and member logs (" + (coll.length ? coll.join(", ") : "collector not in the log") +
+    "): every stop-the-world pause, its kind and cause, the heap before and after it. A GC log goes with the member whose files are in the same " +
+    "folder, else whose host name is in its file or folder names, else whose files are in the nearest folder (then the JVM start time); the GC log files table says which." +
+    (GC_UPFILES ? " " + GC_UPTIME_HOW : "") + (GC_UNPLACED ? " " + fmtInt(GC_UNPLACED) + " pause" + (GC_UNPLACED === 1 ? "" : "s") +
+      " with the JVM uptime only could not be placed in time: see the GC log files table." : ""));
   // the pauses to show: a category, a cause or a kind
   const lab = el("label", "ctl", ctxRow("gc"));
   el("span", "ctl-label", lab, "Pauses");
@@ -9115,7 +10571,9 @@ function buildGc(sec) {
     let cov = 0;
     for (const m of selMembers()) for (const c of GC_COVER[m] || []) cov += Math.max(0, Math.min(c[1], state.x1) - Math.max(c[0], state.x0));
     const tot = rows.reduce((a, e) => a + e.p, 0), mins = (state.x1 - state.x0) / 60000;
-    kpi(kp, gcState.sel ? "Pauses picked" : "GC pauses", fmtInt(rows.length), (mins > 0 ? sig3(rows.length / mins / Math.max(1, ms.size)) + " per minute per member · " : "") + fmtInt(ms.size) + " member" + (ms.size === 1 ? "" : "s"));
+    const who = Array.from(ms).every(m => MEMBERS[m].gcOnly) ? (UPTIME ? "JVM" : "GC log") : "member";
+    kpi(kp, gcState.sel ? "Pauses picked" : "GC pauses", fmtInt(rows.length), (mins > 0 ? sig3(rows.length / mins / Math.max(1, ms.size)) + " per minute per " + who + " · " : "") +
+      fmtInt(ms.size) + " " + who + (ms.size === 1 ? "" : "s"));
     kpi(kp, "Time in these pauses", fmtMs(tot), cov > 0 ? fmtPct(100 * tot / cov) + " of the time, stop-the-world" : "");
     if (rows.length) {
       const w = rows.reduce((a, e) => e.p > a.p ? e : a);
@@ -9312,9 +10770,11 @@ function gcFilesCard(sec) {
   const render = () => {
     clear(wrap);
     sortableTable(wrap, [
-      { key: "m", label: "Member", val: f => MEMBERS[f[0]].label, fmt: f => mShort(f[0]), title: f => MEMBERS[f[0]].label, cls: "wrapcell" },
+      { key: "m", label: "Member", val: f => f[0] < 0 ? "" : MEMBERS[f[0]].label, fmt: f => f[0] < 0 ? "–" : mShort(f[0]),
+        title: f => f[0] < 0 ? "" : MEMBERS[f[0]].label, cls: "wrapcell" },
       { key: "f", label: "File", val: f => f[1], cls: "wrapcell" },
-      { key: "how", label: "Matched by", val: f => f[2] },
+      MEMBERS.some(m => !m.gcOnly) ? { key: "how", label: "Matched by", val: f => f[2] } : null,
+      { key: "src", label: "Times from", val: f => f[11] || "", cls: "wrapcell" },
       { key: "col", label: "Collector", val: f => f[6] || "" },
       { key: "reg", label: "Region size", num: true, val: f => f[7] || 0, fmt: f => f[7] ? fmtBytes(f[7] * MB) : "" },
       { key: "a", label: "First pause", num: true, val: f => f[3] || 0, fmt: f => f[3] ? shortTime(f[3]) : "" },
@@ -9322,15 +10782,21 @@ function gcFilesCard(sec) {
       { key: "n", label: "Pauses", num: true, val: f => f[5], fmt: f => fmtInt(f[5]) },
       { key: "j", label: "JVM runs", num: true, val: f => f[9] || 0 },
       { key: "s", label: "Size", num: true, val: f => f[10] || 0, fmt: f => f[10] ? fmtBytes(f[10]) : "" }
-    ], GCD.files, st, render, null, "No GC log file.");
+    ].filter(Boolean), GCD.files, st, render, null, "No GC log file.");
   };
   render();
 }
 
 /* ---------- header */
 function buildHeader() {
-  const multi = NM > 1;
-  $("title").textContent = multi ? "Hazelcast cluster: " + NM + " members" : "Hazelcast member " + MEMBERS[0].label;
+  // GC logs linked to no member have a lane of their own, but they are not members
+  const real = MEMBERS.filter(m => !m.gcOnly), ngc = NM - real.length;
+  $("title").textContent = real.length > 1 ? "Hazelcast cluster: " + real.length + " members" : real.length ? "Hazelcast member " + real[0].label
+    : ngc > 1 ? "Hazelcast GC logs: " + ngc : "Hazelcast " + MEMBERS[0].label;
+  if (ngc && real.length) {
+    const t = el("span", "title-note", $("title"), " + " + ngc + " GC log" + (ngc === 1 ? "" : "s") + " not linked to a member");
+    t.title = "GC logs whose folder, name and JVM start time match none of the members: each has a line of its own on the GC tab (Members and files lists them)";
+  }
   const sub = $("subtitle"), add = t => el("span", null, sub, t);
   add(span(X_MIN, X_MAX) + " (" + dur((X_MAX - X_MIN) / 1000) + ")");
   add(META.timeNote);
@@ -9355,6 +10821,8 @@ function buildHeader() {
       m.lifetimes.length + " lifetime" + (m.lifetimes.length === 1 ? "" : "s") + (m.dirs.length ? " · " + m.dirs.join(", ") : "") +
       (m.cover.length ? " · " + span(m.cover[0][0], m.cover[m.cover.length - 1][1]) : "") + (logs ? " · " + logs : "") + (gcl ? " · " + gcl : "")));
   });
+  const lost = GCD.files.filter(f => f[0] < 0);
+  if (lost.length) el("li", null, ul, "GC log" + (lost.length === 1 ? "" : "s") + " not linked to a member, with no pause to chart: " + lost.map(f => f[1]).join(", ") + " (GC tab)");
   if (META.skipped && META.skipped.length) el("li", null, ul, "Neither diagnostics, member logs nor GC logs, skipped: " + META.skipped.join(", "));
   $("tz-note").textContent = "are " + META.timeNote;
   const lim = [];
@@ -9383,6 +10851,7 @@ buildToolbar();
 buildOverview(sections.overview);
 buildLatency(sections.latency);
 buildSlowOps(sections.slowops);
+if (HASINV) buildInvocations(sections.invocations);
 el("p", "lead", sections.operations, "Operation and response queues, invocations and executors (the partition and generic operation threads are on the Threads tab). Per-executor metrics show the sum over all of them by member; Lines: By name splits them.");
 buildSaturation(sections.operations);
 buildGeneric("operations", sections.operations, [["operation.queueSize"], ["operation.priorityQueueSize"], ["operation.genericQueueSize"],
@@ -9396,6 +10865,7 @@ buildGeneric("network", sections.network, [["tcp.bytesReceived"], ["tcp.bytesSen
 buildTransfer(sections.transfer);
 buildWan(sections.wan);
 buildMaps(sections.maps);
+if (HASSTORE) buildMapStore(sections.mapstore);
 buildSystem(sections.system);
 if (HASGC) buildGc(sections.gc);
 buildCluster(sections.cluster);
