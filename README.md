@@ -11,7 +11,7 @@ any current browser and can be attached to a ticket or sent by mail.
 - Charts you can zoom, filter by member and search. Measure mode gives the amount that went through any time span.
 - Light and dark themes. Works on a phone.
 
-See [`examples/sample-report.html`](examples/hz_diag_report_sample.html) for a report on a synthetic three-member cluster.
+See [`examples/sample-report.html`](examples/sample-report.html) for a report on a synthetic three-member cluster.
 
 ## Quick start
 
@@ -73,9 +73,24 @@ doesn't mix them. The same file found twice is read once.
 
 ### Member logs (optional)
 
-Add the members' own logs: `hazelcast.log`, console output, rotated or `.gz`. The usual layouts are recognised:
-java.util.logging, log4j, log4j2, logback and ISO-8601 timestamps. A log is matched to a member by the address in
-its lines. A folder with member logs only, and no diagnostics, works too.
+Add the members' own logs: `hazelcast.log`, your application's log when Hazelcast logs into it, console output,
+rotated or `.gz`. These layouts are recognised:
+
+- java.util.logging, log4j, log4j2 and logback, with an ISO-8601 or day-first date and time at the start of the line
+- a date and time after a level or a prefix (`INFO  [2026-11-02 01:30:06,766] ...`), or with the month in letters
+- JSON lines (logstash encoder, ECS, log4j2 JSON layout)
+- the time of day alone, when the date is in the file name (`20261102-app.log`)
+- console output with terminal colours
+
+A file is read as a member log when it has a Hazelcast line (`[host]:port [cluster] [version]`) somewhere in its
+first 512 MB, so a partial log, without the member's start or shutdown, works too. A log is matched to a member by
+the address in its lines. A folder with member logs only, and no diagnostics, works too. The files that are not read
+are listed with the reason, in the console and in the report's *Members and files*.
+
+In an application's log, only Hazelcast's own lines (with its `[host]:port [cluster] [version]` prefix, or from a
+Hazelcast logger) make the notable lines and the migrations: an application line about a SQL `merge into` or a
+database connection is not a split brain or a closed member connection. OutOfMemoryError, thread starvation and clock
+jumps count from any line, as they are about the whole JVM.
 
 ### GC logs (optional)
 
@@ -163,6 +178,7 @@ and so on), **Find**, the time range and the theme.
 | **GC** | From the GC logs: every pause as a dot (young and mixed; remark, cleanup and others; caused by a humongous allocation), full GCs and evacuation failures, GCs caused by humongous allocations over time, humongous regions, heap after GC, time in pauses, the longest pauses and the GC log files |
 | **Cluster** | Cluster size as each member saw it, member list changes and every event |
 | **CP Subsystem** | Raft groups (term, commits, log, snapshots, leader elections), CP members, CP objects (AtomicLong, AtomicReference, FencedLock, semaphore, CountDownLatch, CPMap, sessions) and CP operations. One CP group can be picked |
+| **Configuration** | From the BuildInfo, SystemProperties and ConfigProperties sections: Hazelcast and Java versions, OS, heap and GC per member, and every Hazelcast property, system property and JVM argument side by side, with what differs between the members and what changed at a restart |
 | **Other** | Every metric that fits none of the other tabs |
 
 ### Member logs tabs
@@ -171,9 +187,10 @@ When member logs are found, a *Source* switch adds these tabs:
 
 | Tab | What it shows |
 |---|---|
-| **Overview** | Warnings and errors over time, and the lines that matter: OutOfMemoryError, thread starvation and clock leaps, clock jumps, suspected members, split-brain protection failures, slow and delayed operations, closed connections, lifecycle and membership |
+| **Overview** | Warnings and errors over time, and the lines that matter: OutOfMemoryError, partitions lost (`partitionId=N is completely lost!`), WAN replication problems (event queue full and events dropped, failures, warnings and errors of the WAN classes), thread starvation and clock leaps, clock jumps, suspected members, split-brain protection failures, slow and delayed operations, closed connections, lifecycle and membership. Lost partitions and WAN problems are also on the diagnostics Overview, and WAN problems on the WAN tab |
 | **Health monitor** | The HealthMonitor lines, charted |
 | **Exceptions** | Every exception, grouped by class and root cause, over time, with the stack trace of the first one |
+| **Migrations** | What the master logged about migrations: each migration plan (`Repartitioning cluster data`), its progress (`Remaining migration tasks`) and how it ended (completed, or failed or aborted and planned again), how long it took; lost partitions, failed migrations and promotions, and partition table changes |
 | **CP Subsystem** | CP groups, Raft roles and terms, elections, sessions and persistence, from the log lines |
 
 ## How the numbers are read

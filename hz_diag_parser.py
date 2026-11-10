@@ -22,7 +22,7 @@ Tabs: Overview, Latency, Slow operations, Invocations, Operations, Threads (stuc
 Network, Transfer (bytes in and out of each member, per peer), WAN (wan.* metrics per publisher, WAN traffic, WAN
 operations), Data structures (maps, queues, topics, caches, multimaps, replicated maps, executors... one kind at a
 time), MapStore (the latency of the maps' MapStore / MapLoader calls), System, GC (from the GC logs), Cluster, CP Subsystem (raft.* metrics per CP group, CP objects, CP operations),
-Other. What a tab shows (operation, WAN publisher, CP group, kind, metric, pauses) is picked in a row of the bar
+Configuration, Other. What a tab shows (operation, WAN publisher, CP group, kind, metric, pauses) is picked in a row of the bar
 that stays at the top of the page.
 
 Latency: calls per latency group, average and max, when operations were slow, per operation and member. Every
@@ -52,12 +52,20 @@ Saturated executors: an executor whose pool is full (poolSize >= maximumPoolSize
 (queueSize > 0), at two metrics dumps in a row at least (executor.internal.* and the like). Shown on the
 Operations tab and the Overview.
 
-Member logs: when the members' own logs are in the directory too (hazelcast.log, console output, rotated or
-.gz; java.util.logging, log4j, log4j2, logback), they get their own tabs (Source: Member logs): Overview
-(warnings and errors, notable lines: OutOfMemoryError, thread starvation / clock leap, clock jumps, suspected
-members, quorum failures, split brain, slow and delayed operations...), Health monitor (the HealthMonitor
-lines charted), Exceptions (every exception, grouped by class and root cause) and CP Subsystem (groups, Raft
-roles and terms, elections, sessions, persistence). A directory with member logs only works too.
+Member logs: when the members' own logs are in the directory too (hazelcast.log, an application's log with the
+Hazelcast lines in it, console output with or without colours, rotated or .gz; java.util.logging, log4j, log4j2,
+logback, a date after a level or a prefix, JSON lines, the time of day with the date in the file name), they get
+their own tabs (Source: Member logs): Overview (warnings and errors, notable lines: OutOfMemoryError, partitions
+lost, WAN replication problems, thread starvation / clock leap, clock jumps, suspected members, quorum failures,
+split brain, slow and delayed operations...), Health monitor (the HealthMonitor lines charted), Exceptions (every
+exception, grouped by class and root cause), Migrations (the master's migration plans, their progress and how they
+ended, lost partitions, failed migrations and promotions) and CP Subsystem (groups, Raft roles and terms, elections,
+sessions, persistence). A log is recognised by its Hazelcast lines ([host]:port [cluster] [version]) wherever they
+are: a partial log, without the member's start or shutdown, works too. A directory with member logs only works too.
+
+Configuration: the BuildInfo, SystemProperties and ConfigProperties sections (written at the top of each diagnostics
+file): Hazelcast and Java versions, OS, heap and GC from the JVM arguments, every system and Hazelcast property side
+by side for the members, what differs between them and what changed at a restart.
 
 GC logs: GC logs in the directory too (JDK 9+ -Xlog:gc*, best with the time decoration, e.g.
 -Xlog:gc*:file=gc.log:time,uptime; JDK 8 -XX:+PrintGCDetails -XX:+PrintGCDateStamps; rotated files) get a GC tab: every
@@ -98,7 +106,7 @@ import statistics
 import sys
 import time
 
-__version__ = "2.11.0"
+__version__ = "2.12.1"
 
 # --------------------------------------------------------------------------- line formats
 # "27-10-2026 15:21:16 1793114476412 Name[..."   (the epoch millis are optional)
@@ -518,6 +526,9 @@ class Unit(object):
         self.slowops = []           # (t, [[operation, invocations counted, stack lines, [[start, duration, details]]]])
         self.invd = []              # invocation sampler dumps: (t, list cut at the print limit, History, SlowHistory, in the window)
         self.invs = {}              # every invocation it listed as slow, once: key -> InvRec
+        self.props = {}             # BuildInfo / SystemProperties / ConfigProperties -> {key: value}, the last seen
+        self.props_t = None         # when they were first seen
+        self.prop_changes = []      # (t, section, key, value before, value after) within the lifetime
         self.cover = []
         self.member = None
 
@@ -926,6 +937,46 @@ def inv_listed(u, t, text):
         r.raw = text[:1500]
 
 
+PROP_SECTIONS = ("BuildInfo", "SystemProperties", "ConfigProperties")
+MAX_PROP_VALUE = 20000                  # characters of a value kept (java.class.path can be long)
+
+
+class PropsSection(object):
+    """BuildInfo[ / SystemProperties[ / ConfigProperties[ key=value ...] (written at the top of each diagnostics
+    file): the last ones seen per lifetime, and what changed within it."""
+    __slots__ = ("u", "t", "name", "lines")
+
+    def __init__(self, u, t, name):
+        self.u, self.t, self.name = u, t, name
+        self.lines = []
+
+    def feed(self, line):
+        s = line.strip("\r\n")
+        if s.strip():
+            self.lines.append(s.strip())
+        return False
+
+    def finish(self):
+        if not self.lines:
+            return
+        if self.lines[-1].endswith("]"):
+            self.lines[-1] = self.lines[-1][:-1]           # the section's own bracket
+        d = {}
+        for x in self.lines:
+            k, eq, v = x.partition("=")
+            if eq and k.strip():
+                d[k.strip()] = v[:MAX_PROP_VALUE]
+        u = self.u
+        old = u.props.get(self.name)
+        if old is not None and old != d:
+            for k in sorted(set(old) | set(d)):
+                if old.get(k) != d.get(k) and len(u.prop_changes) < 500:
+                    u.prop_changes.append((self.t, self.name, k, old.get(k), d.get(k)))
+        u.props[self.name] = d
+        if u.props_t is None:
+            u.props_t = self.t
+
+
 class InstanceSection(object):
     """HazelcastInstance[ thisAddress=, clusterId=, clusterSize=, isMaster=, Members[ ... ]]"""
     __slots__ = ("u", "t", "ctx", "depth", "info", "members")
@@ -1229,6 +1280,8 @@ def parse_file(lf, u, ctx):
                 handler = 6
             elif name == "Invocations":
                 handler = 7
+            elif name in PROP_SECTIONS:
+                handler = 8
             else:
                 continue
             t = ctx.tdisp(m)
@@ -1249,6 +1302,15 @@ def parse_file(lf, u, ctx):
                     feed_store(u, svc, t, {}, ctx)
                     continue
                 sec = StoreLatencySection(u, svc, t, ctx)
+                continue
+            if handler == 8:                            # the build and the properties: whatever the time window
+                sec = PropsSection(u, t, name)
+                if rest:                                # "BuildInfo[]", or an entry on the same line
+                    if rest.rstrip("]"):
+                        sec.feed(rest)
+                    if rest.endswith("]"):
+                        sec.finish()
+                        sec = None
                 continue
             if handler == 7:                            # read outside --from/--to too: the dump before is the baseline
                 sec = InvocationsSection(u, t, ctx, ctx.inside(t))
@@ -2442,6 +2504,36 @@ def inv_target_key(label):
     """(host, port) of an address label, as the members are keyed: for the target of an invocation."""
     h, _sep, p = label.rpartition(":")
     return (norm_host(h), int(p)) if p.isdigit() else None
+
+
+def export_props(members):
+    """The build, system properties and Hazelcast properties of each lifetime (values kept once)."""
+    keys, kidx, vals, vidx = [], {}, [], {}
+
+    def K(k):
+        if k not in kidx:
+            kidx[k] = len(keys)
+            keys.append(k)
+        return kidx[k]
+
+    def V(v):
+        if v not in vidx:
+            vidx[v] = len(vals)
+            vals.append(v)
+        return vidx[v]
+    lives, rows, changes = [], [], []
+    for mi, m in enumerate(members):
+        for ui, u in enumerate(m.units):
+            if not u.props:
+                continue
+            lives.append([mi, ui, int(u.props_t) if u.props_t is not None else None, int(u.cover[0][0]) if u.cover else None])
+            for sec, d in u.props.items():
+                si = PROP_SECTIONS.index(sec)
+                for k in sorted(d):
+                    rows.append([mi, ui, si, K(k), V(d[k])])
+            for t, sec, k, a, b in u.prop_changes:
+                changes.append([mi, ui, int(t), PROP_SECTIONS.index(sec), K(k), V(a) if a is not None else -1, V(b) if b is not None else -1])
+    return {"secs": list(PROP_SECTIONS), "keys": keys, "vals": vals, "rows": rows, "lives": lives, "changes": changes}
 
 
 def export_cluster(members):
@@ -3798,12 +3890,124 @@ JUL_LEVEL_RE = re.compile(r"^(SEVERE|WARNING|INFO|CONFIG|FINE|FINER|FINEST): ?(.
 ISO_HEAD_RE = re.compile(r"^\[?(\d{4})[-/](\d{2})[-/](\d{2})[ T](\d{2}):(\d{2}):(\d{2})(?:[.,](\d{1,9}))?"
                          r"(Z|[+-]\d{2}:?\d{2})?\]?[ \t]+(.*)$")
 DMY_HEAD_RE = re.compile(r"^\[?(\d{2})[-/.](\d{2})[-/.](\d{4})[ T](\d{2}):(\d{2}):(\d{2})(?:[.,](\d{1,9}))?\]?[ \t]+(.*)$")
+# the same date-times after something else (a level, an application name, a container log prefix): searched in the
+# first 120 characters; "02 Nov 2026 01:30:06,766" and "02-Nov-2026 01:30:06.766"; the time of day alone, the date
+# being in the file name (20261102-app.log, app.2026-11-02.log)
+ISO_ANY_RE = re.compile(r"(\d{4})[-/](\d{2})[-/](\d{2})[ T](\d{2}):(\d{2}):(\d{2})(?:[.,](\d{1,9}))?(Z|[+-]\d{2}:?\d{2})?(?![\d:])")
+MON_ANY_RE = re.compile(r"(?<!\d)(\d{1,2})[ -](Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*[ -](\d{4})[ T:](\d{2}):(\d{2}):(\d{2})"
+                        r"(?:[.,](\d{1,9}))?(?![\d:])")
+TIME_HEAD_RE = re.compile(r"^\[?(\d{2}):(\d{2}):(\d{2})(?:[.,](\d{1,9}))?\]?[ \t]+(.*)$")
+FNAME_DATE_RE = re.compile(r"(?<!\d)(20\d\d)[-_.]?(0[1-9]|1[0-2])[-_.]?(0[1-9]|[12]\d|3[01])(?!\d)")
+ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+ANSI_BARE_RE = re.compile(r"\[(?:\d{1,3}(?:;\d{1,3})*)m(.*?)\[0?m")      # colours whose escape character was lost: [31mERROR[m
+LOG_SNIFF_MAX = 512 * 1024 * 1024       # how much of a file is read to find its first Hazelcast line
+SNIFF_WHY = {}                          # path -> why a file is not a member log (for the console)
+
+
+def clean_log_line(line):
+    """A log line without its terminal colours (console output with escape codes)."""
+    if "\x1b" in line:
+        line = ANSI_RE.sub("", line)
+    if "[m" in line or "[0m" in line:
+        line = ANSI_BARE_RE.sub(r"\1", line)
+    return line
+
+
+def fname_day(path):
+    """The day in a log file's name, as display millis of midnight, or None."""
+    m = FNAME_DATE_RE.search(os.path.basename(path))
+    return day_ms(int(m.group(1)), int(m.group(2)), int(m.group(3))) if m else None
+
+
+def json_get(o, *keys):
+    for k in keys:
+        v = o.get(k)
+        if v is None and "." in k:              # ECS nests them: {"log": {"level": ...}}
+            a, _d, b = k.partition(".")
+            sub = o.get(a)
+            v = sub.get(b) if isinstance(sub, dict) else None
+        if v not in (None, ""):
+            return v
+    return None
+
+
+def json_record(line, disp_offset):
+    """A JSON log line (logstash encoder, ECS, log4j2 JsonLayout...) as a record, or None."""
+    try:
+        o = json.loads(line)
+    except ValueError:
+        return None
+    if not isinstance(o, dict):
+        return None
+    ts = json_get(o, "@timestamp", "timestamp", "time", "ts", "date", "datetime", "instant", "timeMillis")
+    t = None
+    if isinstance(ts, dict) and "epochSecond" in ts:
+        t = int(ts["epochSecond"]) * 1000 + int(ts.get("nanoOfSecond", 0)) // 1000000
+    elif isinstance(ts, (int, float)) and not isinstance(ts, bool):
+        t = int(ts if ts > 1e11 else ts * 1000)
+    if t is not None:
+        t += disp_offset if disp_offset is not None else 0
+    elif isinstance(ts, str):
+        m = ISO_ANY_RE.search(ts)
+        if not m:
+            return None
+        g = m.groups()
+        t = day_ms(int(g[0]), int(g[1]), int(g[2])) + ((int(g[3]) * 60 + int(g[4])) * 60 + int(g[5])) * 1000 + frac_ms(g[6])
+        z = zone_ms(g[7])
+        if z is not None and disp_offset is not None:
+            t = t - z + disp_offset
+    else:
+        return None
+    level = str(json_get(o, "level", "log.level", "severity", "levelname", "loglevel") or "INFO").upper()
+    logger = str(json_get(o, "logger_name", "loggerName", "logger", "log.logger", "name") or "")
+    thread = str(json_get(o, "thread_name", "thread", "threadName", "process.thread.name") or "")
+    msg = json_get(o, "message", "msg", "log") or ""
+    if not isinstance(msg, str):
+        msg = json.dumps(msg)
+    lines = msg.split("\n")
+    st = json_get(o, "stack_trace", "error.stack_trace", "exception", "thrown", "stackTrace")
+    if isinstance(st, dict):
+        st = json_get(st, "extendedStackTrace", "stackTrace", "message", "name")
+    extra = lines[1:] + (str(st).split("\n") if st else [])
+    return [t, LOG_LEVELS.get(level, "I"), logger, thread, lines[0], extra[:MAX_EXTRA_LINES], max(0, len(extra) - MAX_EXTRA_LINES)]
+
+
+def log_head(line, fmt, disp_offset):
+    """(display ms, the rest of the line) of a record's first line in one of the one-line formats, or None.
+    The time-of-day format gives ms since midnight (its day is added by the reader)."""
+    if fmt == "isox":
+        m = ISO_ANY_RE.search(line, 0, 120)
+        if not m:
+            return None
+        g = m.groups()
+        t = day_ms(int(g[0]), int(g[1]), int(g[2])) + ((int(g[3]) * 60 + int(g[4])) * 60 + int(g[5])) * 1000 + frac_ms(g[6])
+        z = zone_ms(g[7])
+        if z is not None and disp_offset is not None:
+            t = t - z + disp_offset
+    elif fmt == "mon":
+        m = MON_ANY_RE.search(line, 0, 120)
+        if not m:
+            return None
+        g = m.groups()
+        t = day_ms(int(g[2]), MONTHS[g[1]], int(g[0])) + ((int(g[3]) * 60 + int(g[4])) * 60 + int(g[5])) * 1000 + frac_ms(g[6])
+    elif fmt == "time":
+        m = TIME_HEAD_RE.match(line)
+        if not m:
+            return None
+        g = m.groups()
+        return ((int(g[0]) * 60 + int(g[1])) * 60 + int(g[2])) * 1000 + frac_ms(g[3]), g[4]
+    else:
+        return None
+    pre = line[:m.start()].strip(" []|-")
+    return t, (pre + " " if pre else "") + line[m.end():].lstrip(" ]|")
 LOG_LEVELS = {"SEVERE": "E", "FATAL": "E", "ERROR": "E", "WARNING": "W", "WARN": "W", "INFO": "I", "CONFIG": "I",
               "FINE": "D", "FINER": "D", "FINEST": "D", "DEBUG": "D", "TRACE": "D"}
 REST_HZ_RE = re.compile(r"^\[\s*([A-Z]+)\s*\]\s+\[([^\]]*)\]\s+\[([^\]]*)\]:?\s?(.*)$")      # [ INFO] [thread] [c.h.x.Y]: msg
 LEVEL_TOKEN_RE = re.compile(r"(?:^|[\s\[|])(SEVERE|FATAL|ERROR|WARNING|WARN|INFO|CONFIG|FINEST|FINER|FINE|DEBUG|TRACE)"
                             r"(?=[\s\]|:]|$)")
 LOGGER_RE = re.compile(r"((?:[A-Za-z_$][\w$]*\.)+[A-Za-z_$][\w$]*(?:\([^)\s]*\))?)")
+LOGGER_THREAD_RE = re.compile(r"^([A-Za-z_$][\w$.]*(?:\([^)\s]*\))?)\s+\[([^\]]*)\]\s*(?:-|:)\s?")     # Logger [thread] - message
+HZ_LOGGER_PREFIXES = ("com.hazelcast.", "c.h.", "hazelcast.")
 HZ_ADDR_RE = re.compile(r"\[([^\]\s]+)\]:(\d{1,5}) \[([^\]]*)\] \[(\d[^\]]*)\]")
 HZ_PREFIX_RE = re.compile(r"^\[([^\]\s]+)\]:(\d{1,5}) \[([^\]]*)\] \[(\d[^\]]*)\] ?")
 HZ_LOCAL_RE = re.compile(r"^(?:\[LOCAL\]|[\w.-]+) \[([^\]]*)\] \[(\d[^\]]*)\] ?")
@@ -3824,13 +4028,18 @@ MAX_SAMPLE_LINES = 30               # lines of a stack trace kept as the sample 
 # notable lines, by priority: a line goes to the first category it matches
 LOG_CATS = [
     ("oome", "Out of memory", 2, None),
+    ("partlost", "Partition lost", 2, re.compile(r"is completely lost!|\bLOST partitions\b|Unable to assign LOST|PartitionLostEvent\{")),
     ("quorum", "Quorum / split-brain protection failed", 2,
      re.compile(r"(?i)split.brain protection exception|SplitBrainProtectionException|QuorumException|quorum\w*\s+has failed")),
+    ("wan", "WAN replication problem", 2,
+     re.compile(r"(?i)wan replication event queue is full|dropping (?:wan )?events|WanQueueFullException|WanReplicationException|"
+                r"\bwan\b.{0,80}\b(?:failed|failure|unreachable|not reachable|refused|timed out|timeout)\b")),
     ("starvation", "Thread starvation / clock leap", 2, re.compile(r"(?i)thread starvation|clock leap")),
     ("clockjump", "System clock jump", 2, re.compile(r"(?i)clock jump|clock apparently jumped|clock-jump")),
     ("suspect", "Member suspected", 1, re.compile(r"(?i)\bsuspect(?:ing|ed)\b")),
     ("splitbrain", "Split brain / merge", 1,
-     re.compile(r"(?i)split[- ]?brain(?![- ]?protection)|\bmerg(?:ing|e) (?:to|into)\b|\bMERGE_FAILED\b")),
+     re.compile(r"(?i)split[- ]?brain(?![- ]?protection)|\bmerg(?:ing|e) (?:\[[^\]]*\] )?to\b|\bmerge (?:process|operation|instruction|tasks?)\b|"
+                r"cluster for merge|looking to merge|\bMERGE_FAILED\b")),
     ("slowop", "Slow operation", 1, re.compile(r"(?i)slow operation detected")),
     ("delayed", "Delayed", 1, re.compile(r"(?i)\bdelayed\b")),
     ("connection", "Connection closed", 0,
@@ -3839,8 +4048,39 @@ LOG_CATS = [
     ("membership", "Membership", 0, None),
 ]
 CAT_INDEX = {c[0]: i for i, c in enumerate(LOG_CATS)}
+CAT_REGEX = [(c[0], c[3]) for c in LOG_CATS if c[3] is not None]
+# what any line can tell, Hazelcast's or not (HikariCP's "Thread starvation or clock leap detected" is the whole JVM's);
+# the other kinds are about Hazelcast and come from its own lines only (an application's SQL "merge into" is no merge)
+ANY_SOURCE_CATS = frozenset(("starvation", "clockjump"))
 # words one of them needs (lower case): most lines have none, and skip the regular expressions
-CAT_WORDS = ("split", "quorum", "starv", "leap", "clock", "suspect", "merg", "slow operation", "delayed", "connection")
+CAT_WORDS = ("lost", "wan", "split", "quorum", "starv", "leap", "clock", "suspect", "merg", "slow operation", "delayed", "connection")
+WAN_LOGGER_RE = re.compile(r"(?:^|\.)Wan[A-Z]\w*$|\.wan\.")     # a warning or error of a WAN class: a WAN problem
+# migrations and the partition table, as the master logs them (MigrationManagerImpl, InternalPartitionService...)
+MIG_STATS_RE = re.compile(r"repartitionTime=(.+?), plannedMigrations=(\d+), completedMigrations=(\d+), remainingMigrations=(\d+), "
+                          r"totalCompletedMigrations=(\d+)(?:.*?, elapsedMigrationTime=(\d+)ms)?")
+MIG_DATE_RE = re.compile(r"\w{3} (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) (\d{1,2}) (\d{2}):(\d{2}):(\d{2}) (?:\S+ )?(\d{4})")
+MIG_KINDS = [                           # kind, label, severity, pattern (the first that matches)
+    ("lost", "Partition lost", 2, re.compile(r"is completely lost!|LOST partitions|Unable to assign LOST")),
+    ("start", "Migration plan", 0, re.compile(r"Repartitioning cluster data\. Migration tasks count: (\d+)")),
+    ("progress", "Progress", 0, re.compile(r"^Remaining migration tasks: \d+")),
+    ("done", "All migrations completed", 0, re.compile(r"^All migration tasks have been completed")),
+    ("failed", "Plan failed, aborted or interrupted", 1,
+     re.compile(r"^Rebalance process was (failed|aborted)|MigrationProcessTask is interrupted")),
+    ("balanced", "Balance ok, no migration", 0, re.compile(r"^Partition balance is ok")),
+    ("promotion", "Promotion failed", 1, re.compile(r"Promotion (?:of \d+ partitions failed|failed|commit (?:to .{0,200} )?failed)|"
+                                                  r"While promoting|stale promotion")),
+    ("migfail", "Migration failed", 1,
+     re.compile(r"Migration commit (?:failed|to .{0,200}failed)|Cannot (?:apply migration commit|commit )|AsyncMigrationTask failed|"
+                r"^Error during Migration|Skipping migration|Marking active migration .* as FAILED|Failed to finalize migration|"
+                r"Active migration could not be removed|is not migrating")),
+    ("table", "Partition table", 0,
+     re.compile(r"Initializing cluster partition table|Fetching partition tables from cluster|Most recent partition table is determined|"
+                r"Applying the most recent of partition state|Setting cluster partition table|in partition table in \d+ partitions|"
+                r"Storing snapshot of partition assignments|Identified a snapshot of left member|Partitions can't be assigned|"
+                r"No member group is available|Some backup replicas are inconsistent|requested to (?:shutdown|demote) but still in partition table|"
+                r"Ignoring received partition table")),
+]
+MIG_INDEX = {k[0]: i for i, k in enumerate(MIG_KINDS)}
 # HealthMonitor: processors=8, physical.memory.total=31.0G, ..., heap.memory.used/max=75.75%, minor.gc.time=13209ms, ...
 SIZE_UNITS = {"K": 1024.0, "M": 1024.0 ** 2, "G": 1024.0 ** 3, "T": 1024.0 ** 4, "P": 1024.0 ** 5}
 HEALTH_COUNTERS = frozenset(("minor.gc.count", "minor.gc.time", "major.gc.count", "major.gc.time", "unknown.gc.count",
@@ -3876,16 +4116,27 @@ CP_KINDS = [
 ]
 
 
-def sniff_log(path, max_lines=4000, max_scan=40000):
-    """(format, address (host, port) or None, cluster, version) of a Hazelcast member log, or None."""
-    counts = {"jul": 0, "iso": 0, "dmy": 0}
+def sniff_log(path, max_lines=4000):
+    """(format, address (host, port) or None, cluster, version) of a Hazelcast member log, or None (and why, in
+    SNIFF_WHY). The format comes from the first lines: java.util.logging (two lines per record), a date-time at the
+    start of the lines (ISO or day first), after something else, with the month in letters, JSON lines, or the time
+    of day alone with the date in the file name. A partial log (no start or shutdown of the member) can have only
+    application lines at first: the file is read until a Hazelcast line ([host]:port [cluster] [version]) shows up."""
+    counts = dict((k, 0) for k in ("jul", "iso", "dmy", "isox", "mon", "json", "time"))
+    has_day = fname_day(path) is not None
     hz = 0
     addrs = {}
     info = {}
+    first = None
+    read = 0
     try:
         with open_text(path) as f:
             for n, line in enumerate(f):
+                read += len(line)
                 if n < max_lines:
+                    line = clean_log_line(line)
+                    if first is None and line.strip():
+                        first = line.strip()[:160]
                     c0 = line[:1]
                     if c0.isalpha() and JUL_HEAD_RE.match(line):
                         counts["jul"] += 1
@@ -3893,19 +4144,34 @@ def sniff_log(path, max_lines=4000, max_scan=40000):
                         counts["iso"] += 1
                     elif (c0.isdigit() or c0 == "[") and DMY_HEAD_RE.match(line):
                         counts["dmy"] += 1
-                    if "azelcast" in line or "c.h." in line or "com.hazelcast" in line:
+                    elif c0 == "{" and line.rstrip().endswith("}") and json_record(line, None) is not None:
+                        counts["json"] += 1
+                    elif has_day and c0 in "0123456789[" and TIME_HEAD_RE.match(line):
+                        counts["time"] += 1
+                    elif ISO_ANY_RE.search(line, 0, 120):
+                        counts["isox"] += 1
+                    elif MON_ANY_RE.search(line, 0, 120):
+                        counts["mon"] += 1
+                    if "azelcast" in line or "c.h." in line:
                         hz += 1
-                elif addrs or n >= max_scan:
+                elif addrs or read > LOG_SNIFF_MAX:
                     break
-                m = HZ_ADDR_RE.search(line)
-                if m:
-                    k = (m.group(1), int(m.group(2)))
-                    addrs[k] = addrs.get(k, 0) + 1
-                    info.setdefault(k, (m.group(3), m.group(4)))
-    except (OSError, EOFError, UnicodeError):
+                if "]:" in line:
+                    m = HZ_ADDR_RE.search(line)
+                    if m:
+                        k = (m.group(1), int(m.group(2)))
+                        addrs[k] = addrs.get(k, 0) + 1
+                        info.setdefault(k, (m.group(3), m.group(4)))
+    except (OSError, EOFError, UnicodeError) as e:
+        SNIFF_WHY[path] = "cannot read it: %s" % e
         return None
     fmt = max(counts, key=lambda k: counts[k])
-    if counts[fmt] < 2 or not (hz or addrs):
+    if counts[fmt] < 2:
+        SNIFF_WHY[path] = "no date and time we know at the start of its lines" + (" (first line: %s)" % first if first else " (empty)")
+        return None
+    if not (hz or addrs):
+        SNIFF_WHY[path] = "a log, but no Hazelcast line in it ([host]:port [cluster] [version]%s)" % (
+            ", in the first %s" % human_size(LOG_SNIFF_MAX) if read > LOG_SNIFF_MAX else "")
         return None
     addr = max(addrs, key=lambda k: addrs[k]) if addrs else None
     cluster, version = info.get(addr, ("", ""))
@@ -3943,11 +4209,14 @@ def split_rest(rest):
     if m:
         return LOG_LEVELS.get(m.group(1), "I"), m.group(2), m.group(3), m.group(4)
     level, i = "I", 0
+    thread = ""
     m = LEVEL_TOKEN_RE.search(rest, 0, 80)
     if m:
         level, i = LOG_LEVELS[m.group(1)], m.end()
+        pre = rest[:m.start()].strip()
+        if pre[:1] == "[" and pre[-1:] == "]" and "]" not in pre[1:-1]:
+            thread = pre[1:-1]                      # [thread] INFO logger - msg
     tail = rest[i:].lstrip(" ]|:")
-    thread = ""
     if tail[:1].isdigit():                          # Spring Boot: '12345 --- [thread] logger : msg'
         tail = re.sub(r"^\d+\s+-+\s+", "", tail)
     if tail.startswith("["):
@@ -3955,6 +4224,9 @@ def split_rest(rest):
         if j > 0:
             thread, tail = tail[1:j], tail[j + 1:].lstrip()
     logger = ""
+    lt = LOGGER_THREAD_RE.match(tail) if not thread else None
+    if lt:
+        return level, lt.group(2), lt.group(1), tail[lt.end():]
     lm = LOGGER_RE.match(tail)
     if lm:
         logger, tail = lm.group(1), tail[lm.end():]
@@ -3970,6 +4242,8 @@ def iter_log_records(path, fmt, disp_offset):
             pend = None
             for line in f:
                 line = line.rstrip("\r\n")
+                if "\x1b" in line or "[m" in line or "[0m" in line:
+                    line = clean_log_line(line)
                 if line[:1].isalpha():
                     m = JUL_HEAD_RE.match(line)
                     if m:
@@ -3991,10 +4265,45 @@ def iter_log_records(path, fmt, disp_offset):
                         cur[5].append(line)
                     else:
                         cur[6] += 1
+        elif fmt in ("isox", "mon", "time", "json"):
+            day = fname_day(path) if fmt == "time" else None
+            prev_tod = None
+            for line in f:
+                line = line.rstrip("\r\n")
+                if "\x1b" in line or "[m" in line or "[0m" in line:
+                    line = clean_log_line(line)
+                if fmt == "json":
+                    rec = json_record(line, disp_offset) if line[:1] == "{" else None
+                    if rec is not None:
+                        if cur is not None:
+                            yield cur
+                        cur = rec
+                        continue
+                else:
+                    hd = log_head(line, fmt, disp_offset)
+                    if hd is not None:
+                        t, rest = hd
+                        if day is not None:             # the time of day: a new day when it goes back by over 12 h
+                            if prev_tod is not None and t < prev_tod - 43200000:
+                                day += 86400000
+                            prev_tod = t
+                            t += day
+                        if cur is not None:
+                            yield cur
+                        level, thread, logger, msg = split_rest(rest)
+                        cur = [t, level, logger, thread, msg, [], 0]
+                        continue
+                if cur is not None:
+                    if len(cur[5]) < MAX_EXTRA_LINES:
+                        cur[5].append(line)
+                    else:
+                        cur[6] += 1
         else:
             rx = ISO_HEAD_RE if fmt == "iso" else DMY_HEAD_RE
             for line in f:
                 line = line.rstrip("\r\n")
+                if "\x1b" in line or "[m" in line or "[0m" in line:
+                    line = clean_log_line(line)
                 c0 = line[:1]
                 m = rx.match(line) if (c0.isdigit() or c0 == "[") else None
                 if m:
@@ -4078,6 +4387,9 @@ class LogMember(object):
         self.cpbins = {}                    # kind -> Bins (all the lines, counted)
         self.roles = {}                     # group -> [[t, role, term, leader]]
         self.cpstate = {}                   # group -> [term, role, leader]
+        self.migkeep = {}                   # migration kind -> Sample of [t, kind, level, text, record number]
+        self.migbins = {}                   # migration kind -> Bins (all the lines, counted)
+        self.migprocs = []                  # migration plans: {s, e, rt, p, c, r, tot, o, el, pts}
 
 
 class ExcGroup(object):
@@ -4189,15 +4501,22 @@ class LogCollector(object):
             lm.first = t
         if lm.last is None or t > lm.last:
             lm.last = t
+        # a line of Hazelcast's: its prefix ([host]:port [cluster] [version], or [LOCAL] before the address is known),
+        # or a Hazelcast logger; the application's lines in the same log count as warnings, errors and exceptions only
+        hzline = True
         m = HZ_PREFIX_RE.match(msg)
+        if m is None and "]:" in msg[:300]:
+            m = HZ_ADDR_RE.search(msg, 0, 300)          # after a logger and thread the layout did not separate
         if m:
-            msg = msg[m.end():]
+            msg = msg[m.end():].lstrip()
             if not lm.version:
                 lm.cluster, lm.version = m.group(3), m.group(4)
         else:
             m = HZ_LOCAL_RE.match(msg)
             if m:
                 msg = msg[m.end():]
+            else:
+                hzline = logger.startswith(HZ_LOGGER_PREFIXES)
         if level in ("W", "E"):
             lm.levels.add(t, 0 if level == "W" else 1)
         if "heap.memory.used=" in msg or ("processors=" in msg and "load.process=" in msg):
@@ -4223,10 +4542,14 @@ class LogCollector(object):
             self.exception(lm, t, level, logger, msg, extra, text_lines)
         low = (blob if head is msg else blob + "\n" + head).lower() if cat is None else ""
         if cat is None and any(w in low for w in CAT_WORDS):
-            for key, _label, _sev, rx in LOG_CATS[1:9]:
-                if rx.search(blob if key == "quorum" else head):
+            for key, rx in CAT_REGEX:
+                if (hzline or key in ANY_SOURCE_CATS) and rx.search(blob if key == "quorum" else head):
                     cat = key
                     break
+        if cat is None and hzline and level in ("W", "E") and WAN_LOGGER_RE.search(logger):
+            cat = "wan"
+        if hzline and ("igrat" in head or "artition" in head or "ebalance" in head or "LOST" in head):
+            self.migration(lm, t, level, logger, head)
         if cat is None:
             mm = MEMBERS_LIST_RE.search(head) if "Members" in head else None
             if mm:
@@ -4251,6 +4574,66 @@ class LogCollector(object):
             cpl = self.cplog[logger] = bool(CP_LOGGER_RE.search(logger))
         if (cpl or (("CP" in head or "aft" in head) and CP_TEXT_RE.search(head))) and not head.startswith("License"):
             self.cp(lm, t, level, logger, msg, extra)
+
+    def migration(self, lm, t, level, logger, head):
+        """A line about migrations or the partition table: kept by kind; the plans followed from their first line
+        (Repartitioning cluster data) through their progress to how they ended (one repartitionTime each)."""
+        kind = m = None
+        for k, _label, _sev, rx in MIG_KINDS:
+            m = rx.search(head)
+            if m:
+                kind = k
+                break
+        if kind is None:
+            return
+        b = lm.migbins.get(kind)
+        if b is None:
+            b = lm.migbins[kind] = Bins(EXC_BINS)
+        b.add(t)
+        keep = lm.migkeep.get(kind)
+        if keep is None:
+            keep = lm.migkeep[kind] = Sample(MAX_LOG_EVENTS)
+        if keep.offer():
+            keep.keep([t, kind, level, head.strip()[:400], lm.records])
+        procs = lm.migprocs
+        cur = procs[-1] if procs else None
+        if kind == "start":
+            n = int(m.group(1))
+            procs.append({"s": t, "e": None, "rt": None, "p": n, "c": 0, "r": n, "tot": None, "o": None, "el": None, "pts": [[t, n]]})
+            return
+        if kind == "failed" and "interrupted" in head:
+            if cur is not None and cur["o"] is None:
+                cur["o"], cur["e"] = "interrupted", t
+            return
+        if kind not in ("progress", "done", "failed"):
+            return
+        st = MIG_STATS_RE.search(head)
+        if not st:
+            return
+        rt = st.group(1)
+        dm = MIG_DATE_RE.search(rt)                 # when the plan was made (the member's local time, like its log lines)
+        rt_t = None
+        if dm:
+            g = dm.groups()
+            x = day_ms(int(g[5]), MONTHS[g[0]], int(g[1])) + ((int(g[2]) * 60 + int(g[3])) * 60 + int(g[4])) * 1000
+            if t - 7 * 86400000 <= x <= t + 60000:
+                rt_t = x
+        if cur is None or (cur["rt"] is not None and cur["rt"] != rt) or (cur["rt"] is None and cur["o"] is not None) or \
+                (cur["rt"] is None and rt_t is not None and abs(rt_t - cur["s"]) > 120000):
+            s0 = rt_t if rt_t is not None else t    # a plan whose first line is not in the logs: it started at repartitionTime
+            cur = {"s": s0, "e": None, "rt": rt, "p": int(st.group(2)), "c": 0, "r": int(st.group(2)), "tot": None, "o": None, "el": None,
+                   "pts": [[s0, int(st.group(2))]]}
+            procs.append(cur)
+        cur["rt"] = rt
+        cur["p"], cur["c"], cur["r"], cur["tot"] = int(st.group(2)), int(st.group(3)), int(st.group(4)), int(st.group(5))
+        if st.group(6):
+            cur["el"] = int(st.group(6))
+        if cur["o"] is None:
+            cur["pts"].append([t, cur["r"]])
+            if kind == "done":
+                cur["o"], cur["e"] = "completed", t
+            elif kind == "failed":
+                cur["o"], cur["e"] = ("aborted" if "aborted" in head else "failed"), t
 
     def event(self, lm, cat, t, level, logger, text):
         lm.ecount[cat] = lm.ecount.get(cat, 0) + 1
@@ -4539,10 +4922,24 @@ def export_logs(lms, col):
                      "s": g.sample, "oome": g.oome})
     info = [[lm.index, lm.version, lm.cluster, lm.records, int(lm.first) if lm.first is not None else None,
              int(lm.last) if lm.last is not None else None, len(lm.files)] for lm in lms]
+    mig = {"kinds": [[k[0], k[1], k[2]] for k in MIG_KINDS], "rows": [], "bins": [], "procs": []}
+    for lm in sorted(lms, key=lambda x: x.index):
+        for kind, smp in lm.migkeep.items():
+            for r in smp.rows:
+                mig["rows"].append([r[0], lm.index, MIG_INDEX[kind], r[2], r[3], r[4]])
+            if smp.stride > 1:
+                sampled.append([lm.index, "mig:" + kind, smp.seen, len(smp.rows)])
+        for kind, b in lm.migbins.items():
+            mig["bins"].append([MIG_INDEX[kind], lm.index, sum(v[0] for v in b.d.values()), b.export()])
+        for pr in lm.migprocs:
+            mig["procs"].append([lm.index, int(pr["s"]), int(pr["e"]) if pr["e"] is not None else None, pr["rt"] or "", pr["p"], pr["c"], pr["r"],
+                                 pr["tot"], pr["o"] or "", pr["el"], [int(x) for q in pr["pts"] for x in q]])
+    mig["rows"].sort(key=lambda e: (e[0], e[1], e[5]))
+    mig["rows"] = [e[:5] for e in mig["rows"]]
     return {"files": files, "info": info, "cats": [[c[0], c[1], c[2]] for c in LOG_CATS], "levels": levels,
             "events": events, "evbins": evbins, "exc": excs, "oome": sorted(col.oome, key=lambda r: r[0]),
             "health": {"keys": hkeys, "rows": health}, "membership": membership, "cp": cp, "roles": roles,
-            "uuids": col.uuids, "sampled": sampled, "cpbins": cpbins}
+            "uuids": col.uuids, "sampled": sampled, "cpbins": cpbins, "mig": mig}
 
 
 def health_values(times, vals, counter):
@@ -4768,6 +5165,7 @@ def run(args):
     covered += [[r[2], r[2] + r[3]] for r in slowops["inv"]]    # a slow invocation can start before the first dump
     invs = export_invocations(members)
     covered += [[r[7], r[10]] for r in invs["inv"]]
+    props = export_props(members)
     if not covered:                             # GC logs alone; with diagnostics or member logs, those set the range
         covered = [[gf.first, gf.last] for gf in gcfiles if gf.first is not None]
     rng = [min(c[0] for c in covered), max(c[1] for c in covered)] if covered else [span0, span1]
@@ -4802,7 +5200,8 @@ def run(args):
         "cmd": " ".join(["hz_diag_parser.py"] + [x if re.match(r"^[\w./:#@=,+-]+$", x) else repr(x)
                                                   for x in sys.argv[1:]]),
         "input": args.input_dir, "files": sum(len(m.files) for m in members),
-        "bytes": sum(f.size for m in members for f in m.files), "skipped": [f.name for f in skipped][:50],
+        "bytes": sum(f.size for m in members for f in m.files),
+        "skipped": [f.name + (" (" + SNIFF_WHY[f.path] + ")" if f.path in SNIFF_WHY else "") for f in skipped][:50],
         "logfiles": sum(len(lm.files) for lm in lms), "logbytes": sum(f.size for lm in lms for f in lm.files),
         "gcfiles": len(gcfiles), "gcbytes": sum(gf.lf.size for gf in gcfiles),
         "tz": tz, "timeNote": time_note, "range": [int(rng[0]), int(rng[1])], "uptime": uptime_axis,
@@ -4827,7 +5226,7 @@ def run(args):
         "metrics": mx["metrics"], "static": mx["static"], "flat": mx["flat"],
         "ops": prof["ops"],
         "events": events, "cluster": runs, "lists": lists, "hb": hb, "threads": stuck, "pools": pools, "transfer": transfer,
-        "slowops": slowops, "inv": invs, "gc": gc, "store": store, "logs": logs,
+        "slowops": slowops, "inv": invs, "props": props, "gc": gc, "store": store, "logs": logs,
     }
     os.makedirs(args.output_dir, exist_ok=True)
     report = os.path.join(args.output_dir, "report.html")
@@ -4842,6 +5241,11 @@ def run(args):
          "; %d GC log files, %s" % (meta["gcfiles"], human_size(meta["gcbytes"])) if gcfiles else ""))
     if skipped:
         p("  skipped  : %d file(s) that are neither diagnostics, member logs nor GC logs" % len(skipped))
+        for f in skipped[:20]:
+            p("             %s: %s" % ((f.reldir + "/" if f.reldir != "." else "") + f.name,
+                                      SNIFF_WHY.get(f.path, "not a diagnostics file (no section we know) nor a GC log")))
+        if len(skipped) > 20:
+            p("             ... and %d more" % (len(skipped) - 20))
     real = [x["label"] for x in plist if not x.get("gcOnly")]
     p("  members  : %s" % ("%d  (%s)" % (len(real), ", ".join(real)) if real else "none (GC logs only)"))
     if len(real) < len(labels):
@@ -5124,6 +5528,8 @@ td.msg { white-space: normal; overflow-wrap: anywhere; min-width: 280px; font-si
 .ctxbar .ctxrow select.opsel { max-width: min(380px, calc(100vw - 110px)); }
 .ctl { display: inline-flex; align-items: center; gap: 8px; }
 .ctl-label { font-size: 12px; color: var(--muted); }
+.ctl.chk { gap: 6px; font-size: 13px; color: var(--ink-2); cursor: pointer; }
+.ctl.chk input { margin: 0; accent-color: var(--accent, #2a78d6); }
 .seg { display: inline-flex; background: var(--chip); border-radius: 8px; padding: 2px; flex-wrap: wrap; }
 .seg button { font: inherit; font-size: 12.5px; border: 0; border-radius: 6px; background: transparent;
   color: var(--ink-2); padding: 4px 10px; cursor: pointer; }
@@ -5439,16 +5845,37 @@ details.sect p { color: var(--ink-2); font-size: 13px; margin: 8px 0; }
         <code>queueSize</code>, a <code>poolSize</code> and a <code>maximumPoolSize</code> (<code>executor.internal.*</code>
         and the like): saturated when its pool is full (<code>poolSize</code> ≥ <code>maximumPoolSize</code>) and tasks
         wait in its queue (<code>queueSize</code> &gt; 0), at two dumps in a row at least.</li>
-      <li><b>Member logs.</b> The members' own logs found in the input folder (<code>hazelcast.log</code>, console
-        output, rotated and <code>.gz</code> files; java.util.logging, log4j, log4j2 and logback layouts) are read too.
-        A log belongs to the member whose address its lines print (<code>[host]:port</code>); a member with logs but no
-        diagnostics gets its own entry. Their tabs (<i>Source: Member logs</i>, in purple) chart the HealthMonitor
-        lines, every exception grouped by class and root cause, OutOfMemoryError (also marked on every chart of both
-        sources), the lines that matter (thread starvation and clock leaps, system clock jumps, suspected members,
-        quorum and split-brain protection failures, split brain and merges, slow and delayed operations, closed
-        connections, lifecycle and membership) and the CP Subsystem: groups, roles, terms, elections, sessions,
-        persistence. Times are the ones printed in the logs (converted when a line has a zone offset), so they line up
-        with the diagnostics when both were written in the same time zone.</li>
+      <li><b>Member logs.</b> The members' own logs found in the input folder (<code>hazelcast.log</code>, an
+        application's log with the Hazelcast lines in it, console output, rotated and <code>.gz</code> files) are read
+        too: java.util.logging, log4j, log4j2 and logback layouts, a date and time at the start of the line or after a
+        level or a prefix, the month in letters, JSON lines (logstash, ECS, log4j2), or the time of day alone with the
+        date in the file name; terminal colours are removed. A file is a member log when its lines have a date we know
+        and it has a Hazelcast line (<code>[host]:port [cluster] [version]</code>) somewhere in its first 512 MB, so a
+        partial log, without the member's start or shutdown, is read too. The files that are not read are listed with
+        the reason in <i>Members and files</i> and in the console. A log belongs to the member whose address its lines
+        print; a member with logs but no diagnostics gets its own entry. Their tabs (<i>Source: Member logs</i>, in
+        purple) chart the HealthMonitor lines, every exception grouped by class and root cause, OutOfMemoryError (also
+        marked on every chart of both sources), the lines that matter (partitions lost:
+        <code>partitionId=N is completely lost!</code>; WAN replication problems: the event queue full and events
+        dropped, failures, warnings and errors of the WAN classes; thread starvation and clock leaps, system clock
+        jumps, suspected members, quorum and split-brain protection failures, split brain and merges, slow and delayed
+        operations, closed connections, lifecycle and membership: an application's lines in the same log count for
+        OutOfMemoryError, thread starvation and clock jumps only, the other kinds and the migrations come from
+        Hazelcast's own lines, the ones with its <code>[host]:port [cluster] [version]</code> prefix or a Hazelcast
+        logger), the migrations and the CP Subsystem: groups, roles,
+        terms, elections, sessions, persistence. Lost partitions and WAN problems are also on the Overview, and WAN
+        problems on the WAN tab. Times are the ones printed in the logs (converted when a line has a zone offset), so
+        they line up with the diagnostics when both were written in the same time zone.</li>
+      <li><b>Migrations</b> come from the master's log lines: <code>Repartitioning cluster data. Migration tasks
+        count: N</code> starts a plan, <code>Remaining migration tasks</code> follows it, and <code>All migration tasks
+        have been completed</code> or <code>Rebalance process was failed</code> (or aborted) ends it, all with the
+        plan's <code>repartitionTime</code>, which keeps the plans apart (a plan whose first line is not in the logs
+        starts at its repartitionTime). Lost partitions, failed promotions and migrations, and changes to the partition
+        table are listed by kind.</li>
+      <li><b>Configuration</b> comes from the BuildInfo, SystemProperties and ConfigProperties sections each member
+        writes at the top of each diagnostics file. A member with several lifetimes shows its last one, and the values
+        its earlier lifetimes had are marked. The JVM arguments are read from <code>java.vm.args</code>; heap and GC
+        from them (<code>-Xms</code>, <code>-Xmx</code>, <code>-XX:+UseG1GC</code>...).</li>
       <li id="limits-note"></li>
     </ul>
     <p class="hint" id="gen-note"></p>
@@ -5680,7 +6107,8 @@ function upperBound(a, x) { let lo = 0, hi = a.length; while (lo < hi) { const m
 const TABS = [["overview", "Overview"], ["latency", "Latency"], ["slowops", "Slow operations"], ["operations", "Operations"], ["threads", "Threads"],
   ["network", "Network"], ["transfer", "Transfer"], ["wan", "WAN"], ["maps", "Data structures"], ["system", "System"], ["cluster", "Cluster"], ["cp", "CP Subsystem"],
   ["other", "Other"]];
-const LOGTABS = [["logs", "Overview"], ["logs-health", "Health monitor"], ["logs-exceptions", "Exceptions"], ["logs-cp", "CP Subsystem"]];
+const LOGTABS = [["logs", "Overview"], ["logs-health", "Health monitor"], ["logs-exceptions", "Exceptions"], ["logs-migrations", "Migrations"],
+  ["logs-cp", "CP Subsystem"]];
 const HASLOGS = !!(D.logs && D.logs.info && D.logs.info.length);
 const HASDIAG = MEMBERS.some(m => !m.logsOnly);
 const GCD = D.gc || { kinds: [], causes: [], mem: [], files: [], extra: [] };
@@ -5689,9 +6117,12 @@ const ST = D.store || { ops: [], tot: [], dumps: [], idle: [] };
 const HASSTORE = ST.dumps.length > 0;
 const IV = D.inv || { ops: [], ser: [], tot: [], inv: [], raw: [], dumps: [], capped: false };
 const HASINV = IV.dumps.length > 0;
+const PR = D.props || { secs: [], keys: [], vals: [], rows: [], lives: [], changes: [] };
+const HASPROPS = PR.rows.length > 0;
 if (HASGC && HASDIAG) TABS.splice(TABS.findIndex(t => t[0] === "system") + 1, 0, ["gc", "GC"]);
 if (HASSTORE) TABS.splice(TABS.findIndex(t => t[0] === "maps") + 1, 0, ["mapstore", "MapStore"]);
 if (HASINV) TABS.splice(TABS.findIndex(t => t[0] === "slowops") + 1, 0, ["invocations", "Invocations"]);
+if (HASPROPS) TABS.splice(TABS.findIndex(t => t[0] === "other"), 0, ["config", "Configuration"]);
 const ALLTABS = TABS.concat(HASLOGS ? LOGTABS : []).concat(HASGC && !HASDIAG ? [["gc", "GC"]] : []);
 const DEFTAB = HASDIAG ? "overview" : HASLOGS ? "logs" : "gc";
 const groupOf = id => id === "logs" || id.indexOf("logs-") === 0 || (id === "gc" && !HASDIAG && HASLOGS) ? "logs" : id === "gc" && !HASDIAG ? "gc" : "diag";
@@ -6345,7 +6776,7 @@ function drawTS(p, spec) {
         for (const q of s.pts) {
           if (q[0] < x0 - 600000 || q[0] > x1 + 600000) { prev = null; continue; }
           const px = sx(q[0]), py = sy(Math.max(q[1], log ? 1e-9 : -Infinity));
-          d += (d && prev && q[0] - prev[0] <= (s.join || 60000) ? "L" : "M") + px.toFixed(1) + " " + py.toFixed(1);
+          d += (d && prev && !q[3] && q[0] - prev[0] <= (s.join || 60000) ? "L" : "M") + px.toFixed(1) + " " + py.toFixed(1);
           if (s.dots) svgEl("circle", { cx: px.toFixed(1), cy: py.toFixed(1), r: 3, fill: color, class: "dot" }, p.g.marks);
           prev = q; n++;
           if (q[0] <= x1) last = [px, py];
@@ -6786,9 +7217,10 @@ const TABINFO = {
   threads: { find: "thread, member or metric", item: "By name" }, other: { find: "metric or name", item: "By name" },
   transfer: { find: "member, peer or kind" }, slowops: { find: "operation, name or member", item: "By operation" },
   logs: { find: "text, logger or member" }, "logs-health": { find: "value name" }, "logs-exceptions": { find: "exception, text or logger" },
-  "logs-cp": { find: "group, member or text" }, gc: { find: "kind, cause or member" },
+  "logs-cp": { find: "group, member or text" }, gc: { find: "kind, cause or member" }, "logs-migrations": { find: "text or member" },
   mapstore: { find: "map, method or member", item: "By map" },
-  invocations: { find: "operation, name or partition", item: "By operation" }
+  invocations: { find: "operation, name or partition", item: "By operation" },
+  config: { find: "property or value" }
 };
 const sections = {};
 // what a tab shows (operation, WAN publisher, CP group, kind, metric...): picked in a row of the bar that stays at the top
@@ -6835,7 +7267,8 @@ function buildTabs() {
       b.setAttribute("aria-selected", String(state.tab === id));
       cnt.textContent = tabCount(id);
       cnt.classList.toggle("warn", (id === "threads" && STUCK_TOTAL > 0) || (id === "operations" && SAT_TOTAL > 0) ||
-        ((id === "logs" || id === "logs-exceptions") && LOG_OOME.length > 0) || (id === "gc" && GCEV.some(e => e.cat === 3)));
+        ((id === "logs" || id === "logs-exceptions") && LOG_OOME.length > 0) || (id === "gc" && GCEV.some(e => e.cat === 3)) ||
+        (id === "logs-migrations" && MIG.bins.some(b => MIG.kinds[b[0]][0] === "lost")));
     });
     const sec = el("div", "tabsec", $("main"));
     sec.setAttribute("role", "tabpanel"); sec.setAttribute("aria-labelledby", "tab-" + id);
@@ -6850,6 +7283,7 @@ function tabCount(id) {
   if (id === "mapstore") { const n = new Set(ST_TOT.map(r => r.dsKey).concat(SROWS.map(r => r.op.split("\u0001").slice(0, 2).join("\u0001")))).size; return n ? String(n) : ""; }
   if (id === "slowops") return SO.inv.length ? String(SO.inv.length) : "";
   if (id === "invocations") return IV.inv.length ? String(IV.inv.length) : "";
+  if (id === "config") { const n = cfDifferCount("ConfigProperties") + cfDifferCount("args"); return n ? n + " differ" : ""; }
   if (id === "wan") { const n = itemCount(r => r.c === "wan", ["replication", "publisherId"]); return n ? String(n) : ""; }
   if (id === "cp") { const n = itemCount(r => r.n.indexOf("raft.group.") === 0, ["groupId"]); return n ? String(n) : ""; }
   if (id === "threads") return STUCK_TOTAL ? STUCK_TOTAL + " stuck" : "";
@@ -6859,6 +7293,11 @@ function tabCount(id) {
   if (id === "gc") { const n = GCEV.filter(e => e.cat === 3).length, h = GCEV.filter(e => e.hum).length; return n ? n + " failure" + (n === 1 ? "" : "s") : h ? h + " humongous" : ""; }
   if (id === "logs-exceptions") return LOGX.length ? String(LOGX.length) : "";
   if (id === "logs-cp") { const n = new Set(LOGCP.filter(e => e[2]).map(e => e[2])).size; return n ? String(n) : ""; }
+  if (id === "logs-migrations") {
+    const parts = new Set(MIG.rows.filter(e => MIG.kinds[e[2]][0] === "lost").map(e => (LOST_PART_RE.exec(e[4]) || [])[1]).filter(x => x));
+    const lost = parts.size || MIG.bins.filter(b => MIG.kinds[b[0]][0] === "lost").reduce((a, b) => a + b[2], 0);
+    return lost ? lost + " lost" : MIG.procs.length ? String(MIG.procs.length) : "";
+  }
   return "";
 }
 // distinct items (WAN publishers, Raft groups...): the values of these tags, over the metrics that have them all
@@ -7209,6 +7648,15 @@ function buildOverview(sec) {
         "logs-exceptions", "Open the member logs: Exceptions");
       if (oo.length) { k.classList.add("alert"); k.querySelector(".kpi-value").classList.add("bad"); }
     }
+    if (HASLOGS && MIG.bins.some(b => MIG.kinds[b[0]][0] === "lost")) {
+      const lost = migLost(), last = lost[lost.length - 1], parts = new Set();
+      for (const e of lost) { const m = LOST_PART_RE.exec(e[4]); if (m) parts.add(+m[1]); }
+      const k = linkKpi(kpi(kp, "Partitions lost in member logs", fmtInt(parts.size || lost.length), last ? (parts.size ? "partition " +
+        Array.from(parts).sort((a, b) => a - b).slice(0, 8).join(", ") + (parts.size > 8 ? ", …" : "") + " · " : "") + "last at " + shortTime(last[0]) + " · " + mShort(last[1]) :
+        "none in this time range"), "logs-migrations", "Open the member logs: Migrations");
+      if (lost.length) { k.classList.add("alert"); k.querySelector(".kpi-value").classList.add("bad"); }
+    }
+    if (wanLogHas()) wanLogKpi(kp);
     if (HASGC) {
       const rows = gcRows(true), w = rows.length ? rows.reduce((a, e) => e.p > a.p ? e : a) : null;
       const hum = rows.filter(e => e.hum).length, bad = rows.filter(e => e.cat === 3).length;
@@ -8141,6 +8589,324 @@ function buildInvocations(sec) {
   }, { tab: "invocations" }));
 }
 
+/* ---------- Member logs: Migrations (what the master logged about migration plans and the partition table) */
+const MIG = HASLOGS && D.logs.mig ? D.logs.mig : { kinds: [], rows: [], bins: [], procs: [] };
+const MIG_PROCS = MIG.procs.map((x, i) => {
+  const pts = [];
+  for (let j = 0; j + 1 < x[10].length; j += 2) pts.push([x[10][j], x[10][j + 1]]);
+  const last = pts.length ? pts[pts.length - 1][0] : x[1];
+  return { i, m: x[0], start: x[1], endT: x[2], end: x[2] != null ? x[2] : last, rt: x[3], planned: x[4], completed: x[5], remaining: x[6],
+    total: x[7], outcome: x[8], el: x[9], pts, running: !x[8] };
+});
+const migState = { kind: "notable", sort: { key: "start", dir: 1 }, lsort: { key: "t", dir: 1 } };
+const MIG_OUTCOME = { completed: "completed", failed: "failed: a new plan follows", aborted: "aborted: a new plan follows", interrupted: "interrupted", "": "no end in the logs" };
+const migBad = e => e.outcome === "failed" || e.outcome === "aborted" || e.outcome === "interrupted";
+const migColor = e => migBad(e) ? stuckColor() : e.outcome === "completed" ? catColor(0) : grey();
+const migTook = e => e.end - e.start;
+// the plans in view, on the members picked
+const migProcs = () => { const ss = selSet(); return MIG_PROCS.filter(e => ss.has(e.m) && e.start <= state.x1 && e.end >= state.x0); };
+// the kinds of lines, with their times (rows for renderDotLanes)
+function migKindRows() {
+  const ss = selSet(), by = new Map();
+  for (const [ki, mi, , bins] of MIG.bins) {
+    if (!ss.has(mi)) continue;
+    let r = by.get(ki);
+    if (!r) { const k = MIG.kinds[ki]; r = { key: k[0], ki, label: k[1], sev: k[2], color: sevColor(k[2]), bins: [], per: new Map() }; by.set(ki, r); }
+    for (const b of bins) r.bins.push(b);
+    r.per.set(mi, (r.per.get(mi) || 0) + binsInView(bins));
+  }
+  for (const r of by.values()) { r.n = 0; for (const v of r.per.values()) r.n += v; }
+  return Array.from(by.values()).filter(r => r.n > 0).sort((a, b) => a.ki - b.ki);
+}
+const migLines = kind => { const ss = selSet(), q = findQ(); return MIG.rows.filter(e => ss.has(e[1]) && inView(e[0]) &&
+  (kind === "all" || (kind === "notable" ? MIG.kinds[e[2]][0] !== "progress" : MIG.kinds[e[2]][0] === kind)) &&
+  (!q || e[4].toLowerCase().indexOf(q) >= 0 || MEMBERS[e[1]].label.toLowerCase().indexOf(q) >= 0)); };
+const migLost = () => migLines("lost");
+const LOST_PART_RE = /partitionId=(\d+)/;
+function migTip(box, e) {
+  el("div", "tip-t", box, "Migration plan · " + MEMBERS[e.m].label);
+  el("div", "tip-sub", box, shortTime(e.start) + " → " + (e.endT != null ? shortTime(e.endT) : "last seen " + shortTime(e.end)) + " · " + dur(migTook(e) / 1000));
+  tipRow(box, migColor(e), fmtInt(e.completed) + " of " + fmtInt(e.planned), "migrations done · " + (MIG_OUTCOME[e.outcome] || e.outcome), false);
+  if (e.remaining && e.outcome !== "completed") el("div", "tip-sub", box, fmtInt(e.remaining) + " left" + (e.running ? " at its last line" : " when it ended"));
+  if (e.rt) el("div", "tip-foot", box, "repartitionTime " + e.rt + (e.total != null ? " · " + fmtInt(e.total) + " completed since the master started" : ""));
+}
+function buildLogsMigrations(sec) {
+  logBanner(sec, "migrations and the partition table");
+  if (!MIG.rows.length && !MIG.procs.length) {
+    el("p", "lead", sec, "No migration line in these logs: the master logs its migration plans (Repartitioning cluster data…, All migration tasks have been completed…) at INFO, so either there was none, the master's log is not here, or com.hazelcast.internal.partition is logged above INFO.");
+    return;
+  }
+  el("p", "lead", sec, "What the master member logged about migrations: each migration plan (Repartitioning cluster data. Migration tasks count: N), its progress " +
+    "(Remaining migration tasks…), and how it ended: All migration tasks have been completed, or Rebalance process was failed or aborted, when the master " +
+    "drops the rest and makes a new plan (a member joined or left meanwhile, or a migration failed). And the problems: partitions lost (partitionId=N is " +
+    "completely lost!: no replica of it is left, so its data is gone), failed promotions and migrations, and changes to the partition table. Only the master " +
+    "logs the plans: after a master change, they are in the new master's log.");
+  const kp = el("div", "kpis", sec);
+  tabUpdaters.push(Object.assign(() => {
+    clear(kp);
+    const pr = migProcs(), done = pr.filter(e => e.outcome === "completed").length, bad = pr.filter(migBad).length, open = pr.filter(e => e.running).length;
+    kpi(kp, "Migration plans", fmtInt(pr.length), pr.length ? fmtInt(done) + " completed" + (bad ? " · " + fmtInt(bad) + " failed or aborted" : "") +
+      (open ? " · " + fmtInt(open) + " with no end in the logs" : "") : "none in view");
+    if (pr.length) {
+      kpi(kp, "Migrations planned", fmtInt(pr.reduce((a, e) => a + e.planned, 0)), fmtInt(pr.reduce((a, e) => a + e.completed, 0)) + " done");
+      const w = pr.reduce((a, b) => migTook(b) > migTook(a) ? b : a);
+      kpi(kp, "Longest plan", dur(migTook(w) / 1000), fmtInt(w.planned) + " migrations · " + mShort(w.m) + " · " + (MIG_OUTCOME[w.outcome] || w.outcome));
+    }
+    const lost = migLost(), parts = new Set();
+    for (const e of lost) { const m = LOST_PART_RE.exec(e[4]); if (m) parts.add(+m[1]); }
+    const k = kpi(kp, "Partitions lost", fmtInt(parts.size || lost.length), lost.length ? (parts.size ? "partition " + Array.from(parts).sort((a, b) => a - b).slice(0, 12).join(", ") +
+      (parts.size > 12 ? ", …" : "") + " · " : "") + "last at " + shortTime(lost[lost.length - 1][0]) + " · " + mShort(lost[lost.length - 1][1]) : "no 'is completely lost!' line");
+    if (lost.length) { k.classList.add("alert"); k.querySelector(".kpi-value").classList.add("bad"); }
+    const fails = migLines("migfail").length + migLines("promotion").length;
+    const kf = kpi(kp, "Failed migrations and promotions", fmtInt(fails), fails ? "warnings and errors about them" : "none logged");
+    if (fails) kf.querySelector(".kpi-value").classList.add("bad");
+  }, { tab: "logs-migrations" }));
+  if (MIG_PROCS.length) {
+    const rem = addPanel("logs-migrations", sec, { title: "Migrations left", height: 190, render: p => {
+      const ss = selSet(), by = new Map();
+      for (const e of MIG_PROCS) {
+        if (!ss.has(e.m) || e.end < state.x0 - 3600000 || e.start > state.x1 + 3600000) continue;
+        if (!by.has(e.m)) by.set(e.m, []);
+        const pts = by.get(e.m);
+        e.pts.forEach((q, j) => pts.push(j ? q : [q[0], q[1], "", true]));         // a new plan: a new line
+        if (e.outcome === "completed" && (!e.pts.length || e.pts[e.pts.length - 1][1] !== 0)) pts.push([e.end, 0]);
+      }
+      const series = Array.from(by.entries()).sort((a, b) => a[0] - b[0]).map(([m, pts]) =>
+        ({ key: "m:" + m, label: MEMBERS[m].label, color: memberColor(m), faint: m >= 8, pts, join: 600000, dots: true }));
+      drawTS(p, { series, unit: "count", fmt: v => fmtInt(v) + " migration" + (v === 1 ? "" : "s"), shade: false,
+        note: "remaining migrations of each plan, from its first line to its end (Remaining migration tasks lines between)" });
+    } });
+    rem.fixed = true;
+    const lanes = addPanel("logs-migrations", sec, { title: "Migration plans", height: 120, noTable: true, render: p => {
+      const ss = selSet(), by = new Map();
+      for (const e of migProcs()) { if (!by.has(e.m)) by.set(e.m, []); by.get(e.m).push(Object.assign(e, { a: e.start, l: Math.max(e.end, e.start + 1000) })); }
+      const rows = Array.from(by.entries()).sort((a, b) => a[0] - b[0]).map(([m, eps]) => ({ label: MEMBERS[m].label, eps }));
+      renderBarLanes(p, rows, { color: migColor, tip: migTip, empty: "No migration plan in this selection" });
+      p.legend.hidden = false;
+      for (const [c, t] of [[catColor(0), "completed"], [stuckColor(), "failed, aborted or interrupted"], [grey(), "no end in the logs"]]) {
+        if (!rows.some(r => r.eps.some(e => migColor(e) === c))) continue;
+        const it = el("span", "lg lg-static", p.legend), sw = el("span", "sw", it); sw.style.background = c; el("span", null, it, t);
+      }
+      el("span", "lg-note", p.legend, "one bar per plan, from its first line to its end, on the master that made it");
+      p.note.textContent = ss.size > 1 ? "one row per member" : "";
+    } });
+    lanes.fixed = true;
+  }
+  const kinds = addPanel("logs-migrations", sec, { title: "When migration and partition table lines were logged", height: 120, noTable: true, render: p => {
+    const rows = migKindRows();
+    renderDotLanes(p, rows, { empty: "No migration line in this selection", what: "lines", selected: r => migState.kind === r.key, legend: sevLegend,
+      pickHint: "Click to list them below", onPick: r => { migState.kind = migState.kind === r.key ? "notable" : r.key; update(); } });
+    p.note.textContent = rows.length ? "click a row to list its lines below" : "";
+  } });
+  kinds.fixed = true;
+  if (MIG_PROCS.length) {
+    const pcard = el("section", "card", sec), pcap = el("div", "cap", pcard);
+    el("h3", null, pcap, "Migration plans");
+    const pnote = el("span", "note", pcap);
+    const pwrap = el("div", "table-wrap", pcard);
+    tabUpdaters.push(Object.assign(() => {
+      clear(pwrap);
+      const rows = migProcs();
+      pnote.textContent = fmtInt(rows.length) + " plan" + (rows.length === 1 ? "" : "s");
+      sortableTable(pwrap, [
+        { key: "m", label: "Master", val: e => MEMBERS[e.m].label, fmt: e => mShort(e.m), title: e => MEMBERS[e.m].label },
+        { key: "start", label: "Started", num: true, val: e => e.start, fmt: e => shortTime(e.start) },
+        { key: "end", label: "Ended", num: true, val: e => e.end, fmt: e => e.endT != null ? shortTime(e.endT) : "–" },
+        { key: "took", label: "Took", num: true, val: migTook, fmt: e => (e.running ? "≥ " : "") + dur(migTook(e) / 1000) },
+        { key: "p", label: "Planned", num: true, val: e => e.planned, fmt: e => fmtInt(e.planned) },
+        { key: "c", label: "Done", num: true, val: e => e.completed, fmt: e => fmtInt(e.completed) },
+        { key: "r", label: "Left", num: true, val: e => e.remaining, fmt: e => e.remaining ? fmtInt(e.remaining) : "" },
+        { key: "o", label: "Outcome", val: e => MIG_OUTCOME[e.outcome] || e.outcome, lv: e => migBad(e) ? "E" : "" },
+        { key: "tot", label: "Completed since start", num: true, val: e => e.total || 0, fmt: e => e.total != null ? fmtInt(e.total) : "" }
+      ], rows, migState.sort, () => update(), null, "No migration plan in this selection.");
+    }, { tab: "logs-migrations" }));
+  }
+  const card = el("section", "card", sec), cap = el("div", "cap", card);
+  card.id = "mig-lines";
+  el("h3", null, cap, "Migration and partition table lines");
+  const note = el("span", "note", cap);
+  const fl = el("div", "tabctl", card), chips = el("div", "seg", fl);
+  chips.setAttribute("role", "group"); chips.setAttribute("aria-label", "Kind of line");
+  const wrap = el("div", "table-wrap", card);
+  tabUpdaters.push(Object.assign(() => {
+    clear(chips); clear(wrap);
+    const counts = new Map();
+    for (const e of migLines("all")) { const k = MIG.kinds[e[2]][0]; counts.set(k, (counts.get(k) || 0) + 1); }
+    if (migState.kind !== "all" && migState.kind !== "notable" && !counts.get(migState.kind)) migState.kind = "notable";
+    for (const [k, label] of [["notable", "All but progress"], ["all", "All"]].concat(MIG.kinds.filter(x => counts.get(x[0])).map(x => [x[0], x[1]]))) {
+      const b = el("button", null, chips, label + " " + fmtInt(k === "all" || k === "notable" ? migLines(k).length : counts.get(k)));
+      b.type = "button"; b.setAttribute("aria-pressed", String(migState.kind === k));
+      b.addEventListener("click", () => { migState.kind = k; update(); });
+    }
+    const rows = migLines(migState.kind);
+    note.textContent = fmtInt(rows.length) + " line" + (rows.length === 1 ? "" : "s") + (findQ() ? " matching Find" : "");
+    sortableTable(wrap, [
+      { key: "t", label: "Time", num: true, val: e => e[0], fmt: e => shortTime(e[0]) },
+      { key: "m", label: "Member", val: e => MEMBERS[e[1]].label, fmt: e => mShort(e[1]), title: e => MEMBERS[e[1]].label },
+      { key: "k", label: "Kind", val: e => MIG.kinds[e[2]][1], lv: e => MIG.kinds[e[2]][2] >= 2 ? "E" : MIG.kinds[e[2]][2] >= 1 ? "W" : "" },
+      { key: "lv", label: "Level", val: e => e[3], lv: e => e[3] },
+      { key: "x", label: "Line", val: e => e[4], cls: "wrapcell", lv: e => MIG.kinds[e[2]][2] >= 2 ? "E" : "" }
+    ], rows, migState.lsort, () => update(), null, "No line of this kind in this selection.", null, 1000);
+  }, { tab: "logs-migrations" }));
+}
+
+/* ---------- Configuration: the build, the JVM and the properties each member wrote (BuildInfo, SystemProperties,
+   ConfigProperties sections, at the top of each diagnostics file) */
+// "-Xmx4g -Dx=y -XX:+UseG1GC -javaagent:/a b/agent.jar=1" -> Map(name -> value); a flag given twice keeps both values
+function jvmArgs(text) {
+  const out = new Map();
+  if (!text) return out;
+  for (const a of (" " + text.trim()).split(/ (?=-)/).map(x => x.trim()).filter(x => x)) {
+    let k = a, v = "", m;
+    if ((m = /^(-X(?:ms|mx|ss|mn))(.+)$/.exec(a))) { k = m[1]; v = m[2]; }
+    else if ((m = /^-XX:([+-])([\w.]+)$/.exec(a))) { k = "-XX:" + m[2]; v = m[1] === "+" ? "on" : "off"; }
+    else if ((m = /^(-XX:[\w.]+)=(.*)$/.exec(a))) { k = m[1]; v = m[2]; }
+    else if ((m = /^(-D[^=]+)=(.*)$/.exec(a))) { k = m[1]; v = m[2]; }
+    else if ((m = /^(-(?:javaagent|agentlib|agentpath|Xlog|Xbootclasspath\/a|Xbootclasspath|verbose)):?(.*)$/.exec(a))) { k = m[1]; v = m[2]; }
+    else if ((m = /^(--[\w-]+)[= ](.*)$/.exec(a))) { k = m[1]; v = m[2]; }
+    out.set(k, out.has(k) ? out.get(k) + "\n" + v : v);
+  }
+  return out;
+}
+// per member: the values of its last lifetime that wrote them; the values its other lifetimes had, where they differ
+const PR_MEM = (() => {
+  const out = new Map(), last = new Map(), start = new Map();
+  for (const l of PR.lives) if (!last.has(l[0]) || l[1] > last.get(l[0])) { last.set(l[0], l[1]); start.set(l[0], l[3] != null ? l[3] : l[2]); }
+  for (const [mi, ui, si, ki, vi] of PR.rows) {
+    let o = out.get(mi);
+    if (!o) { o = { secs: [new Map(), new Map(), new Map()], older: new Map(), start: start.get(mi), lives: PR.lives.filter(l => l[0] === mi).length }; out.set(mi, o); }
+    if (ui === last.get(mi)) o.secs[si].set(PR.keys[ki], PR.vals[vi]);
+    else { const k = si + "\u0001" + PR.keys[ki]; if (!o.older.has(k)) o.older.set(k, new Set()); o.older.get(k).add(PR.vals[vi]); }
+  }
+  for (const o of out.values()) {
+    o.args = jvmArgs(o.secs[1].get("java.vm.args"));
+    for (const [k, vs] of o.older) {                 // keep only the values that differ from the last lifetime's
+      const [si, key] = k.split("\u0001"), cur = o.secs[+si].get(key);
+      for (const v of Array.from(vs)) if (v === cur) vs.delete(v);
+      if (!vs.size) o.older.delete(k);
+    }
+  }
+  return out;
+})();
+const CF_SECS = [["ConfigProperties", "Hazelcast properties"], ["SystemProperties", "System properties"], ["args", "JVM arguments"], ["BuildInfo", "Build"]];
+const cfState = { sec: "ConfigProperties", diff: false, sel: null, sort: { key: "k", dir: 1 }, msort: { key: "m", dir: 1 } };
+const cfMap = (o, sec) => sec === "args" ? o.args : o.secs[PR.secs.indexOf(sec)] || new Map();
+const cfMembers = () => selMembers().filter(m => PR_MEM.has(m));
+const cfHz = o => { const b = o.secs[0]; return b.get("Version") ? b.get("Version") + (b.get("Enterprise") === "true" ? " Enterprise" : "") : ""; };
+const cfJava = o => {
+  const s = o.secs[1], vv = s.get("java.vendor.version"), vendor = vv && vv !== "N/A" ? vv : s.get("java.vendor");
+  return s.get("java.version") ? s.get("java.version") + (vendor ? " · " + vendor : "") : "";
+};
+const cfGc = o => { for (const k of ["UseG1GC", "UseZGC", "UseShenandoahGC", "UseParallelGC", "UseSerialGC", "UseConcMarkSweepGC"]) if (o.args.get("-XX:" + k) === "on") return k.replace(/^Use|GC$/g, "") + (k === "UseConcMarkSweepGC" ? "" : " GC"); return ""; };
+// the rows of a section for the members picked: [key, values per member]; differ: not the same on all of them
+function cfRows(sec) {
+  const ms = cfMembers(), keys = new Set(), q = findQ();
+  for (const m of ms) for (const k of cfMap(PR_MEM.get(m), sec).keys()) keys.add(k);
+  const rows = [];
+  for (const k of keys) {
+    const vals = ms.map(m => { const v = cfMap(PR_MEM.get(m), sec).get(k); return v == null ? null : v; });
+    const differ = ms.length > 1 && vals.some(v => v !== vals[0]);
+    const older = ms.some(m => PR_MEM.get(m).older.has(PR.secs.indexOf(sec) + "\u0001" + k));
+    if (q && k.toLowerCase().indexOf(q) < 0 && !vals.some(v => v != null && v.toLowerCase().indexOf(q) >= 0)) continue;
+    rows.push({ k, vals, differ, older, ms });
+  }
+  return rows;
+}
+const cfDifferCount = sec => cfRows(sec).filter(r => r.differ).length;
+const cfShort = v => v == null ? "–" : v === "" ? "(empty)" : trimText(v.replace(/\n/g, " · "), 90);
+function buildConfig(sec) {
+  el("p", "lead", sec, "What each member wrote at the top of its diagnostics files: its build (BuildInfo), the JVM's system properties (SystemProperties, " +
+    "with the JVM arguments in java.vm.args) and the Hazelcast properties set in its configuration or as system properties (ConfigProperties). A member " +
+    "with several lifetimes shows its last one; a value that was different before a restart is marked. Find filters the properties and their values.");
+  const ctx = ctxRow("config");
+  const sl = el("label", "ctl", ctx);
+  el("span", "ctl-label", sl, "Show");
+  const ss = el("select", "cfsec", sl);
+  for (const [k, l] of CF_SECS) { const o = el("option", null, ss, l); o.value = k; }
+  ss.addEventListener("change", () => { cfState.sec = ss.value; cfState.sel = null; update(); });
+  const dl = el("label", "ctl chk", ctx), dc = el("input", null, dl);
+  dc.type = "checkbox";
+  el("span", null, dl, "Only those that differ");
+  dc.addEventListener("change", () => { cfState.diff = dc.checked; cfState.sel = null; update(); });
+  syncers.push(() => { ss.value = cfState.sec; dc.checked = cfState.diff; });
+  const kp = el("div", "kpis", sec);
+  tabUpdaters.push(Object.assign(() => {
+    clear(kp);
+    const ms = cfMembers();
+    const distinct = f => { const by = new Map(); for (const m of ms) { const v = f(PR_MEM.get(m)); if (!v) continue; if (!by.has(v)) by.set(v, []); by.get(v).push(m); } return by; };
+    for (const [label, f] of [["Hazelcast", cfHz], ["Java", cfJava]]) {
+      const by = distinct(f);
+      if (!by.size) continue;
+      const k = kpi(kp, label, by.size === 1 ? Array.from(by.keys())[0] : fmtInt(by.size) + " versions",
+        by.size === 1 ? (label === "Hazelcast" && PR_MEM.get(ms[0]).secs[0].get("Build") ? "build " + PR_MEM.get(ms[0]).secs[0].get("Build") + " · " : "") +
+          (ms.length > 1 ? "on all " + ms.length + " members" : MEMBERS[ms[0]].label)
+          : Array.from(by.entries()).map(([v, mm]) => v + " on " + mm.map(m => mShort(m)).join(", ")).join(" · "));
+      if (by.size > 1) { k.classList.add("alert"); k.querySelector(".kpi-value").classList.add("bad"); }
+    }
+    if (ms.length > 1) {
+      const n = cfDifferCount("ConfigProperties"), na = cfDifferCount("args"), ns = cfDifferCount("SystemProperties");
+      kpi(kp, "Settings that differ", fmtInt(n + na), "Hazelcast properties " + fmtInt(n) + " · JVM arguments " + fmtInt(na) + " · system properties " + fmtInt(ns));
+    }
+    let changed = 0;
+    for (const m of ms) changed += PR_MEM.get(m).older.size;
+    if (changed) kpi(kp, "Changed at a restart", fmtInt(changed), "properties with another value in an earlier lifetime");
+  }, { tab: "config" }));
+  // the members
+  const mcard = el("section", "card", sec), mcap = el("div", "cap", mcard);
+  el("h3", null, mcap, "Members");
+  const mwrap = el("div", "table-wrap", mcard);
+  tabUpdaters.push(Object.assign(() => {
+    clear(mwrap);
+    const rows = cfMembers().map(m => ({ m, o: PR_MEM.get(m) }));
+    sortableTable(mwrap, [
+      { key: "m", label: "Member", val: r => MEMBERS[r.m].label, fmt: r => mShort(r.m), title: r => MEMBERS[r.m].label },
+      { key: "hz", label: "Hazelcast", val: r => cfHz(r.o) },
+      { key: "b", label: "Build", val: r => [r.o.secs[0].get("Build"), r.o.secs[0].get("Revision")].filter(x => x).join(" · ") },
+      { key: "j", label: "Java", val: r => cfJava(r.o), cls: "wrapcell" },
+      { key: "os", label: "OS", val: r => [r.o.secs[1].get("os.name"), r.o.secs[1].get("os.version"), r.o.secs[1].get("os.arch")].filter(x => x).join(" "), cls: "wrapcell" },
+      { key: "heap", label: "Heap", val: r => [r.o.args.get("-Xms") ? "-Xms" + r.o.args.get("-Xms") : "", r.o.args.get("-Xmx") ? "-Xmx" + r.o.args.get("-Xmx") : ""].filter(x => x).join(" ") ||
+        (r.o.args.get("-XX:MaxRAMPercentage") ? "MaxRAMPercentage " + r.o.args.get("-XX:MaxRAMPercentage") : "") },
+      { key: "gc", label: "GC", val: r => cfGc(r.o) },
+      { key: "s", label: "Started", num: true, val: r => r.o.start || 0, fmt: r => r.o.start ? shortTime(r.o.start) + (r.o.lives > 1 ? " (" + r.o.lives + " lifetimes)" : "") : "" }
+    ], rows, cfState.msort, () => update(), null, "No BuildInfo, SystemProperties or ConfigProperties section for these members.");
+  }, { tab: "config" }));
+  // the properties of the section picked
+  const card = el("section", "card", sec), cap = el("div", "cap", card);
+  const h3 = el("h3", null, cap, "Properties");
+  const note = el("span", "note", cap);
+  const wrap = el("div", "table-wrap", card);
+  const detail = el("div", null, sec);
+  tabUpdaters.push(Object.assign(() => {
+    clear(wrap); clear(detail);
+    h3.textContent = CF_SECS.find(x => x[0] === cfState.sec)[1];
+    const all = cfRows(cfState.sec), rows = cfState.diff ? all.filter(r => r.differ || r.older) : all, ms = cfMembers(), wide = ms.length <= 6;
+    note.textContent = fmtInt(rows.length) + " of " + fmtInt(all.length) + " · " + fmtInt(all.filter(r => r.differ).length) + " differ between the members · click one for its full values";
+    const cols = [{ key: "k", label: "Property", val: r => r.k, cls: "wrapcell", lv: r => r.differ ? "W" : "" }];
+    if (wide) ms.forEach((m, j) => cols.push({ key: "v" + j, label: mShort(m), val: r => r.vals[j] == null ? "" : r.vals[j], fmt: r => cfShort(r.vals[j]),
+      title: r => (r.vals[j] || "") + (PR_MEM.get(m).older.has(PR.secs.indexOf(cfState.sec) + "\u0001" + r.k) ? "\nbefore a restart: " + Array.from(PR_MEM.get(m).older.get(PR.secs.indexOf(cfState.sec) + "\u0001" + r.k)).join(" | ") : ""),
+      cls: "wrapcell", lv: r => r.differ && r.vals[j] !== r.vals[0] ? "W" : "" }));
+    else cols.push({ key: "vs", label: "Values", cls: "wrapcell", val: r => { const by = new Map(); r.vals.forEach(v => by.set(v, (by.get(v) || 0) + 1));
+      return Array.from(by.entries()).sort((a, b) => b[1] - a[1]).map(([v, n]) => cfShort(v) + (by.size > 1 ? " (" + n + ")" : "")).join(" · "); } });
+    if (rows.some(r => r.older)) cols.push({ key: "o", label: "Before a restart", val: r => r.older ? "changed" : "", lv: r => r.older ? "W" : "" });
+    sortableTable(wrap, cols, rows, cfState.sort, () => update(), r => { cfState.sel = cfState.sel === r.k ? null : r.k; update(); },
+      cfState.diff ? "No property differs between these members." : "No property in this section for these members.", r => cfState.sel === r.k, 2000);
+    const r = cfState.sel != null ? rows.find(x => x.k === cfState.sel) : null;
+    if (!r) return;
+    const c = el("section", "card", detail), cc = el("div", "cap", c);
+    el("h3", null, cc, r.k);
+    el("span", "note", cc, r.differ ? "differs between the members" : ms.length > 1 ? "the same on every member" : "");
+    r.ms.forEach((m, j) => {
+      el("div", "ctl-label", c, MEMBERS[m].label);
+      const v = r.vals[j];
+      const shown = v == null ? "(not set)" : /(?:\.jar|\/classes)[:;]/.test(v) ? v.split(/[:;](?=\/|[A-Za-z]:\\)/).join("\n") : v;
+      el("pre", "sample wrappre", c, shown);
+      const old = PR_MEM.get(m).older.get(PR.secs.indexOf(cfState.sec) + "\u0001" + r.k);
+      if (old) el("p", "hint", c, "Before a restart: " + Array.from(old).join(" | "));
+    });
+    c.scrollIntoView({ block: "nearest" });
+  }, { tab: "config" }));
+}
+
 /* ---------- Data structures (maps, queues, topics...) and CP objects: one kind at a time, the way the Maps tab was */
 const execCols = p => [[p + ".pending", "Pending"], [p + ".started", "Started"], [p + ".completed", "Completed"], [p + ".cancelled", "Cancelled"]];
 const DS_KINDS = [
@@ -8783,9 +9549,29 @@ function entRowsByMember(r, ef) {
 function hasTab(tab, test) {
   return D.metrics.some(r => r.c === tab) || D.static.some(r => r.c === tab) || D.flat.some(r => r.c === tab) || PROWS.some(r => test(r.op));
 }
+// the WAN problems the member logs have (queue full and events dropped, failures, warnings and errors of the WAN classes)
+const wanLogHas = () => HASLOGS && LOGS.evbins.some(b => LOGCATS[b[0]][0] === "wan");
+function wanLogKpi(kp) {
+  const ss = selSet(), rows = LOGS.events.filter(e => LOGCATS[e[2]][0] === "wan" && ss.has(e[1]) && inView(e[0]));
+  let n = 0;
+  for (const [ci, mi, , bins] of LOGS.evbins) if (LOGCATS[ci][0] === "wan" && ss.has(mi)) n += binsInView(bins);
+  const last = rows[rows.length - 1];
+  const k = kpi(kp, "WAN problems in member logs", fmtInt(n), last ? trimText(last[5] || "", 70) + " · " + mShort(last[1]) + " at " + shortTime(last[0]) : "none in this time range");
+  k.classList.add("link"); k.tabIndex = 0; k.setAttribute("role", "link"); k.title = "Open the member logs on these lines";
+  const go = () => { state.logCat = "wan"; setTab("logs"); };
+  k.addEventListener("click", go);
+  k.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); } });
+  if (n) { k.classList.add("alert"); k.querySelector(".kpi-value").classList.add("bad"); }
+  return k;
+}
 function buildWan(sec) {
   if (!hasTab("wan", isWanOp)) {
     el("p", "lead", sec, "No WAN replication metrics or WAN operations in these files: WAN replication (a Hazelcast Enterprise feature) isn't configured on these members, or its metrics aren't in the diagnostics.");
+    if (wanLogHas()) {
+      el("p", "lead", sec, "The member logs have WAN replication problems (event queue full and events dropped, failures, warnings and errors of the WAN classes):");
+      const kp0 = el("div", "kpis", sec);
+      tabUpdaters.push(Object.assign(() => { clear(kp0); wanLogKpi(kp0); }, { tab: "wan" }));
+    }
     return;
   }
   const wanMetrics = D.metrics.some(r => r.c === "wan") || D.static.some(r => r.c === "wan") || D.flat.some(r => r.c === "wan");
@@ -8828,6 +9614,7 @@ function buildWan(sec) {
     if (failed != null) kpi(kp, "Failed transmissions", fmtInt(failed), failed ? "batches that had to be resent" : "none");
     const bytes = counterTotal("tcp.bytesSend.WAN");
     if (bytes != null) kpi(kp, "WAN bytes sent", fmtBytes(bytes), (state.wanPub ? "all publishers, " : "") + "in the time range in view");
+    if (wanLogHas()) wanLogKpi(kp);
   };
   tabUpdaters.push(Object.assign(renderK, { tab: "wan" }));
   const used = new Set();
@@ -10870,11 +11657,13 @@ buildSystem(sections.system);
 if (HASGC) buildGc(sections.gc);
 buildCluster(sections.cluster);
 buildCp(sections.cp);
+if (HASPROPS) buildConfig(sections.config);
 buildGeneric("other", sections.other, [], "Every metric that fits none of the other tabs.");
 if (HASLOGS) {
   buildLogsOverview(sections.logs);
   buildLogsHealth(sections["logs-health"]);
   buildLogsExceptions(sections["logs-exceptions"]);
+  buildLogsMigrations(sections["logs-migrations"]);
   buildLogsCp(sections["logs-cp"]);
 }
 syncers.push(syncCtx);           // after every tab's pickers: show the row of the tab in view, if it has any
