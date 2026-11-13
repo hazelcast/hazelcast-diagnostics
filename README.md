@@ -1,17 +1,22 @@
 # Hazelcast Diagnostics Analyzer
 
 `hz_diag_parser.py` reads a folder of Hazelcast diagnostics files, from one member or a whole cluster, and builds
-**one interactive HTML report**. If the members' logs and GC logs are in the folder too, it reads those as well.
+**one interactive HTML report**. It also reads what else is in the folder: the members' logs and GC logs, the
+clients' diagnostics and logs, thread dumps and heap dumps.
 
 The report is a single self-contained file. The data is embedded and compressed, so the report works offline in
 any current browser and can be attached to a ticket or sent by mail.
 
 - Python 3.6 or later, nothing else to install.
 - Diagnostics files, member logs and GC logs, plain or `.gz`, from any number of members and over several days.
+- Clients' diagnostics and logs, kept apart from the members. Thread dumps and heap dumps, on the same timeline.
 - Charts you can zoom, filter by member and search. Measure mode gives the amount that went through any time span.
 - Light and dark themes. Works on a phone.
 
 See [`examples/sample-report.html`](examples/sample-report.html) for a report on a synthetic three-member cluster.
+
+A second script, `hz_diag_agent.py`, does the same reading and writes it for an AI agent instead: a Markdown digest
+with the findings ranked, and JSON files with the details. See [For an AI agent](#for-an-ai-agent-hz_diag_agentpy).
 
 ## Quick start
 
@@ -20,9 +25,9 @@ python3 hz_diag_parser.py /path/to/diagnostics out/
 open out/report.html            # or xdg-open on Linux, or double-click the file
 ```
 
-The input folder is searched recursively. Files that are neither diagnostics, member logs nor GC logs are skipped
-and listed. The console prints a summary with the members, the time range, stuck threads, saturated executors,
-slow operations, OutOfMemoryErrors, GC pauses and more.
+The input folder is searched recursively. Files that are neither diagnostics, member or client logs, GC logs, thread
+dumps nor heap dumps are skipped and listed. The console prints a summary with the members, the time range, stuck
+threads, saturated executors, slow operations, OutOfMemoryErrors, GC pauses, the dumps and more.
 
 ```bash
 # only two members, and one hour
@@ -35,14 +40,15 @@ python3 hz_diag_parser.py diag/ out/ --points 2000
 
 ## What to collect
 
-Put everything for a cluster under one folder. A subfolder per member works best, because member logs and GC logs
-are matched to a member by the folder they are in.
+Put everything for a cluster under one folder. A subfolder per member works best, because member logs, GC logs and
+dumps can be matched to a member by the folder they are in.
 
 ```
 case-1234/
-  member1/   diagnostics-10.0.0.1_5701-1793075400000-000.log ...   hazelcast.log   gc.log  gc.log.0
+  member1/   diagnostics-10.0.0.1_5701-1793075400000-000.log ...   hazelcast.log   gc.log  gc.log.0   threads-20261027-153300.txt
   member2/   diagnostics-10.0.0.2_5701-1793075420000-000.log ...   hazelcast.log   gc.log
   member3/   ...
+  client1/   diagnostics-client-0-1793075500000-000.log ...   client.log   java_pid4242.hprof
 ```
 
 ### Diagnostics files
@@ -92,6 +98,18 @@ Hazelcast logger) make the notable lines and the migrations: an application line
 database connection is not a split brain or a closed member connection. OutOfMemoryError, thread starvation and clock
 jumps count from any line, as they are about the whole JVM.
 
+### Clients (optional)
+
+A client writes diagnostics too when they are turned on in its JVM (the same `hazelcast.diagnostics.*` properties),
+in files named `diagnostics-client-<id>-<start>-NNN.log`. Its log lines start with the client's instance name instead
+of an address: `hz.client_1 [dev] [5.5.0] ...`.
+
+Both are read as a client, not a member. A client's diagnostics files (by their name, or by the client-only metrics
+such as `invocations.pendingCalls`) and its logs go together by its instance name, on a line of their own: the
+*Clients* group of the *Member* list, "client hz.client_1". The title, the *Members* count and the cluster size count
+the members only ("Hazelcast cluster: 2 members + 1 client"), and the Transfer tab, which is between members, leaves
+the client out. Its metrics (heap, CPU, GC...) and its log lines are charted with the members', in a colour of its own.
+
 ### GC logs (optional)
 
 Add the members' GC logs. A date and time on every line is best:
@@ -132,17 +150,61 @@ A GC log that matches no member still gets its own line on the GC tab, but it is
 shows it apart ("3 members + 1 GC log not linked to a member"). A folder of GC logs alone makes a report too.
 Rotated files and copies of the same log are read once. The GC tab lists every file and how it was matched.
 
+### Thread dumps and heap dumps (optional)
+
+Add the thread dumps and heap dumps taken during the incident, from the members or the clients:
+
+```bash
+jstack -l <pid> > threads-$(date +%Y%m%d-%H%M%S).txt      # or: jcmd <pid> Thread.print, or kill -3 <pid> (console output)
+jcmd <pid> GC.heap_dump /var/log/hazelcast/heap-$(date +%Y%m%d-%H%M%S).hprof
+-XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=/var/log/hazelcast
+```
+
+**Thread dumps** are found in files of their own and inside console output and member logs (the output of
+`kill -3`). These formats are read: jstack (with or without `-l`), `jcmd Thread.print`, `jcmd Thread.dump_to_file`
+(text or JSON), and the plain format applications write from `Thread.getAllStackTraces()` (a
+`"name" daemon=false state=WAITING` line, then `at ...` lines). A file can hold several dumps.
+
+**Heap dumps** are HPROF files: `.hprof`, gzipped (`jcmd GC.heap_dump -gz=1`, or `.hprof.gz`), or with no extension.
+
+**When** each was taken, in this order: the date line jstack, jcmd and `kill -3` print above the dump; the time
+written in the dump (`Thread.dump_to_file` and HPROF dumps have one, in UTC, moved to the members' time zone); a date
+and time in the file name (`threads-20261112-152146.txt`, taken as local time). Name the files with the date and time
+when your tool prints none.
+
+**Whose** it is, in this order: the member or client whose threads have the same names (`hz.<instance name>.`...,
+taken from the thread tags in the metrics and the threads in the logs); the one whose file names have every word of
+the dump's file name (`member-2.out` goes with `member-2-diagnostics-...`); the only one with files in the same
+folder; for a heap dump, the one of a thread dump taken with it (same file name words, within 2 minutes). A dump
+that matches none is listed as *not matched to a member*.
+
+Each dump is a dotted line on every time chart ("3 thread dumps + 1 heap dump" when they are close), a row of
+*What happened* on the Overview, and a row of the **Dumps** tab. There, a thread dump shows:
+
+- the threads by state, and how many are doing something (not waiting for work in a pool, a queue or a selector)
+- the threads with the same stack (same state, same top 12 frames), the busy ones first, each with its stack
+- the contended locks: who holds each one and who waits for it
+- a deadlock, as the JVM reported it, or found from the monitors the threads hold and wait for
+- the threads by name (one line per pool), the threads that used the most CPU, and the whole dump
+
+A heap dump shows the objects and classes, the classes by shallow size and by number of instances, the largest
+objects, the Hazelcast classes and the GC roots. A shallow size is an object's own size, estimated from its fields
+(with compressed references when the object ids allow them), not what it keeps alive: for retained sizes, leak
+suspects and the paths to the GC roots, open the dump in Eclipse MAT or VisualVM. Reading a heap dump stops after
+`--heap-seconds` (120 s by default): the tables then cover the part read, and `--heap-seconds 0` keeps its time only.
+
 ## Options
 
 | Option | |
 |---|---|
-| `input_dir` | Folder with the diagnostics files, member logs and/or GC logs (searched recursively, `.gz` too) |
+| `input_dir` | Folder with the diagnostics files, member and client logs, GC logs, thread and heap dumps (searched recursively, `.gz` too) |
 | `output_dir` | Where `report.html` goes (default `./hz-diag-report`) |
-| `-m`, `--member HOST[:PORT]` | Only these members (repeatable). A folder name works for files without an address |
+| `-m`, `--member HOST[:PORT]` | Only these members (repeatable). A client by its name (`hz.client_1`), or `client` for every client. A folder name works for files without an address |
 | `--from TIME`, `--to TIME` | Only data in this window, in the time shown in the logs: `27-10-2026 15:00`, `2026-10-27 15:00:00`, `15:00` (the first day), or a date |
 | `--points max\|N` | `max` (default) keeps every metric and profiler dump. `N` merges them into about N points across the time range, for a smaller file |
 | `--top N` | Per metric, chart data for the N most active maps, threads, pipelines, AtomicLongs... (default 40). The others still count in the totals |
 | `--budget N` | At most about N values for the per-item lines. Past that they get coarser and the rest keeps its resolution (default 8,000,000; 0 means no limit) |
+| `--heap-seconds N` | At most N seconds reading each heap dump for its class histogram (default 120). Past that, the histogram covers what was read. `0` keeps only the time it was taken |
 | `--open` | Open the report in a browser when it's done |
 | `-q`, `--quiet` | Don't print progress |
 
@@ -163,12 +225,13 @@ and so on), **Find**, the time range and the theme.
 
 | Tab | What it shows |
 |---|---|
-| **Overview** | Members and restarts, membership changes, slow executions, slow operations, stuck threads, saturated executors, OutOfMemoryErrors, longest GC pause, heap use, late heartbeats, and what happened when |
+| **Overview** | Members and restarts, membership changes, slow executions, slow operations, stuck threads, saturated executors, OutOfMemoryErrors, longest GC pause, heap use, late heartbeats, thread and heap dumps, and what happened when |
 | **Latency** | From the operation and invocation profilers: calls per latency group, average and max latency, when each operation was slow, and a table per operation and member. You set the latency groups and the slow threshold, from 1 ms to over 8 s |
 | **Slow operations** | What the slow operation detector reported: each slow invocation once, as a bar from its start to its end, with its stack trace and details. Invocations still running are marked |
 | **Invocations** | From the invocation sampler: how many invocations each member was waiting on at each sample, by operation, and how many of them for longer than the slow threshold; every invocation listed as slow, once, with its data structure, partition, target and how long it stayed pending, and which ones went past their call timeout; the partitions with the most (and their partition thread on the target). Only when the sampler is on |
 | **Operations** | Operation, response and executor queues, pending invocations, and executors whose pool was full while tasks waited (saturated) |
 | **Threads** | Stuck IO and operation threads: idle while work waited in their queue, at two dumps in a row or more. Per-thread metrics too |
+| **Dumps** | The thread dumps and heap dumps found: when each was taken and whose it is. For a thread dump, the threads with the same stack, contended locks, deadlocks, thread names, CPU and the whole dump; for a heap dump, the classes by shallow size and by instances, the largest objects, the Hazelcast classes and the GC roots. Find searches their text and class names. Only when there are dumps |
 | **Network** | Bytes in and out, connections and connection pipelines |
 | **Transfer** | How much each member received from and sent to each peer (other members, client hosts, WAN targets), from the per-connection counters |
 | **WAN** | WAN replication per publisher: outbound queues, events published, acknowledgements, failures, sync and consistency checks, WAN bytes and WAN operations |
@@ -183,7 +246,7 @@ and so on), **Find**, the time range and the theme.
 
 ### Member logs tabs
 
-When member logs are found, a *Source* switch adds these tabs:
+When member logs (or client logs) are found, a *Source* switch adds these tabs:
 
 | Tab | What it shows |
 |---|---|
@@ -210,14 +273,66 @@ When member logs are found, a *Source* switch adds these tabs:
   slow invocations stops at 99 per dump (`hazelcast.diagnostics.invocation.slow.max.count`); the counts don't.
 - **Times** are the members' server time when every member logs in the same time zone, and UTC when they don't.
   With member logs or GC logs alone, times are shown as printed.
+- **Heap dumps:** the sizes are shallow sizes, estimated from each class's fields the way heap analysers do (a
+  12-byte header and 4-byte references with compressed oops, else 16 and 8, rounded up to 8 bytes). Retained sizes,
+  what an object keeps alive, need a heap analyser such as Eclipse MAT.
 - **Resolution:** with `--points max`, every dump is in the report. When there are more points than pixels,
   neighbouring points are merged for drawing, and zooming in shows them all.
 
 The *How this works* section at the bottom of every report has the details.
 
+## For an AI agent: hz_diag_agent.py
+
+`hz_diag_agent.py` reads the same folder the same way (it uses `hz_diag_parser.py`, which must be in the same
+folder) and writes a folder for an AI agent instead of a report for a browser:
+
+```bash
+python3 hz_diag_agent.py /path/to/diagnostics agent-out/
+```
+
+| File | What it holds |
+|---|---|
+| `summary.md` | The digest, to read first: scope, members, the findings ranked by severity (each with its numbers, its times and the file and key that hold the details), what was checked and found clean, the key events in time order, and a short section per area |
+| `findings.json` | The same findings as data: severity, area, members, start and end, facts, where the details are |
+| `timeline.jsonl` | Every notable event of every source in time order, one JSON object per line: membership and lifecycle events, restarts, late heartbeats, stuck threads, saturated executors, slow operations and invocations, slow calls, long and full GC pauses, member log lines (OutOfMemoryError, lost partitions, split brain, WAN problems...), migrations, CP Subsystem |
+| `cluster.json` | Members, lifetimes and restarts, cluster views, membership events, late heartbeats, the build, JVM and Hazelcast properties and what differs between the members |
+| `metrics.json` | Every metric that changed: per member min, mean, max (and when) and last, and a series of at most `--points` values; per metric the most active maps, threads, executors...; the key metrics (heap, CPU, GC time, queues, pending invocations) |
+| `latency.json` | Per operation, profiler and member: calls, mean, max, the calls of 131 ms, 524 ms and 1 s or more, the worst intervals; MapStore totals |
+| `slow.json` | Slow operations, slow pending invocations, stuck threads, saturated executors |
+| `gc.json` | GC pauses per member: percentiles, by kind and cause, the longest, full GCs, evacuation failures, humongous allocations, heap after GC |
+| `logs.json` | Member logs: warnings and errors, notable lines, exceptions, OutOfMemoryError, health monitor, migrations, CP Subsystem |
+| `network.json` | Bytes received and sent per member and peer, the busiest connections |
+
+Only the files with something in them are written. Times are ISO 8601 with the members' UTC offset, units are in
+the field names (`_ms`, `_us`, `_bytes`, `_per_s`), and every JSON file starts with `about`, what it holds.
+
+It doesn't know about clients and dumps yet: a client is listed as one more member, and thread and heap dumps are
+left out (the HTML report has them).
+
+Why not one big JSON file: an agent does best with a short digest it can read whole, and details it opens only when
+it needs them. A dump of every series would not fit in its context, and most of it would be noise. Give an agent
+with file access (Claude Code, for example) the whole folder: it reads `summary.md`, then queries the rest with `jq`
+or `grep`. In a chat, attach `summary.md`, plus the JSON files it points to if you want the agent to dig.
+
+The findings are heuristics on what was read (a GC pause of 1 s or more, heap use at 90% of the max, an invocation
+past its call timeout, a stuck thread...): each one points to the details that confirm it.
+
+| Option | |
+|---|---|
+| `-m`, `--member`, `--from`, `--to` | As for `hz_diag_parser.py` |
+| `--points N` | Values per series in the JSON files (default 60). The stats always use every value; zoom in with `--from`/`--to` for more detail |
+| `--top N` | Per metric, the N most active maps, threads, executors... (default 10) |
+| `--max-events N` | At most N events in `timeline.jsonl`, the most severe kept first (default 20,000) |
+| `--html` | Also write `report.html`, the same report as `hz_diag_parser.py`, from the same reading |
+
 ## Tips
 
 - **Large captures:** use `--points` and `--budget` for a smaller report.
+- **Big heap dumps** are read as a stream, in little memory, at about 10 s per GB (a 600 MB dump of 15 million
+  objects takes about 6 s, plain or `.gz`). Past `--heap-seconds` (120 s), the tables cover the part read; 0 keeps only the
+  time they were taken.
+- **Thread dumps with no date** (from tools that print none): put the date and time in the file name,
+  `threads-20261112-152146.txt`, so they land on the timeline.
 - **More items:** raise `--top` to keep chart lines for more maps, threads or AtomicLongs.
 - **Per-connection details:** some need the debug metric level (`-Dhazelcast.diagnostics.metric.level=debug`), for
   example the type of each connection on the Transfer tab.

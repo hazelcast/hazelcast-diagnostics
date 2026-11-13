@@ -77,12 +77,24 @@ listed apart, not as a member. Lines with the JVM uptime only (the -Xlog default
 their member's lifetime: the dump time minus runtime.uptime in the diagnostics, checked against gc.minorCount. With
 GC logs alone, the time axis is then the JVM uptime, one line per JVM.
 
+Clients: a client's diagnostics (diagnostics-client-... files, or the client-only metrics) and its logs (the client's
+instance name before [cluster] [version]) go together on a line of their own, by instance name: not a member.
+
+Thread dumps and heap dumps: thread dumps (jstack, kill -3 in a console output or member log, jcmd Thread.print or
+Thread.dump_to_file, text or JSON, or the plain format an application writes) and heap dumps (HPROF, .gz too) in the
+directory are timed (the dump's date line, the time in the dump, a date-time in the file name), matched to a member
+or client (the names of their threads, else their file name or folder), marked on every time chart and listed on the
+Dumps tab: for a thread dump, the threads with the same stack, contended locks, a deadlock, thread names, CPU, the
+whole dump; for a heap dump, a class histogram by shallow size and by instances, the largest objects, the Hazelcast
+classes and the GC roots (read for at most --heap-seconds).
+
 Usage
   python3 hz_diag_parser.py <input_dir> [<output_dir>] [options]
   python3 hz_diag_parser.py diag/ out/ --member 10.0.0.1:5701 --from "27-10-2026 15:00" --to "27-10-2026 16:00"
 
 Writes <output_dir>/report.html: one self-contained file (data embedded and compressed) that works
-offline in a current browser. Needs Python 3.6+ and nothing else.
+offline in a current browser. Needs Python 3.6+ and nothing else. hz_diag_agent.py (same folder) writes the same
+reading for an AI agent: a Markdown digest and JSON files.
 
 Resolution: --points max (the default) keeps every metric dump and every profiler dump; the charts
 merge neighbouring points only while there are more points than pixels, so zooming in shows them
@@ -103,10 +115,12 @@ import operator
 import os
 import re
 import statistics
+import struct
 import sys
 import time
+import zlib
 
-__version__ = "2.12.1"
+__version__ = "2.14.0"
 
 # --------------------------------------------------------------------------- line formats
 # "27-10-2026 15:21:16 1793114476412 Name[..."   (the epoch millis are optional)
@@ -115,6 +129,12 @@ TS_RE = re.compile(r"(\d{1,2})-(\d{1,2})-(\d{4}) (\d{1,2}):(\d{2}):(\d{2})(?: (\
 FILENAME_RE = re.compile(
     r"^.*diagnostics-(?P<host>.+?)[#_](?P<port>\d{1,5})-(?P<start>\d{10,16})(?:-(?P<idx>\d+))?\.log",
     re.IGNORECASE)
+# diagnostics-client-0-1794460826686-000.log: a client's diagnostics (the client's number in its JVM, its start time)
+CLIENT_FILENAME_RE = re.compile(r"^.*diagnostics-client-(?P<cid>\w+?)-(?P<start>\d{10,16})(?:-(?P<idx>\d+))?\.log", re.IGNORECASE)
+# metrics only a client has (a renamed client file)
+CLIENT_METRIC_RE = re.compile(r"[\[,]metric=invocations\.(?:pendingCalls|maxCurrentInvocations|startedInvocations)[,\]]")
+# the instance name in the names of its threads: hz.naughty_shockley.IO.thread-in-0, hz.hz.client_1.IO.thread-in-0
+INST_THREAD_RE = re.compile(r"thread=hz\.(.+?)\.(?:IO\.thread-(?:in|out)-\d+|partition-operation\.thread-\d+|generic-operation\.thread-\d+)[,\]]")
 THIS_ADDRESS_RE = re.compile(r"thisAddress=\[([^\]]+)\]:(\d{1,5})")
 ADDR_RE = re.compile(r"\[([^\]]+)\]:(\d{1,5})")
 BUCKET_RE = re.compile(r"^(\d+)\.\.(\d+)\s*(ns|us|µs|ms|s)?$")
@@ -336,12 +356,22 @@ class LogFile(object):
         self.looks_diag = False
         self.log_fmt = self.log_addr = None        # a member log: its format and the member address in its lines
         self.log_cluster = self.log_version = ""
+        self.log_client = None                      # a client's log: the client's instance name (hz.client_1)
+        self.client = None                          # a client's diagnostics: its number in its JVM ("" when not known)
+        self.inst = None                            # the Hazelcast instance name in its threads' names
         m = FILENAME_RE.search(self.name)
         if m:
             self.host, self.port = m.group("host"), int(m.group("port"))
             self.start_ms = int(m.group("start"))
             self.index = int(m.group("idx")) if m.group("idx") is not None else None
             self.looks_diag = True
+        else:
+            m = CLIENT_FILENAME_RE.search(self.name)
+            if m:
+                self.client = m.group("cid")
+                self.start_ms = int(m.group("start"))
+                self.index = int(m.group("idx")) if m.group("idx") is not None else None
+                self.looks_diag = True
 
     @property
     def member(self):
@@ -352,7 +382,8 @@ class LogFile(object):
         return self.first_epoch if self.first_epoch is not None else self.first_printed
 
     def peek(self, max_bytes=16 * 1024 * 1024):
-        """First timestamp; whether the file has diagnostics sections; the address if the name has none."""
+        """First timestamp; whether the file has diagnostics sections; the address if the name has none; whether it is
+        a client's (its file name, or metrics only a client has) and the instance name in its threads' names."""
         read = 0
         want_addr = self.host is None
         try:
@@ -367,12 +398,22 @@ class LogFile(object):
                                 self.first_epoch = int(m.group(7)) if m.group(7) else None
                         if not self.looks_diag and KNOWN_SECTION_RE.search(line) and TS_RE.search(line):
                             self.looks_diag = True
+                        if want_addr and "metric=" in line:
+                            if self.client is None and "metric=invocations." in line and CLIENT_METRIC_RE.search(line):
+                                self.client = ""
+                            if self.inst is None and "thread=hz." in line:
+                                a = INST_THREAD_RE.search(line)
+                                if a:
+                                    self.inst = a.group(1)
                     elif want_addr and "thisAddress=" in line:
                         a = THIS_ADDRESS_RE.search(line)
                         if a:
                             self.host, self.port = a.group(1), int(a.group(2))
                             want_addr = False
+                            self.client = None
                     if self.first_printed is not None and self.looks_diag and not want_addr:
+                        break
+                    if self.client is not None and self.inst is not None and self.first_printed is not None and self.looks_diag:
                         break
                     if read > max_bytes or (not self.looks_diag and read > 256 * 1024):
                         break
@@ -405,8 +446,9 @@ class LogFile(object):
 
 
 def discover(root):
-    """Files under root: .log, .txt, .out, .gz or no extension, also rolled names like x.log.1 or x.log.2026-10-27."""
-    out = []
+    """Files under root: .log, .txt, .out, .gz or no extension, also rolled names like x.log.1 or x.log.2026-10-27, and
+    thread dumps (.tdump, .jstack, .json...); heap dumps (HPROF, also .gz) apart: (text files, heap dumps)."""
+    out, heaps = [], []
     for d, dirs, names in os.walk(root):
         dirs.sort()
         for nm in sorted(names):
@@ -414,9 +456,14 @@ def discover(root):
             ext = os.path.splitext(low)[1]
             if low.startswith("._") or low == ".ds_store":
                 continue
-            if ext in (".log", ".txt", ".out", ".gz", "") or re.search(r"\.(?:log|out)[.-]", low):
-                out.append(os.path.join(d, nm))
-    return out
+            path = os.path.join(d, nm)
+            if ext in HEAP_EXTS or ext == "" or (ext == ".gz" and ("hprof" in low or "heap" in low)):
+                if hprof_header(path) is not None:
+                    heaps.append(path)
+                    continue
+            if ext in (".log", ".txt", ".out", ".gz", "") + TD_EXTS or re.search(r"\.(?:log|out)[.-]", low):
+                out.append(path)
+    return out, heaps
 
 
 # --------------------------------------------------------------------------- in-memory model
@@ -1401,7 +1448,12 @@ def build_units(files, wanted):
     by_addr = {}
     addr_order = []
     no_addr = {}
+    clients = {}
     for lf in files:
+        if lf.client is not None and lf.host is None:   # a client's: by its instance name, then its start time
+            name = lf.inst or ("client-" + lf.client if lf.client else "client")
+            clients.setdefault(name, {}).setdefault(lf.start_ms, []).append(lf)
+            continue
         if lf.host is None:
             no_addr.setdefault(lf.reldir, []).append(lf)
             continue
@@ -1426,6 +1478,18 @@ def build_units(files, wanted):
             u = Unit(("addr",) + key, fs[0].member, fs)
             u.addr_dirs = addr_dirs[key]
             units.append(u)
+    for name in sorted(clients):
+        lts = clients[name]
+        orphans = lts.pop(None, [])
+        for lf in orphans:
+            t = lf.first_abs
+            cands = [s_ for s_ in lts if t is not None and s_ <= t + 60000]
+            lts.setdefault(max(cands) if cands else None, []).append(lf)
+        for start in sorted(lts, key=lambda s_: (s_ is None, s_ or 0)):
+            fs = dedupe(sorted(lts[start], key=lambda f: f.sort_key()))
+            u = Unit(("client", name), "client " + name, fs)
+            u.addr_dirs = set(f.reldir for fs_ in lts.values() for f in fs_)
+            units.append(u)
     for d in sorted(no_addr):
         fs = dedupe(sorted(no_addr[d], key=lambda f: f.sort_key()))
         units.append(Unit(("dir", d), "files in %s" % d, fs))
@@ -1436,6 +1500,9 @@ def build_units(files, wanted):
                 host, port = parse_member_arg(w)
                 ws = w.strip().strip("/")
                 if u.key[0] == "addr" and u.key[1] == host and (port is None or u.key[2] == port):
+                    keep.append(u)
+                    break
+                if u.key[0] == "client" and ws and (ws.lower() == "client" or ws == u.key[1] or ws in u.label):
                     keep.append(u)
                     break
                 if u.key[0] == "dir" and ws and ws in u.key[1]:
@@ -1479,7 +1546,7 @@ def finish_members(units):
     members = []
     for key in order:
         us = sorted(by_key[key], key=lambda u: u.start or 0)
-        if key[0] != "addr":
+        if key[0] not in ("addr", "client"):
             members.extend(Member(u.key, u.label, [u]) for u in us)
             continue
         clusters = []
@@ -1496,7 +1563,7 @@ def finish_members(units):
             if len(clusters) > 1 or set(m.dirs) != c[0].addr_dirs:
                 m.label = "%s · %s" % (m.label, "+".join(m.dirs) or ".")
             members.append(m)
-    members.sort(key=lambda m: m.label)
+    members.sort(key=lambda m: (m.key[0] == "client", m.label))       # the clients after the members
     for i, m in enumerate(members):
         for u in m.units:
             u.member = i
@@ -3033,6 +3100,8 @@ def export_transfer(members):
                 c = d[t] = [0.0, 0.0]
             c[col] += g
     for mi, m in enumerate(members):
+        if m.key[0] == "client":            # a client's bytes are the members' too (their connections to it)
+            continue
         for u in m.units:
             mt = u.mtimes
             if not mt:
@@ -4006,6 +4075,8 @@ REST_HZ_RE = re.compile(r"^\[\s*([A-Z]+)\s*\]\s+\[([^\]]*)\]\s+\[([^\]]*)\]:?\s?
 LEVEL_TOKEN_RE = re.compile(r"(?:^|[\s\[|])(SEVERE|FATAL|ERROR|WARNING|WARN|INFO|CONFIG|FINEST|FINER|FINE|DEBUG|TRACE)"
                             r"(?=[\s\]|:]|$)")
 LOGGER_RE = re.compile(r"((?:[A-Za-z_$][\w$]*\.)+[A-Za-z_$][\w$]*(?:\([^)\s]*\))?)")
+# a client's log line: its instance name before [cluster] [version] (hz.client_1 [dev] [5.7.0]); a member's has [host]:port
+CLIENT_LINE_RE = re.compile(r"(?:^|[\s\]|-])([A-Za-z_][\w.-]*) \[([^\]]*)\] \[(\d+\.\d+[\w.-]*)\] ")
 LOGGER_THREAD_RE = re.compile(r"^([A-Za-z_$][\w$.]*(?:\([^)\s]*\))?)\s+\[([^\]]*)\]\s*(?:-|:)\s?")     # Logger [thread] - message
 HZ_LOGGER_PREFIXES = ("com.hazelcast.", "c.h.", "hazelcast.")
 HZ_ADDR_RE = re.compile(r"\[([^\]\s]+)\]:(\d{1,5}) \[([^\]]*)\] \[(\d[^\]]*)\]")
@@ -4127,6 +4198,7 @@ def sniff_log(path, max_lines=4000):
     hz = 0
     addrs = {}
     info = {}
+    cnames = {}                             # a client's lines: its instance name -> lines
     first = None
     read = 0
     try:
@@ -4154,7 +4226,7 @@ def sniff_log(path, max_lines=4000):
                         counts["mon"] += 1
                     if "azelcast" in line or "c.h." in line:
                         hz += 1
-                elif addrs or read > LOG_SNIFF_MAX:
+                elif addrs or sum(cnames.values()) >= 5 or read > LOG_SNIFF_MAX:
                     break
                 if "]:" in line:
                     m = HZ_ADDR_RE.search(line)
@@ -4162,6 +4234,11 @@ def sniff_log(path, max_lines=4000):
                         k = (m.group(1), int(m.group(2)))
                         addrs[k] = addrs.get(k, 0) + 1
                         info.setdefault(k, (m.group(3), m.group(4)))
+                if "] [" in line and not addrs:
+                    m = CLIENT_LINE_RE.search(line)
+                    if m:
+                        cnames[m.group(1)] = cnames.get(m.group(1), 0) + 1
+                        info.setdefault(m.group(1), (m.group(2), m.group(3)))
     except (OSError, EOFError, UnicodeError) as e:
         SNIFF_WHY[path] = "cannot read it: %s" % e
         return None
@@ -4169,13 +4246,14 @@ def sniff_log(path, max_lines=4000):
     if counts[fmt] < 2:
         SNIFF_WHY[path] = "no date and time we know at the start of its lines" + (" (first line: %s)" % first if first else " (empty)")
         return None
-    if not (hz or addrs):
+    if not (hz or addrs or cnames):
         SNIFF_WHY[path] = "a log, but no Hazelcast line in it ([host]:port [cluster] [version]%s)" % (
             ", in the first %s" % human_size(LOG_SNIFF_MAX) if read > LOG_SNIFF_MAX else "")
         return None
     addr = max(addrs, key=lambda k: addrs[k]) if addrs else None
-    cluster, version = info.get(addr, ("", ""))
-    return fmt, addr, cluster, version
+    client = max(cnames, key=lambda k: cnames[k]) if cnames and not addrs else None
+    cluster, version = info.get(addr if client is None else client, ("", ""))
+    return fmt, addr, cluster, version, client
 
 
 _DAY_CACHE = {}
@@ -4390,6 +4468,8 @@ class LogMember(object):
         self.migkeep = {}                   # migration kind -> Sample of [t, kind, level, text, record number]
         self.migbins = {}                   # migration kind -> Bins (all the lines, counted)
         self.migprocs = []                  # migration plans: {s, e, rt, p, c, r, tot, o, el, pts}
+        self.client_name = None             # a client's logs: its instance name (hz.client_1)
+        self.insts = {}                     # instance name in its threads' names (hz.<name>.cached.thread-3) -> records
 
 
 class ExcGroup(object):
@@ -4515,8 +4595,13 @@ class LogCollector(object):
             m = HZ_LOCAL_RE.match(msg)
             if m:
                 msg = msg[m.end():]
+                if not lm.version and lm.client_name:
+                    lm.cluster, lm.version = m.group(1), m.group(2)
             else:
                 hzline = logger.startswith(HZ_LOGGER_PREFIXES)
+        if thread[:3] == "hz.":
+            inst = thread[3:].split(".", 1)[0]
+            lm.insts[inst] = lm.insts.get(inst, 0) + 1
         if level in ("W", "E"):
             lm.levels.add(t, 0 if level == "W" else 1)
         if "heap.memory.used=" in msg or ("processors=" in msg and "load.process=" in msg):
@@ -4803,12 +4888,30 @@ def match_log_members(logfiles, members, wanted):
     def norm(h, p):
         h = norm_host(h)
         return ("127.0.0.1" if h in ("localhost", "127.0.0.1", "::1", "0:0:0:0:0:0:0:1") else h, p)
-    by_addr = {}
+    by_addr, by_client = {}, {}
     for i, m in enumerate(members):
         if m.key[0] == "addr":
             by_addr.setdefault(norm(m.key[1], m.key[2]), []).append(i)
+        elif m.key[0] == "client":
+            by_client.setdefault(m.key[1], []).append(i)
     lms = {}
     for lf in logfiles:
+        if lf.log_client is not None:           # a client's log: with the client's diagnostics (same instance name)
+            key = ("client", lf.log_client, lf.reldir)
+            lm = lms.get(key)
+            if lm is None:
+                lm = lms[key] = LogMember(key, "client " + lf.log_client)
+                lm.client_name = lf.log_client
+                hits = by_client.get(lf.log_client, [])
+                if len(hits) > 1:               # several clients of that name: the one whose files are nearest
+                    near = [i for i in hits if any(d == lf.reldir or d.startswith(lf.reldir + "/") or lf.reldir == "." or
+                                                   lf.reldir.startswith(d + "/") for d in members[i].dirs)]
+                    hits = near
+                if len(hits) == 1:
+                    lm.index = hits[0]
+                    lm.label = members[hits[0]].label
+            lm.files.append(lf)
+            continue
         if lf.log_addr is not None:
             key = norm(*lf.log_addr)
             label = member_label(lf.log_addr[0], lf.log_addr[1])
@@ -4829,6 +4932,11 @@ def match_log_members(logfiles, members, wanted):
             if lm.index is not None:
                 return True
             for w in wanted:
+                if lm.key[0] == "client":
+                    ws = w.strip()
+                    if ws and (ws.lower() == "client" or ws == lm.client_name or ws in lm.label):
+                        return True
+                    continue
                 if lm.key[0] == "file":
                     if w.strip().strip("/") and w.strip().strip("/") in lm.label:
                         return True
@@ -4845,7 +4953,7 @@ def parse_member_logs(lms, members, ctx, disp_offset, quiet):
     """Read every member log; returns the collector. Log-only members get indices after the diagnostics members."""
     col = LogCollector()
     nxt = len(members)
-    for lm in sorted(lms, key=lambda x: x.label):
+    for lm in sorted(lms, key=lambda x: (x.client_name is not None, x.label)):     # the clients after the members
         if lm.index is None:
             lm.index = nxt
             nxt += 1
@@ -4954,6 +5062,825 @@ def health_values(times, vals, counter):
     return out
 
 
+# --------------------------------------------------------------------------- thread dumps
+# jstack / kill -3 / jcmd Thread.print (a date line, then "Full thread dump ..."; anywhere in a file, several per file);
+# jcmd Thread.dump_to_file (plain text "#tid "name"" headers, or JSON); and the simple formats applications write
+# ("name" daemon=false state=WAITING, then "at ..." lines).
+TD_MARK = b"Full thread dump"
+TD_DATE_RE = re.compile(r"^(\d{4})-(\d\d)-(\d\d)[ T](\d\d):(\d\d):(\d\d)(?:[.,]\d+)?\s*$")
+TD_ISO_RE = re.compile(r"^(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d):(\d\d)(?:\.(\d+))?(Z|[+-]\d\d:?\d\d)\s*$")
+TD_HEAD_RE = re.compile(r'^"(?P<name>.*)"(?P<rest>(?:\s.*)?)$')
+TD_HEAD_PLAIN_RE = re.compile(r'^#(?P<tid>\d+) "(?P<name>.*)"(?P<rest>.*)$')
+TD_STATE_RE = re.compile(r"^\s+java\.lang\.Thread\.State: (\w+)(?: \((.*)\))?")
+TD_STATE_ATTR_RE = re.compile(r"\bstate=(\w+)")
+TD_FRAME_RE = re.compile(r"^\s+at (\S.*?)\s*$")
+TD_LOCK_RE = re.compile(r"^\s+- (locked|waiting to lock|waiting on|parking to wait for|eliminated|waiting to re-lock in wait\(\))\s+"
+                        r"<(0x[0-9a-fA-F]+)> \(a (.+?)\)")
+TD_OWNABLE_RE = re.compile(r"^\s+- <(0x[0-9a-fA-F]+)> \(a (.+?)\)")
+TD_CPU_RE = re.compile(r"\bcpu=([\d.]+)ms")
+TD_KEEP_RE = re.compile(r"^(?:Threads class SMR info|_java_thread_list=|0x[0-9a-fA-F]|\}|JNI global refs|Heap\s*$|Found (?:one|\d+) "
+                        r"Java-level deadlock|Found \d+ deadlock|=====|Java stack information|Locked ownable|Thread-local|Compiler)")
+TD_MODULE_RE = re.compile(r"\((?:[\w.$-]+@[\w.+-]+/|[\w.$-]+//?)")
+TD_PREFIX_RE = re.compile(r"^(?:app//|[\w.$-]+@[\w.+-]+/|[\w.$-]+/(?=[\w$]))")
+FNAME_TIME_RE = re.compile(r"(?<!\d)(20\d\d)[-_.]?(0[1-9]|1[0-2])[-_.]?(0[1-9]|[12]\d|3[01])[-_T. ]?([01]\d|2[0-3])[-_:.h]?([0-5]\d)[-_:.m]?"
+                           r"([0-5]\d)(?!\d)")
+FNAME_EPOCH_RE = re.compile(r"(?<!\d)(1[5-9]\d{11}|2[01]\d{11})(?!\d)")
+# the frames a waiting thread sits in, whatever it waits for: the frame after them says what it waits for
+TD_WAIT_RE = re.compile(r"^(?:jdk\.internal\.misc\.Unsafe\.park|java\.util\.concurrent\.locks\.(?:LockSupport|AbstractQueuedSynchronizer|"
+                        r"AbstractQueuedLongSynchronizer|ReentrantLock|ReentrantReadWriteLock|StampedLock)|java\.util\.concurrent\.ForkJoinPool\."
+                        r"(?:unmanagedBlock|managedBlock|compensatedBlock)|java\.lang\.Object\.wait|java\.lang\.Thread\.(?:sleep|onSpinWait|yield)|"
+                        r"java\.lang\.VirtualThread\.(?:park|parkNanos)|java\.util\.concurrent\.CompletableFuture\$Signaller|"
+                        r"java\.util\.concurrent\.TimeUnit\.sleep|"
+                        r"sun\.nio\.ch\.(?:EPoll\.wait|KQueue\.poll|WEPoll\.wait|Net\.poll|SocketDispatcher|NioSocketImpl\.park))")
+# a thread with nothing to do: waiting for its next task, or in select()
+TD_IDLE_RE = re.compile(r"ThreadPoolExecutor\.getTask|DelayedWorkQueue\.take|LinkedBlockingQueue\.(?:take|poll)|LinkedBlockingDeque\.(?:take|poll)|"
+                        r"ArrayBlockingQueue\.(?:take|poll)|SynchronousQueue|LinkedTransferQueue|PriorityBlockingQueue\.take|DelayQueue\.take|"
+                        r"ForkJoinPool\.awaitWork|SelectorImpl\.(?:select|lockAndDoSelect)|EPollSelectorImpl|KQueueSelectorImpl|"
+                        r"NioThread\.(?:selectLoop|select)|MPSCQueue\.take|OperationQueueImpl\.take|"
+                        r"Reference\.waitForReferencePendingList|ReferenceQueue\.remove|Finalizer\$FinalizerThread|TimerThread\.mainLoop|"
+                        r"CleanerImpl\.run|EPoll\.wait|ProcessHandleImpl|ServerSocket\.accept|ServerSocketChannelImpl\.accept|"
+                        r"HealthMonitor|InvocationMonitor\$MonitorInvocationsTask|BlockingQueue\.take|DelayQueue\.poll|"
+                        r"SlowOperationDetector|OperationThreadSamplerPlugin|DiagnosticsLogFile|MetricsCollector|ClockMonitor")
+TD_JDK_RE = re.compile(r"^(?:java|javax|jdk|sun|com\.sun|kotlin|scala)\.")
+TD_MAX_TEXT = 3 * 1024 * 1024       # characters of a dump's text kept in the report
+
+
+def td_frame(text):
+    """A frame without its module (java.base@21/...): 'java.lang.Thread.run(Thread.java:1583)'."""
+    text = TD_PREFIX_RE.sub("", text.strip())
+    return TD_MODULE_RE.sub("(", text)
+
+
+def td_short(frame):
+    """'com.hazelcast.client.impl.spi.ClientProxy.invokeOnPartition(ClientProxy.java:189)' -> 'ClientProxy.invokeOnPartition'."""
+    head = frame.split("(", 1)[0]
+    parts = head.split(".")
+    return ".".join(parts[-2:]) if len(parts) >= 2 else head
+
+
+def scan_thread_dumps(path, whole):
+    """The thread dumps in a file: [(lines, format, start line)]. jstack-style dumps are found anywhere (logs, console
+    output); whole: the file may also be a dump in one of the other formats (it is not a log)."""
+    try:
+        if not whole:
+            if not file_has(path, TD_MARK):
+                return []
+        with open_text(path) as f:
+            first = []
+            out, cur, prev = [], None, []
+            for no, line in enumerate(f):
+                s = line.rstrip("\r\n")
+                if no < 8:
+                    first.append(s)
+                if cur is None:
+                    if s.startswith("Full thread dump"):
+                        head = [x for x in prev[-2:] if TD_DATE_RE.match(x) or re.match(r"^\d+:\s*$", x)]
+                        cur = {"lines": head + [s], "start": no - len(head), "jni": False, "skip": 0}
+                    elif s.strip():
+                        prev = (prev + [s])[-2:]
+                    continue
+                if not s.strip() or s[:1] in ('"', " ", "\t") or TD_KEEP_RE.match(s):
+                    if s.startswith("JNI global refs"):
+                        cur["jni"] = True
+                    cur["lines"].append(s)
+                    cur["skip"] = 0
+                    if len(cur["lines"]) > 400000:
+                        out.append(cur)
+                        cur = None
+                    continue
+                if not cur["jni"] and cur["skip"] < 200 and not s.startswith("Full thread dump"):
+                    cur["skip"] += 1                    # a line of another thread's output in the middle of the dump
+                    continue
+                out.append(cur)
+                cur = None
+                if s.startswith("Full thread dump"):
+                    head = [x for x in prev[-2:] if TD_DATE_RE.match(x)]
+                    cur = {"lines": head + [s], "start": no - len(head), "jni": False, "skip": 0}
+                prev = [s]
+            if cur is not None:
+                out.append(cur)
+    except (OSError, EOFError, UnicodeError):
+        return []
+    dumps = [(d["lines"], "jstack", d["start"]) for d in out]
+    if dumps or not whole:
+        return dumps
+    # the other formats: the whole file is one dump
+    try:
+        with open_text(path) as f:
+            text = f.read(64 * 1024 * 1024)
+    except (OSError, EOFError, UnicodeError):
+        return []
+    t0 = text.lstrip()
+    if t0.startswith("{") and '"threadDump"' in t0[:2000]:
+        return [(text, "json", 0)]
+    lines = text.splitlines()
+    heads = sum(1 for x in lines[:200000] if x.startswith('"') and TD_HEAD_RE.match(x))
+    plain = sum(1 for x in lines[:200000] if x.startswith("#") and TD_HEAD_PLAIN_RE.match(x))
+    frames = sum(1 for x in lines[:200000] if x[:1] in (" ", "\t") and (TD_FRAME_RE.match(x) or "(" in x))
+    if plain >= 3 and frames >= plain:
+        return [(lines, "plain", 0)]
+    if heads >= 3 and frames >= heads:
+        return [(lines, "simple", 0)]
+    return []
+
+
+def file_has(path, needle, chunk=8 * 1024 * 1024):
+    """Whether the raw bytes of a file (.gz unpacked) contain needle."""
+    with (gzip.open(path, "rb") if path.lower().endswith(".gz") else open(path, "rb")) as f:
+        tail = b""
+        while True:
+            data = f.read(chunk)
+            if not data:
+                return False
+            if needle in tail + data[:len(needle)] or needle in data:
+                return True
+            tail = data[-len(needle):]
+
+
+def parse_thread_dump(lines, fmt):
+    """[thread], the deadlock section's lines, the Heap section's lines, the VM line, the printed time (text) and
+    the time as epoch millis (JSON and plain formats, in UTC)."""
+    threads, deadlock, heap = [], [], []
+    vm, printed, epoch = "", None, None
+    if fmt == "json":
+        try:
+            doc = json.loads(lines)["threadDump"]
+        except (ValueError, KeyError, TypeError):
+            return [], [], [], "", None, None
+        epoch = iso_epoch(doc.get("time") or "")
+        vm = "runtime " + str(doc.get("runtimeVersion") or "")
+        for c in doc.get("threadContainers") or []:
+            for t in c.get("threads") or []:
+                frames = [td_frame(x) for x in t.get("stack") or []]
+                threads.append({"name": str(t.get("name", "")), "daemon": None, "state": "?", "detail": "", "frames": frames,
+                                "locks": [], "owns": [], "cpu": None, "virtual": bool(t.get("virtual"))})
+        return threads, deadlock, heap, vm, None, epoch
+    cur, section, owns = None, None, False
+    for i, s in enumerate(lines):
+        if fmt == "plain" and i < 4:
+            if i == 1:
+                epoch = iso_epoch(s.strip())
+            elif i == 2 and s.strip():
+                vm = "runtime " + s.strip()
+            continue
+        if section == "deadlock":
+            deadlock.append(s)
+            if re.match(r"^Found \d+ deadlocks?\.", s):
+                section = None
+            continue
+        if re.match(r"^Found (?:one|\d+) Java-level deadlocks?", s):
+            section = "deadlock"
+            deadlock.append(s)
+            continue
+        if s.strip() == "Heap" and not s[:1].isspace():
+            section = "heap"
+            continue
+        if section == "heap":
+            if s[:1] == " " and s.strip():
+                heap.append(s.strip())
+                continue
+            section = None
+        if s.startswith("Full thread dump"):
+            vm = s[len("Full thread dump"):].strip().rstrip(":")
+            continue
+        if printed is None and TD_DATE_RE.match(s):
+            printed = s.strip()
+            continue
+        m = TD_HEAD_PLAIN_RE.match(s) if fmt == "plain" and s[:1] == "#" else (TD_HEAD_RE.match(s) if s[:1] == '"' else None)
+        if m:
+            rest = m.group("rest") or ""
+            st = TD_STATE_ATTR_RE.search(rest)
+            cpu = TD_CPU_RE.search(rest)
+            cur = {"name": m.group("name"), "daemon": " daemon" in rest or "daemon=true" in rest, "state": st.group(1) if st else "",
+                   "detail": "", "frames": [], "locks": [], "owns": [], "cpu": float(cpu.group(1)) if cpu else None,
+                   "virtual": "virtual" in rest}
+            threads.append(cur)
+            owns = False
+            continue
+        if cur is None:
+            continue
+        if not s.strip():
+            owns = False
+            continue
+        if fmt == "plain":
+            cur["frames"].append(td_frame(s))
+            continue
+        m = TD_STATE_RE.match(s)
+        if m:
+            cur["state"], cur["detail"] = m.group(1), m.group(2) or ""
+            continue
+        m = TD_FRAME_RE.match(s)
+        if m:
+            cur["frames"].append(td_frame(m.group(1)))
+            continue
+        if "Locked ownable synchronizers" in s:
+            owns = True
+            continue
+        m = TD_LOCK_RE.match(s)
+        if m:
+            cur["locks"].append((m.group(1), m.group(2).lower(), m.group(3)))
+            continue
+        if owns:
+            m = TD_OWNABLE_RE.match(s)
+            if m:
+                cur["owns"].append((m.group(1).lower(), m.group(2)))
+    for t in threads:
+        if not t["state"]:
+            t["state"] = "JVM" if not t["frames"] and fmt in ("jstack", "simple") else "?"
+    return threads, deadlock, heap, vm, printed, epoch
+
+
+def iso_epoch(text):
+    m = TD_ISO_RE.match(text.strip())
+    if not m:
+        return None
+    g = m.groups()
+    t = day_ms(int(g[0]), int(g[1]), int(g[2])) + ((int(g[3]) * 60 + int(g[4])) * 60 + int(g[5])) * 1000 + frac_ms(g[6])
+    return t - (zone_ms(g[7]) or 0)
+
+
+def td_where(frames):
+    """(the frame a thread is in, below the waiting primitives; the first frame of the application's own code; idle)."""
+    where = None
+    for f in frames[:40]:
+        if not TD_WAIT_RE.match(f):
+            where = f
+            break
+    idle = False
+    for f in frames[:14]:
+        if TD_IDLE_RE.search(f):
+            idle = True
+            break
+        if not TD_WAIT_RE.match(f) and not TD_JDK_RE.match(f) and not f.startswith("com.hazelcast.internal.util.concurrent") \
+                and not f.startswith("com.hazelcast.spi.impl.operationexecutor"):
+            break
+    app = next((f for f in frames if not TD_JDK_RE.match(f) and not f.startswith("com.hazelcast.")), None)
+    return where, app, idle
+
+
+def analyze_thread_dump(threads, deadlock):
+    """What a person reads first in a thread dump: the states, the threads grouped by the same stack (top frames), the
+    thread families (names without their number), the contended locks, the deadlocks, the busiest threads (CPU)."""
+    states = {}
+    for t in threads:
+        states[t["state"]] = states.get(t["state"], 0) + 1
+    groups = {}
+    for t in threads:
+        key = (t["state"], tuple(t["frames"][:12]))
+        groups.setdefault(key, []).append(t)
+    rows = []
+    for (state, top), ts in groups.items():
+        where, app, idle = td_where(list(top) + ts[0]["frames"][12:40])
+        rows.append({"n": len(ts), "state": state, "idle": idle or not top, "where": td_short(where) if where else "",
+                     "app": td_short(app) if app and app != where else "", "frames": ts[0]["frames"][:30],
+                     "names": [t["name"] for t in ts[:25]], "more": max(0, len(ts) - 25)})
+    rows.sort(key=lambda r: (r["idle"], -r["n"], r["state"], r["names"][0] if r["names"] else ""))
+    fams = {}
+    for t in threads:
+        f = re.sub(r"\d+$", "#", t["name"])
+        x = fams.setdefault(f, {"family": f, "n": 0, "states": {}, "idle": 0})
+        x["n"] += 1
+        x["states"][t["state"]] = x["states"].get(t["state"], 0) + 1
+        if not t["frames"] or td_where(t["frames"])[2]:
+            x["idle"] += 1
+    fam = sorted(fams.values(), key=lambda x: (-x["n"], x["family"]))
+    owner, waiters = {}, {}
+    for t in threads:
+        for kind, addr, cls in t["locks"]:
+            if kind == "locked":
+                owner.setdefault(addr, (t["name"], cls))
+            elif kind in ("waiting to lock", "waiting to re-lock in wait()") or (
+                    kind == "parking to wait for" and re.search(r"Reentrant|ReadWrite|StampedLock|Semaphore|\$\w*Sync$", cls)
+                    and not cls.endswith("ConditionObject")):
+                waiters.setdefault(addr, [cls, []])[1].append(t["name"])
+        for addr, cls in t["owns"]:
+            owner.setdefault(addr, (t["name"], cls))
+    locks = []
+    for addr, (cls, ws) in waiters.items():
+        o = owner.get(addr)
+        locks.append({"lock": addr, "class": cls, "owner": o[0] if o else None, "waiters": len(ws), "names": ws[:15]})
+    locks.sort(key=lambda x: -x["waiters"])
+    # deadlocks: the JVM's own report, else a cycle of monitor owners and waiters
+    dl = []
+    names = [re.match(r'^"(.*)":\s*$', s).group(1) for s in deadlock if re.match(r'^"(.*)":\s*$', s)]
+    if names:
+        seen = []
+        for n in names:
+            if n not in seen:
+                seen.append(n)
+        dl = seen
+    else:
+        waits = {}
+        for t in threads:
+            for kind, addr, _cls in t["locks"]:
+                if kind == "waiting to lock" and addr in owner:
+                    waits[t["name"]] = owner[addr][0]
+        for start in waits:
+            path, cur = [start], waits.get(start)
+            while cur is not None and cur not in path and len(path) < 50:
+                path.append(cur)
+                cur = waits.get(cur)
+            if cur == start and len(path) > 1:
+                dl = path
+                break
+    cpu = sorted((t for t in threads if t["cpu"] is not None), key=lambda t: -t["cpu"])[:8]
+    return {"n": len(threads), "states": states, "daemon": sum(1 for t in threads if t["daemon"]),
+            "virtual": sum(1 for t in threads if t.get("virtual")), "groups": rows[:60], "ngroups": len(rows),
+            "families": fam[:40], "locks": locks[:30], "deadlock": dl,
+            "cpu": [{"name": t["name"], "cpu_ms": t["cpu"], "state": t["state"]} for t in cpu if t["cpu"] > 0]}
+
+
+# --------------------------------------------------------------------------- heap dumps
+# HPROF (jmap -dump, jcmd GC.heap_dump, -XX:+HeapDumpOnOutOfMemoryError; .gz too): the time it was taken (in the
+# header), and a quick look: a class histogram (instances and approximate shallow size), the largest objects, the
+# Hazelcast classes, the GC roots and threads. Retained sizes need the whole object graph: Eclipse MAT's job.
+HPROF_MAGIC = b"JAVA PROFILE 1.0."
+HPROF_TYPES = {2: 0, 4: 1, 5: 2, 6: 4, 7: 8, 8: 1, 9: 2, 10: 4, 11: 8}         # basic type -> bytes (2: an object id)
+HPROF_PRIM = {4: "boolean[]", 5: "char[]", 6: "float[]", 7: "double[]", 8: "byte[]", 9: "short[]", 10: "int[]", 11: "long[]"}
+HPROF_ROOTS = {0xFF: "unknown", 0x01: "JNI global", 0x02: "JNI local", 0x03: "Java frame", 0x04: "native stack", 0x05: "system class",
+               0x06: "thread block", 0x07: "busy monitor", 0x08: "thread"}
+
+
+def hprof_open(path):
+    """The file, unpacked when it is gzip (by its first bytes: jcmd GC.heap_dump -gz=1 keeps the name it is given)."""
+    with open(path, "rb") as f:
+        packed = f.read(2) == b"\x1f\x8b"
+    return gzip.open(path, "rb") if packed else open(path, "rb")
+
+
+def hprof_header(path):
+    """(format, id size, epoch millis) of an HPROF file, or None."""
+    try:
+        with hprof_open(path) as f:
+            head = f.read(40)
+    except (OSError, EOFError):
+        return None
+    if not head.startswith(HPROF_MAGIC):
+        return None
+    i = head.find(b"\0")
+    if i < 0 or len(head) < i + 13:
+        return None
+    ids, ts = struct.unpack(">IQ", head[i + 1:i + 13])
+    return head[:i].decode("ascii", "replace"), ids, ts
+
+
+def hprof_class_name(raw):
+    """JVM names: java/lang/String -> java.lang.String, [Ljava/lang/Object; -> java.lang.Object[], [[I -> int[][]."""
+    dims = 0
+    while raw.startswith("["):
+        dims += 1
+        raw = raw[1:]
+    if dims:
+        prim = {"Z": "boolean", "C": "char", "F": "float", "D": "double", "B": "byte", "S": "short", "I": "int", "J": "long"}
+        raw = prim.get(raw, raw[1:-1] if raw.startswith("L") and raw.endswith(";") else raw)
+    return raw.replace("/", ".") + "[]" * dims
+
+
+def read_hprof(path, deadline=None):
+    """The quick look at a heap dump (see above). deadline: time.time() past which the histogram stops (partial)."""
+    h = hprof_header(path)
+    if h is None:
+        return None
+    fmt, IDS, ts = h
+    if IDS not in (4, 8):
+        return {"format": fmt, "epoch": ts, "error": "object ids of %d bytes" % IDS}
+    idc = "Q" if IDS == 8 else "I"
+    S_rec = struct.Struct(">BII")
+    S_inst = struct.Struct(">" + idc + "I" + idc + "I")
+    S_oarr = struct.Struct(">" + idc + "II" + idc)
+    S_parr = struct.Struct(">" + idc + "IIB")
+    S_id = struct.Struct(">" + idc)
+    S_u2 = struct.Struct(">H")
+    strings, classes = {}, {}           # string id -> bytes; class object id -> name string id
+    inst = {}                           # class id -> [instances, instance data bytes]
+    arrs = {}                           # array class id (or -type for primitive arrays) -> [arrays, elements, shallow bytes w/o refs]
+    cdump = {}                          # class id -> (super id, instance field types)
+    roots, nthreads = {}, 0
+    big = []                            # the largest objects: (bytes, class key, elements)
+    maxid = 0
+    partial = False
+    root_size = {0xFF: IDS, 0x01: 2 * IDS, 0x02: IDS + 8, 0x03: IDS + 8, 0x04: IDS + 4, 0x05: IDS, 0x06: IDS + 4, 0x07: IDS, 0x08: IDS + 8}
+    seekable = not path.lower().endswith(".gz")
+    CH = 4 * 1024 * 1024
+    with hprof_open(path) as f:
+        f.read(len(fmt) + 1 + 12)
+        while True:
+            head = f.read(9)
+            if len(head) < 9:
+                break
+            tag, _t, ln = S_rec.unpack(head)
+            if tag == 0x01:                             # STRING: id, utf-8
+                data = f.read(ln)
+                strings[S_id.unpack_from(data, 0)[0]] = data[IDS:]
+                continue
+            if tag == 0x02:                             # LOAD CLASS: serial, class id, stack serial, name id
+                data = f.read(ln)
+                classes[S_id.unpack_from(data, 4)[0]] = S_id.unpack_from(data, 8 + IDS)[0]
+                continue
+            if tag not in (0x0C, 0x1C) or partial:      # not a heap dump (segment)
+                if seekable:
+                    f.seek(ln, 1)
+                else:
+                    while ln > 0:
+                        n = len(f.read(min(ln, CH)))
+                        if not n:
+                            break
+                        ln -= n
+                continue
+            rem = ln
+            b = f.read(min(CH, rem))
+            rem -= len(b)
+            p, n = 0, len(b)
+            while True:
+                if n - p < 512 and rem > 0:
+                    data = f.read(min(CH, rem))
+                    rem -= len(data)
+                    b = b[p:] + data
+                    p, n = 0, len(b)
+                if p >= n:
+                    break
+                sub = b[p]
+                if sub == 0x21:                         # INSTANCE: id, stack serial, class id, bytes, data
+                    oid, _s, cid, nb = S_inst.unpack_from(b, p + 1)
+                    c = inst.get(cid)
+                    if c is None:
+                        inst[cid] = [1, nb]
+                    else:
+                        c[0] += 1
+                    end = p + 1 + S_inst.size + nb
+                elif sub == 0x23:                       # PRIMITIVE ARRAY: id, stack serial, elements, type, data
+                    oid, _s, ne, ty = S_parr.unpack_from(b, p + 1)
+                    es = HPROF_TYPES.get(ty, 1)
+                    sz = (16 + ne * es + 7) & ~7
+                    k = -ty
+                    c = arrs.get(k)
+                    if c is None:
+                        arrs[k] = [1, ne, sz]
+                    else:
+                        c[0] += 1
+                        c[1] += ne
+                        c[2] += sz
+                    if sz > 65536:
+                        big.append((sz, k, ne, oid))
+                    end = p + 1 + S_parr.size + ne * es
+                elif sub == 0x22:                       # OBJECT ARRAY: id, stack serial, elements, class id, ids
+                    oid, _s, ne, cid = S_oarr.unpack_from(b, p + 1)
+                    c = arrs.get(cid)
+                    if c is None:
+                        arrs[cid] = [1, ne, 0]
+                    else:
+                        c[0] += 1
+                        c[1] += ne
+                    if ne > 16384:
+                        big.append((ne, cid, ne, oid))
+                    end = p + 1 + S_oarr.size + ne * IDS
+                elif sub == 0x20:                       # CLASS: id, stack, super, loader, signers, domain, 2 reserved, size...
+                    if n - p < 65536 and rem > 0:       # (variable length: have it all in the buffer)
+                        data = f.read(min(CH, rem))
+                        rem -= len(data)
+                        b = b[p:] + data
+                        p, n = 0, len(b)
+                    cid = S_id.unpack_from(b, p + 1)[0]
+                    sup = S_id.unpack_from(b, p + 1 + IDS + 4)[0]
+                    q = p + 1 + 7 * IDS + 4 + 4
+                    ncp = S_u2.unpack_from(b, q)[0]
+                    q += 2
+                    for _i in range(ncp):
+                        ty = b[q + 2]
+                        q += 3 + (HPROF_TYPES.get(ty, 0) or IDS)
+                    nst = S_u2.unpack_from(b, q)[0]
+                    q += 2
+                    for _i in range(nst):
+                        ty = b[q + IDS]
+                        q += IDS + 1 + (HPROF_TYPES.get(ty, 0) or IDS)
+                    nfi = S_u2.unpack_from(b, q)[0]
+                    q += 2
+                    types = bytes(b[q + IDS + j * (IDS + 1)] for j in range(nfi))
+                    q += nfi * (IDS + 1)
+                    cdump[cid] = (sup, types)
+                    end = q
+                    oid = 0
+                elif sub in root_size:
+                    if sub == 0x08:
+                        nthreads += 1
+                    roots[sub] = roots.get(sub, 0) + 1
+                    end = p + 1 + root_size[sub]
+                    oid = 0
+                else:                                   # a sub-record we do not know (not HotSpot): stop here
+                    partial = True
+                    break
+                if oid > maxid:
+                    maxid = oid
+                if end <= n:
+                    p = end
+                else:                                   # the rest of a big array: skip it
+                    skip = end - n
+                    rem -= skip
+                    if seekable:
+                        f.seek(skip, 1)
+                    else:
+                        while skip > 0:
+                            k = len(f.read(min(skip, CH)))
+                            if not k:
+                                break
+                            skip -= k
+                    b, p, n = b"", 0, 0
+                if deadline is not None and (len(inst) & 1023) == 0 and time.time() > deadline:
+                    partial = True
+                    break
+            if rem > 0 and not partial:                 # the segment was not read to its end
+                partial = True
+        pos = f.tell()
+    # sizes: compressed references when the heap sits below 32 GB (object ids are addresses)
+    comp = IDS == 8 and maxid < (1 << 35)
+    ref = 4 if (comp or IDS == 4) else 8
+    hdr = 12 if ref == 4 else 16
+    names = {}
+
+    def cname(cid):
+        nm = names.get(cid)
+        if nm is None:
+            sid = classes.get(cid)
+            raw = strings.get(sid, b"") if sid is not None else b""
+            nm = names[cid] = hprof_class_name(raw.decode("utf-8", "replace")) if raw else "class@%x" % cid
+        return nm
+    fields = {}
+
+    def fbytes(cid, depth=0):
+        v = fields.get(cid)
+        if v is None:
+            c = cdump.get(cid)
+            if c is None or depth > 60:
+                return None
+            own = sum((HPROF_TYPES.get(t, 0) or ref) for t in c[1])
+            sup = fbytes(c[0], depth + 1) if c[0] else 0
+            v = fields[cid] = own + (sup or 0)
+        return v
+    hist = []
+    for cid, (cnt, nb) in inst.items():
+        fb = fbytes(cid)
+        one = (hdr + fb + 7) & ~7 if fb is not None else (16 + nb + 7) & ~7
+        hist.append([cname(cid), cnt, cnt * one])
+    for k, (cnt, ne, sz) in arrs.items():
+        if k < 0:
+            hist.append([HPROF_PRIM.get(-k, "?[]"), cnt, sz])
+        else:
+            hist.append([cname(k), cnt, cnt * ((hdr + 4 + 7) & ~7) + ne * ref])
+    hist.sort(key=lambda r: -r[2])
+    objs = sum(r[1] for r in hist)
+    total = sum(r[2] for r in hist)
+    big.sort(key=lambda x: -x[0])
+    largest = []
+    for v, k, ne, _oid in big[:20]:
+        if k < 0:
+            largest.append([HPROF_PRIM.get(-k, "?[]"), v, ne])
+        else:
+            largest.append([cname(k), ((hdr + 4 + ne * ref + 7) & ~7), ne])
+    largest.sort(key=lambda r: -r[1])
+    hz = [r for r in hist if r[0].startswith("com.hazelcast.")]
+    return {"format": fmt, "ids": IDS, "epoch": ts, "objects": objs, "bytes": total, "classes": len(classes),
+            "instances_classes": len(inst), "compressed": comp, "threads": nthreads,
+            "roots": dict((HPROF_ROOTS[k], v) for k, v in sorted(roots.items())),
+            "top": hist[:60], "top_count": sorted(hist, key=lambda r: -r[1])[:30], "largest": largest[:15],
+            "hz": hz[:40], "hz_total": [sum(r[1] for r in hz), sum(r[2] for r in hz)], "partial": partial,
+            "read": pos if partial else None}
+
+
+HEAP_EXTS = (".hprof", ".bin", ".dump", ".heap")
+TD_EXTS = (".tdump", ".jstack", ".threads", ".json", ".dump")
+DUMP_WORDS = frozenset("heap heapdump hprof dump dumps thread threads threaddump tdump jstack jcmd stack stacks td hd java pid oom out "
+                       "stdout stderr console log logs txt json diagnostics gc bin".split())
+TD_MAX_TOTAL = 24 * 1024 * 1024     # characters of thread dump text kept in the report, all together
+
+
+def name_tokens(name):
+    """The words of a file name that say whose it is: member-2.out -> {member, 2}; dates, epochs, dump words left out."""
+    low = FNAME_EPOCH_RE.sub(" ", FNAME_TIME_RE.sub(" ", name.lower()))
+    low = re.sub(r"\d{8,}", " ", low)
+    return set(t for t in re.split(r"[^a-z0-9]+", low) if t and t not in DUMP_WORDS)
+
+
+def fname_time(name):
+    """A local date-time in a file name (client-threads-20261112-152146.txt), as display millis, or None."""
+    m = FNAME_TIME_RE.search(name)
+    if not m:
+        return None
+    g = [int(x) for x in m.groups()]
+    return day_ms(g[0], g[1], g[2]) + ((g[3] * 60 + g[4]) * 60 + g[5]) * 1000
+
+
+def lane_prefixes(members, lms):
+    """Per lane (member, client, member logs): the beginnings of its threads' names (hz.naughty_shockley.,
+    hz.client_1.), from the thread tags of its metrics and the threads in its logs."""
+    out = {}
+
+    def add(mi, inst):
+        if inst and inst != "hz":
+            out.setdefault(mi, set()).update(("hz." + inst + ".", inst + "."))
+    for mi, m in enumerate(members):
+        for u in m.units:
+            for f in u.files:
+                add(mi, f.inst)
+            seen = 0
+            for attrs in u.series:
+                if "thread=hz." in attrs:
+                    a = INST_THREAD_RE.search(attrs + ",")
+                    if a:
+                        add(mi, a.group(1))
+                        seen += 1
+                        if seen > 50:
+                            break
+    for lm in lms:
+        for inst, n in lm.insts.items():
+            if n >= 2:
+                add(lm.index, inst)
+        if lm.client_name:
+            add(lm.index, lm.client_name)
+    return out
+
+
+def match_lane(names, prefixes):
+    """The lane whose threads these are (the most names starting with its prefixes, at least 2), or None."""
+    score = []
+    for mi, ps in prefixes.items():
+        ps = tuple(ps)
+        n = sum(1 for nm in names if nm.startswith(ps))
+        if n:
+            score.append((n, mi))
+    score.sort(reverse=True)
+    if score and score[0][0] >= 2 and (len(score) == 1 or score[0][0] > score[1][0]):
+        return score[0][1]
+    return None
+
+
+def match_by_name(name, lane_files):
+    """The lane whose file names hold every word of this dump's file name, with the fewest other words."""
+    want = name_tokens(name)
+    if not want:
+        return None
+    best = []
+    for mi, names in lane_files.items():
+        extra = min((len(name_tokens(n) - want) for n in names if want <= name_tokens(n)), default=None)
+        if extra is not None:
+            best.append((extra, mi))
+    best.sort()
+    if best and (len(best) == 1 or best[0][0] < best[1][0]):
+        return best[0][1]
+    return None
+
+
+def export_dumps(text_files, heap_paths, members, lms, ctx, args, root):
+    """Thread dumps (in the files that are neither diagnostics, member logs nor GC logs, and jstack-style ones inside
+    member logs and console output) and heap dumps: when each was taken, whose it is, and the quick look at it.
+    Returns (dumps for the report, the paths of the files that held thread dumps)."""
+    prefixes = lane_prefixes(members, lms)
+    lane_files, lane_dirs = {}, {}
+    for mi, m in enumerate(members):
+        lane_files.setdefault(mi, []).extend(f.name for f in m.files)
+        lane_dirs.setdefault(mi, set()).update(f.reldir for f in m.files)
+    for lm in lms:
+        lane_files.setdefault(lm.index, []).extend(f.name for f in lm.files)
+        lane_dirs.setdefault(lm.index, set()).update(f.reldir for f in lm.files)
+
+    def by_folder(path):
+        """The only lane with files in the dump's folder (not the top folder), or None."""
+        d = os.path.relpath(os.path.dirname(os.path.abspath(path)), root).replace(os.sep, "/")
+        d = "." if d in ("", ".") else d
+        hits = [mi for mi, ds in lane_dirs.items() if d in ds]
+        return hits[0] if len(hits) == 1 and d != "." else None
+    wanted = set(range(len(members))) | set(lm.index for lm in lms)
+    out, used, kept = [], set(), 0
+    # without epoch millis in the logs, times are local as printed: a heap dump with the local time in its file name
+    # tells the local offset of the times in UTC (the heap dumps', JSON thread dumps')
+    local_off = None
+    if not ctx.use_epoch:
+        offs = []
+        for path in heap_paths:
+            hd = hprof_header(path)
+            ft = fname_time(os.path.basename(path))
+            if hd is not None and ft is not None and abs(ft - hd[2]) <= 15 * 3600000:
+                offs.append(int(round((ft - hd[2]) / 900000.0)) * 900000)
+        if offs:
+            local_off = max(set(offs), key=offs.count)
+
+    def rel(path):
+        r = os.path.relpath(path, root).replace(os.sep, "/")
+        return r
+
+    def when(printed, epoch, name, first):
+        """(display millis, how it is known)."""
+        if printed:
+            m = TD_DATE_RE.match(printed)
+            g = [int(x) for x in m.groups()]
+            return day_ms(g[0], g[1], g[2]) + ((g[3] * 60 + g[4]) * 60 + g[5]) * 1000, "the date line of the dump"
+        if epoch is not None:
+            if ctx.use_epoch:
+                return epoch + ctx.offset, "the dump itself"
+            ft = fname_time(name)
+            if ft is not None and abs(ft - epoch) <= 15 * 3600000:
+                return ft, "the file name"
+            if local_off is not None:
+                return epoch + local_off, "the dump itself (UTC, moved by the offset a heap dump's file name gives)"
+            return epoch, "the dump itself, as UTC (the members' time zone is not known)"
+        ft = fname_time(name)
+        if ft is not None:
+            return ft, "the file name"
+        for s in first[:5]:
+            m = ISO_ANY_RE.search(s, 0, 160)
+            if m:
+                g = m.groups()
+                t = day_ms(int(g[0]), int(g[1]), int(g[2])) + ((int(g[3]) * 60 + int(g[4])) * 60 + int(g[5])) * 1000 + frac_ms(g[6])
+                z = zone_ms(g[7])
+                if z is not None and ctx.use_epoch:
+                    t = t - z + ctx.offset
+                return t, "a line at the top of the file"
+            m = FNAME_EPOCH_RE.search(s)
+            if m:
+                return int(m.group(1)) + (ctx.offset if ctx.use_epoch else 0), "a line at the top of the file"
+        m = FNAME_EPOCH_RE.search(name)
+        if m:
+            return int(m.group(1)) + (ctx.offset if ctx.use_epoch else 0), "the file name (epoch millis)"
+        return None, "no date in the dump or its file name"
+
+    for lf, whole in text_files:
+        found = scan_thread_dumps(lf.path, whole)
+        if not found:
+            continue
+        used.add(lf.path)
+        for k, (lines, fmt, start) in enumerate(found):
+            threads, deadlock, heap, vm, printed, epoch = parse_thread_dump(lines, fmt)
+            if not threads:
+                continue
+            first = lines.splitlines()[:5] if isinstance(lines, str) else lines[:5]
+            t, how = when(printed, epoch, lf.name, first)
+            names = [x["name"] for x in threads]
+            mi = match_lane(names, prefixes)
+            by = "its threads' names"
+            if mi is None:
+                mi = match_by_name(lf.name, lane_files)
+                by = "its file name"
+            if mi is None:
+                mi = by_folder(lf.path)
+                by = "its folder"
+            if mi is None:
+                by = ""
+            if t is not None and not ctx.inside(t):
+                continue
+            if args.member and mi not in wanted:
+                continue
+            a = analyze_thread_dump(threads, deadlock)
+            text = lines if isinstance(lines, str) else "\n".join(lines)
+            if len(text) > TD_MAX_TEXT or kept + len(text) > TD_MAX_TOTAL:
+                cut = max(0, min(TD_MAX_TEXT, TD_MAX_TOTAL - kept))
+                text = text[:cut] + "\n... (cut: %s characters more)" % format(len(text) - cut, ",")
+            kept += len(text)
+            d = {"k": "thread", "m": -1 if mi is None else mi, "t": None if t is None else int(t), "how": how, "by": by,
+                 "f": rel(lf.path), "line": start + 1, "nth": k + 1, "of": len(found), "fmt": fmt, "vm": vm, "heap": heap,
+                 "dl": deadlock[:80], "txt": text}
+            d.update(a)
+            out.append(d)
+    deadline_s = getattr(args, "heap_seconds", 120)
+    for path in heap_paths:
+        name = os.path.basename(path)
+        size = os.path.getsize(path)
+        if not args.quiet:
+            sys.stderr.write("  [heap dump] %s, %s\n" % (rel(path), human_size(size)))
+        h = None
+        if deadline_s and deadline_s > 0:
+            try:
+                h = read_hprof(path, time.time() + deadline_s)
+            except (OSError, EOFError, struct.error, IndexError, zlib.error) as e:
+                warn("cannot read the heap dump %s: %s" % (path, e))
+        if h is None:
+            hd = hprof_header(path)
+            if hd is None:
+                continue
+            h = {"format": hd[0], "ids": hd[1], "epoch": hd[2], "skipped": True}
+        t, how = when(None, h.get("epoch"), name, [])
+        mi = match_by_name(name, lane_files)
+        by = "its file name"
+        if mi is None:
+            mi = by_folder(path)
+            by = "its folder"
+        if mi is None:                          # a thread dump taken with it: same name words, same minute
+            by = "the thread dump taken with it"
+            for d in out:
+                if d["k"] == "thread" and d["m"] >= 0 and name_tokens(d["f"].rsplit("/", 1)[-1]) == name_tokens(name) and \
+                        d["t"] is not None and t is not None and abs(d["t"] - t) <= 120000:
+                    mi = d["m"]
+                    break
+        if t is not None and not ctx.inside(t):
+            continue
+        if args.member and mi not in wanted:
+            continue
+        d = {"k": "heap", "m": -1 if mi is None else mi, "t": None if t is None else int(t), "how": how,
+             "by": by if mi is not None else "", "f": rel(path), "size": size}
+        d.update(dict((k, v) for k, v in h.items() if k != "epoch"))
+        out.append(d)
+    out.sort(key=lambda d: (d["t"] is None, d["t"] or 0, d["f"], d.get("nth", 0)))
+    return out, used
+
+
 # --------------------------------------------------------------------------- report
 def write_report(path, payload, rows_json):
     raw = json.dumps(payload, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
@@ -4985,18 +5912,22 @@ def build_arg_parser():
                     "(MB/GB...) in any span.\n"
                     "Member logs found there too (hazelcast.log, console output) get their own tabs: health monitor,\n"
                     "exceptions, OutOfMemoryError, notable lines and CP Subsystem activity; GC logs get a GC tab: every\n"
-                    "pause, humongous allocations, full GCs and evacuation failures, heap after GC.",
+                    "pause, humongous allocations, full GCs and evacuation failures, heap after GC.\n"
+                    "Clients' diagnostics and logs get a line of their own, apart from the members. Thread dumps (jstack,\n"
+                    "kill -3 output, jcmd) and heap dumps (.hprof) are marked on the time charts, matched to their member\n"
+                    "or client, and get a Dumps tab: same-stack thread groups, locks, deadlocks; a heap class histogram.",
         epilog="examples:\n"
                "  %(prog)s /data/diagnostics out/\n"
                "  %(prog)s /data/diagnostics out/ --member 10.0.0.1:5701 --member 10.0.0.2\n"
                "  %(prog)s /data/diagnostics out/ --from '27-10-2026 15:00' --to '27-10-2026 16:00'",
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("input_dir", help="directory with the diagnostics files, member logs and/or GC logs (searched "
-                                      "recursively; .gz too)")
+    ap.add_argument("input_dir", help="directory with the diagnostics files, member and client logs, GC logs, thread "
+                                      "and heap dumps (searched recursively; .gz too)")
     ap.add_argument("output_dir", nargs="?", default="hz-diag-report",
                     help="where report.html goes (default ./hz-diag-report)")
     ap.add_argument("-m", "--member", action="append", metavar="HOST[:PORT]",
-                    help="only these members (repeatable); a directory name works for unnamed files")
+                    help="only these members (repeatable); a client by its name (hz.client_1), or 'client' for "
+                         "every client; a directory name works for unnamed files")
     ap.add_argument("--from", dest="time_from", metavar="TIME",
                     help="only data at or after TIME (log time, e.g. '27-10-2026 15:00')")
     ap.add_argument("--to", dest="time_to", metavar="TIME", help="only data at or before TIME")
@@ -5008,6 +5939,9 @@ def build_arg_parser():
     ap.add_argument("--budget", type=int, default=8000000, metavar="N",
                     help="at most about N values for the per-map / per-thread / per-pipeline lines; past it "
                          "those lines get coarser, the rest keeps its resolution (default 8,000,000; 0: no limit)")
+    ap.add_argument("--heap-seconds", type=int, default=120, metavar="N",
+                    help="at most N seconds reading each heap dump for its class histogram (default 120; past it the "
+                         "histogram covers what was read; 0: the time it was taken only)")
     ap.add_argument("--open", action="store_true", help="open the report in a browser when done")
     ap.add_argument("-q", "--quiet", action="store_true", help="don't print progress")
     ap.add_argument("--version", action="version", version="%(prog)s " + __version__)
@@ -5051,12 +5985,23 @@ def choose_time(files):
     return False, 0, "as printed", "time as printed in the logs (no epoch millis in some files)"
 
 
-def run(args):
+class Analysis(object):
+    """What analyze() read and worked out: the report's data (payload, with the profiler rows apart as JSON text in
+    prof["rows_json"]) and the objects it was made from. hz_diag_agent.py uses it too."""
+
+    def __init__(self, **kw):
+        self.__dict__.update(kw)
+
+
+def analyze(args):
+    """Read everything under args.input_dir (input_dir, member, time_from, time_to, points, top, budget, quiet) and work
+    out the report's data. Raises UsageError when there is nothing to read."""
     started = time.time()
     if not os.path.isdir(args.input_dir):
         raise UsageError("not a directory: %s" % args.input_dir)
     root = os.path.abspath(args.input_dir)
-    files = [LogFile(p, root) for p in discover(args.input_dir)]
+    paths, heap_paths = discover(args.input_dir)
+    files = [LogFile(p, root) for p in paths]
     for lf in files:
         lf.peek()
     logfiles = []
@@ -5065,7 +6010,7 @@ def run(args):
             continue
         r = sniff_log(lf.path)
         if r:
-            lf.log_fmt, lf.log_addr, lf.log_cluster, lf.log_version = r
+            lf.log_fmt, lf.log_addr, lf.log_cluster, lf.log_version, lf.log_client = r
             logfiles.append(lf)
     gcfiles = []
     for lf in files:
@@ -5076,11 +6021,13 @@ def run(args):
     gcpaths = set(gf.lf.path for gf in gcfiles)
     skipped = [f for f in files if not f.looks_diag and f.log_fmt is None and f.path not in gcpaths]
     files = [f for f in files if f.looks_diag]
-    if not files and not logfiles and not gcfiles:
-        raise UsageError("no Hazelcast diagnostics files, member logs or GC logs found under %s" % args.input_dir)
+    td_paths = set(f.path for f in skipped if scan_thread_dumps(f.path, True))
+    if not files and not logfiles and not gcfiles and not td_paths and not heap_paths:
+        raise UsageError("no Hazelcast diagnostics files, member logs, GC logs, thread or heap dumps found under %s" % args.input_dir)
     use_epoch, offset_min, tz, time_note = choose_time(files)
     if not files:
-        time_note = "time as printed in the " + ("member and GC logs" if logfiles and gcfiles else "member logs" if logfiles else "GC logs")
+        time_note = "time as printed in the " + ("member and GC logs" if logfiles and gcfiles else "member logs" if logfiles else "GC logs"
+                                                 if gcfiles else "thread dumps")
     disp_offset = offset_min * 60000 if use_epoch else None
     log_firsts = []
     for lf in logfiles:
@@ -5148,9 +6095,13 @@ def run(args):
     total += sum(gf.lf.size for gf in gcfiles)
     nmem = max([len(members)] + [lm.index + 1 for lm in lms])
     gc = export_gc(gcfiles, nmem)
+    # thread dumps (files of their own, console output, inside member logs) and heap dumps
+    td_files = [(f, True) for f in skipped if f.path in td_paths] + [(f, False) for lm in lms for f in lm.files]
+    dumps, dump_used = export_dumps(td_files, heap_paths, members, lms, ctx, args, root)
+    skipped = [f for f in skipped if f.path not in dump_used]
     parsed_s = time.time() - started
     if (lo is not None or hi is not None) and not any(u.mtimes or u.prof or u.cluster or u.events or u.hb or u.slowops or u.stot for u in units) \
-            and not any(lm.records for lm in lms) and not any(gf.events for gf in gcfiles):
+            and not any(lm.records for lm in lms) and not any(gf.events for gf in gcfiles) and not any(d["t"] is not None for d in dumps):
         raise UsageError("no data between --from and --to; these logs cover %s .. %s"
                          % (fmt_time(min(firsts + log_firsts)), fmt_time(max(lasts + firsts + log_firsts))))
     c = ctx.counters
@@ -5168,6 +6119,11 @@ def run(args):
     props = export_props(members)
     if not covered:                             # GC logs alone; with diagnostics or member logs, those set the range
         covered = [[gf.first, gf.last] for gf in gcfiles if gf.first is not None]
+    if not covered:                             # thread and heap dumps alone
+        covered = [[d["t"] - 60000, d["t"] + 60000] for d in dumps if d["t"] is not None]
+    elif lo is None and hi is None:             # a dump taken a little after (or before) the rest: in the time range too
+        c0, c1 = min(c[0] for c in covered), max(c[1] for c in covered)
+        covered += [[d["t"], d["t"]] for d in dumps if d["t"] is not None and c0 - 3600000 <= d["t"] <= c1 + 3600000]
     rng = [min(c[0] for c in covered), max(c[1] for c in covered)] if covered else [span0, span1]
     if lo is not None:
         rng[0] = max(rng[0], lo)
@@ -5204,6 +6160,7 @@ def run(args):
         "skipped": [f.name + (" (" + SNIFF_WHY[f.path] + ")" if f.path in SNIFF_WHY else "") for f in skipped][:50],
         "logfiles": sum(len(lm.files) for lm in lms), "logbytes": sum(f.size for lm in lms for f in lm.files),
         "gcfiles": len(gcfiles), "gcbytes": sum(gf.lf.size for gf in gcfiles),
+        "tdumps": sum(1 for d in dumps if d["k"] == "thread"), "hdumps": sum(1 for d in dumps if d["k"] == "heap"),
         "tz": tz, "timeNote": time_note, "range": [int(rng[0]), int(rng[1])], "uptime": uptime_axis,
         "window": [lo, hi] if (lo is not None or hi is not None) else None,
         "counters": c, "dropped": dropped, "top": args.top, "efactor": mx["efactor"],
@@ -5213,10 +6170,15 @@ def run(args):
     plist = [{"label": m.label, "files": len(m.files), "bytes": sum(f.size for f in m.files),
               "dirs": m.dirs, "lifetimes": [[int(u.cover[0][0]), int(u.cover[-1][1])] for u in m.units if u.cover],
               "cover": [[int(a), int(b)] for a, b in m.cover]} for m in members]
+    for m, x in zip(members, plist):
+        if m.key[0] == "client":
+            x["client"] = True
     for lm in sorted(lms, key=lambda x: x.index):
         if lm.index >= len(members):            # member logs only
             plist.append({"label": lm.label, "files": 0, "bytes": 0, "dirs": sorted(set(f.reldir for f in lm.files)),
                           "lifetimes": [], "cover": [], "logsOnly": True})
+            if lm.client_name:
+                plist[-1]["client"] = True
     for label in gc["extra"]:                   # GC logs that no member's files are near
         plist.append({"label": label, "files": 0, "bytes": 0, "dirs": [], "lifetimes": [], "cover": [], "logsOnly": True, "gcOnly": True})
     payload = {
@@ -5226,30 +6188,50 @@ def run(args):
         "metrics": mx["metrics"], "static": mx["static"], "flat": mx["flat"],
         "ops": prof["ops"],
         "events": events, "cluster": runs, "lists": lists, "hb": hb, "threads": stuck, "pools": pools, "transfer": transfer,
-        "slowops": slowops, "inv": invs, "props": props, "gc": gc, "store": store, "logs": logs,
+        "slowops": slowops, "inv": invs, "props": props, "gc": gc, "store": store, "logs": logs, "dumps": dumps,
     }
+    return Analysis(payload=payload, prof=prof, meta=meta, plist=plist, members=members, lms=lms, col=col, gcfiles=gcfiles,
+                    skipped=skipped, uptime_axis=uptime_axis, rng=rng, time_note=time_note, mx=mx, mgrid=mgrid, pnative=pnative,
+                    pbin=pbin, total=total, parsed_s=parsed_s, started=started, use_epoch=use_epoch, offset_min=offset_min,
+                    dumps=dumps)
+
+
+def run(args):
+    a = analyze(args)
     os.makedirs(args.output_dir, exist_ok=True)
     report = os.path.join(args.output_dir, "report.html")
-    size = write_report(report, payload, prof["rows_json"])
-    took = time.time() - started
+    size = write_report(report, a.payload, a.prof["rows_json"])
+    took = time.time() - a.started
+    payload, prof, meta, plist, members, lms, col = a.payload, a.prof, a.meta, a.plist, a.members, a.lms, a.col
+    gcfiles, skipped, uptime_axis, rng, time_note, mx, mgrid = a.gcfiles, a.skipped, a.uptime_axis, a.rng, a.time_note, a.mx, a.mgrid
+    pnative, pbin, total, parsed_s = a.pnative, a.pbin, a.total, a.parsed_s
+    events, hb, stuck, pools, transfer = payload["events"], payload["hb"], payload["threads"], payload["pools"], payload["transfer"]
+    slowops, invs, gc, store, logs = payload["slowops"], payload["inv"], payload["gc"], payload["store"], payload["logs"]
 
     p = print
     labels = [x["label"] for x in plist]
     p("Hazelcast diagnostics report  (hz_diag_parser.py %s)" % __version__)
-    p("  input    : %s  (%d diagnostics files, %s; %d member log files, %s%s)"
-      % (args.input_dir, meta["files"], human_size(meta["bytes"]), meta["logfiles"], human_size(meta["logbytes"]),
+    ncl = sum(1 for lm in lms if lm.client_name)
+    p("  input    : %s  (%d diagnostics files, %s; %d %s log files, %s%s)"
+      % (args.input_dir, meta["files"], human_size(meta["bytes"]), meta["logfiles"],
+         "member" if not ncl else "client" if ncl == len(lms) else "member and client", human_size(meta["logbytes"]),
          "; %d GC log files, %s" % (meta["gcfiles"], human_size(meta["gcbytes"])) if gcfiles else ""))
     if skipped:
-        p("  skipped  : %d file(s) that are neither diagnostics, member logs nor GC logs" % len(skipped))
+        p("  skipped  : %d file(s) that are neither diagnostics, member or client logs, GC logs nor dumps" % len(skipped))
         for f in skipped[:20]:
             p("             %s: %s" % ((f.reldir + "/" if f.reldir != "." else "") + f.name,
                                       SNIFF_WHY.get(f.path, "not a diagnostics file (no section we know) nor a GC log")))
         if len(skipped) > 20:
             p("             ... and %d more" % (len(skipped) - 20))
-    real = [x["label"] for x in plist if not x.get("gcOnly")]
-    p("  members  : %s" % ("%d  (%s)" % (len(real), ", ".join(real)) if real else "none (GC logs only)"))
-    if len(real) < len(labels):
-        p("             + %d GC log(s) not linked to any member: %s" % (len(labels) - len(real), ", ".join(labels[len(real):])))
+    real = [x["label"] for x in plist if not x.get("gcOnly") and not x.get("client")]
+    clients = [x["label"] for x in plist if x.get("client")]
+    gconly = [x["label"] for x in plist if x.get("gcOnly")]
+    p("  members  : %s" % ("%d  (%s)" % (len(real), ", ".join(real)) if real else "none (%s)" % (
+        "clients only" if clients else "GC logs only" if gconly else "thread and heap dumps only")))
+    if clients:
+        p("  clients  : %d  (%s): not counted as members" % (len(clients), ", ".join(x[len("client "):] if x.startswith("client ") else x for x in clients)))
+    if gconly:
+        p("             + %d GC log(s) not linked to any member: %s" % (len(gconly), ", ".join(gconly)))
     ft = fmt_uptime if uptime_axis else fmt_time
     p("  window   : %s .. %s (%s), %s" % (ft(rng[0]), ft(rng[1]), human_dur((rng[1] - rng[0]) / 1000.0), time_note))
     if members:
@@ -5398,8 +6380,10 @@ def run(args):
         nrec = sum(lm.records for lm in lms)
         nexc = sum(g.n for g in col.excs.values())
         hs = sum(len(lm.health_t) for lm in lms)
-        p("  logs     : %s records from %d member(s); %d exception kind(s), %s occurrence(s); %s health monitor sample(s)"
-          % (format(nrec, ","), len(lms), len(col.excs), format(nexc, ","), format(hs, ",")))
+        ncl = sum(1 for lm in lms if lm.client_name)
+        who = " and ".join(x for x in ("%d member(s)" % (len(lms) - ncl) if len(lms) > ncl else "", "%d client(s)" % ncl if ncl else "") if x)
+        p("  logs     : %s records from %s; %d exception kind(s), %s occurrence(s); %s health monitor sample(s)"
+          % (format(nrec, ","), who, len(col.excs), format(nexc, ","), format(hs, ",")))
         if col.oome:
             p("  logs     : %d OutOfMemoryError(s): %s" % (len(col.oome), "; ".join(
                 "%s %s %s" % (fmt_time(r[0]), labels[r[1]], r[2] or "") for r in col.oome[:5])))
@@ -5420,6 +6404,24 @@ def run(args):
             p("  cp       : %s line(s); %d group(s)%s; %d leader election(s) won, %d session(s) created, %d warning(s) / error(s)"
               % (format(sum(cpn.values()), ","), len(groups), " (" + ", ".join(groups[:6]) + ")" if groups else "",
                  cpn.get("leader", 0), cpn.get("session", 0), sum(1 for r in logs["cp"] if r[5] in ("W", "E"))))
+    dumps = a.dumps
+    if dumps:
+        ft = fmt_uptime if uptime_axis else fmt_time
+        for d in dumps:
+            who = labels[d["m"]] if d["m"] >= 0 else "no member matched"
+            when = ft(d["t"]) if d["t"] is not None else "no time"
+            if d["k"] == "thread":
+                p("  %s %s, %s (%s): %d threads, %s%s" % (
+                    "dumps    :" if d is dumps[0] else "          ", d["f"] + (" #%d" % d["nth"] if d["of"] > 1 else ""), when, who, d["n"],
+                    ", ".join("%d %s" % (n, "with no state in the dump" if k == "?" else k.lower().replace("_", " "))
+                              for k, n in sorted(d["states"].items(), key=lambda kv: -kv[1])),
+                    "; DEADLOCK: " + " <-> ".join(d["deadlock"]) if d["deadlock"] else ""))
+            else:
+                p("  %s %s, %s (%s): heap dump of %s%s" % (
+                    "dumps    :" if d is dumps[0] else "          ", d["f"], when, who, human_size(d["size"]),
+                    "" if d.get("skipped") or d.get("error") else ", %s objects, ~%s shallow%s; biggest: %s" % (
+                        format(d["objects"], ","), human_size(d["bytes"]), " (partial)" if d["partial"] else "",
+                        ", ".join("%s %s" % (r[0].rsplit(".", 1)[-1], human_size(r[2])) for r in d["top"][:3]))))
     p("\nWrote %s (%s; read %s in %.1f s, total %.1f s)" % (report, human_size(size), human_size(total), parsed_s, took))
     if size > 150 * 1024 * 1024:
         p("This report is big and may be slow to open: --points 2000, --from/--to or --member make it smaller.")
@@ -5573,6 +6575,8 @@ code, .mname { font-family: var(--mono); font-size: 11.5px; color: var(--muted);
 .sw { width: 10px; height: 10px; border-radius: 3px; flex: none; display: inline-block; }
 .lg-note { font-size: 11.5px; color: var(--muted); }
 .key-oome { height: 0; border-top: 2px dashed var(--stuck); border-radius: 0; }
+.key-dump { height: 0; border-top: 2px dotted var(--ink-2); border-radius: 0; }
+pre.sample.tall { max-height: 640px; }
 .chart { position: relative; margin-top: 6px; }
 svg.plot { display: block; width: 100%; touch-action: pan-y; -webkit-user-select: none; user-select: none; }
 .plot text { font-family: var(--font); }
@@ -5607,6 +6611,8 @@ svg.plot { display: block; width: 100%; touch-action: pan-y; -webkit-user-select
 .plot .bar-label { fill: var(--ink); font-size: 10px; font-weight: 600; paint-order: stroke; stroke: var(--surface); stroke-width: 2.5px;
   stroke-linejoin: round; pointer-events: none; }
 .plot .oomeline { stroke: var(--stuck); stroke-width: 1.5; stroke-dasharray: 4 3; shape-rendering: crispEdges; }
+.plot .dumpline { stroke: var(--ink-2); stroke-width: 1.5; stroke-dasharray: 1 3; shape-rendering: crispEdges; }
+.plot .dump-label { fill: var(--ink-2); font-size: 10.5px; font-weight: 600; paint-order: stroke; stroke: var(--surface); stroke-width: 3px; stroke-linejoin: round; }
 .plot .oome-label { fill: var(--stuck); font-size: 10.5px; font-weight: 600; paint-order: stroke; stroke: var(--surface); stroke-width: 3px; stroke-linejoin: round; }
 .plot.clickable .hit { cursor: pointer; }
 .plot .gcdot { stroke: var(--surface); stroke-width: 1; }
@@ -5722,6 +6728,11 @@ details.sect p { color: var(--ink-2); font-size: 13px; margin: 8px 0; }
         (<code>.log</code>, <code>.gz</code>, …). A member is its address (<code>host:port</code>, from the file name or
         <code>thisAddress</code>); the start time in the file names separates its lifetimes (JVM runs), so counters
         never mix across a restart. The same file found twice is read once.</li>
+      <li><b>Clients.</b> A client's diagnostics files (<code>diagnostics-client-…</code>, or the client-only metrics such
+        as <code>invocations.pendingCalls</code>) and its logs (the client's instance name before
+        <code>[cluster] [version]</code>: <code>hz.client_1 [dev] [5.5.0]</code>) go together, by its instance name, on a
+        line of their own: the <i>Clients</i> group of the <i>Member</i> list. A client is not counted as a member (title,
+        <i>Members</i>, cluster size) and its connections are left out of the Transfer tab, which is between members.</li>
       <li><b>Times</b> <span id="tz-note"></span>. Drag across any chart to zoom; every chart, table and number follows
         the range. Double-click a chart or press <i>Zoom out</i> to go back. Shaded areas have no data.</li>
       <li><b>Metrics</b> come from the MetricsPlugin dumps (every minute by default). Counters, which only grow
@@ -5853,7 +6864,8 @@ details.sect p { color: var(--ink-2); font-size: 13px; margin: 8px 0; }
         and it has a Hazelcast line (<code>[host]:port [cluster] [version]</code>) somewhere in its first 512 MB, so a
         partial log, without the member's start or shutdown, is read too. The files that are not read are listed with
         the reason in <i>Members and files</i> and in the console. A log belongs to the member whose address its lines
-        print; a member with logs but no diagnostics gets its own entry. Their tabs (<i>Source: Member logs</i>, in
+        print; a member with logs but no diagnostics gets its own entry. A client's log (its instance name before
+        <code>[cluster] [version]</code>) goes with that client. Their tabs (<i>Source: Member logs</i>, in
         purple) chart the HealthMonitor lines, every exception grouped by class and root cause, OutOfMemoryError (also
         marked on every chart of both sources), the lines that matter (partitions lost:
         <code>partitionId=N is completely lost!</code>; WAN replication problems: the event queue full and events
@@ -5876,6 +6888,27 @@ details.sect p { color: var(--ink-2); font-size: 13px; margin: 8px 0; }
         writes at the top of each diagnostics file. A member with several lifetimes shows its last one, and the values
         its earlier lifetimes had are marked. The JVM arguments are read from <code>java.vm.args</code>; heap and GC
         from them (<code>-Xms</code>, <code>-Xmx</code>, <code>-XX:+UseG1GC</code>...).</li>
+      <li><b>Thread and heap dumps</b> under the input folder are read too. Thread dumps: jstack (with or without
+        <code>-l</code>), <code>kill -3</code> output in a console output or a member log, <code>jcmd Thread.print</code>,
+        <code>jcmd Thread.dump_to_file</code> (text or JSON) and the plain format applications write
+        (<code>"name" daemon=false state=WAITING</code>, then <code>at …</code> lines); a file can hold several. Its time
+        is its date line, else the time in a JSON dump, else a date-time in its file name
+        (<code>threads-20261112-152146.txt</code>, local time). Heap dumps: HPROF files (<code>.hprof</code>,
+        <code>.hprof.gz</code>, or no extension); the time in the dump is UTC, moved to the members' time zone (with logs
+        only, where that zone isn't known, the date-time in the file name is used). A dump goes with the member or client
+        whose thread names its threads have (<code>hz.&lt;instance name&gt;.…</code>, from the thread tags of the metrics
+        and the threads in the logs); else the one whose file names have every word of its file name
+        (<code>member-2.out</code> → <code>member-2-diagnostics-…</code>); else the only one with files in its folder;
+        else none. Each dump is a dotted line on the time charts, a row of <i>What happened</i>, and a row of the Dumps
+        tab. For a thread dump: the threads by state; the threads with the same stack (same state, same top 12 frames;
+        those waiting for work, idle pool threads and selectors, are greyed); the contended locks, who holds them and who
+        waits; a deadlock, as the JVM reported it or found from the monitors the threads hold and wait for; the threads by
+        name; the most CPU; and the whole dump. For a heap dump: the classes by shallow size and by instances, the
+        largest objects, the Hazelcast classes and the GC roots. Shallow size is an object's own size (from its fields,
+        with 12-byte headers and 4-byte references when the object ids say compressed oops, else 16 and 8, rounded up to
+        8 bytes), not what it keeps alive: for retained sizes and paths to GC roots, open the dump in Eclipse MAT or
+        VisualVM. A heap dump is read for at most <code>--heap-seconds</code> (120 by default); the tables then cover the
+        part read.</li>
       <li id="limits-note"></li>
     </ul>
     <p class="hint" id="gen-note"></p>
@@ -5903,7 +6936,10 @@ try { D = await loadData(); }
 catch (e) { $("title").textContent = "Could not read the report data"; $("subtitle").textContent = String((e && e.message) || e); return; }
 $("hz-data").textContent = "";
 
-const META = D.meta, MEMBERS = D.members, NM = MEMBERS.length, NDIAG = MEMBERS.filter(m => !m.logsOnly).length;
+const META = D.meta, MEMBERS = D.members, NM = MEMBERS.length, NDIAG = MEMBERS.filter(m => !m.logsOnly && !m.client).length;
+// clients (their diagnostics and logs) and GC logs of no member have lanes of their own, but they are not members
+const NCLIENT = MEMBERS.filter(m => m.client).length;
+const isMember = i => !MEMBERS[i].client && !MEMBERS[i].gcOnly;
 // short member labels for tables and row labels: without the domain every host name shares (.example.com)
 const MSHORT = (() => {
   const hp = MEMBERS.map(m => { const i = m.label.lastIndexOf(":"); return m.gcOnly || i <= 0 ? null : [m.label.slice(0, i), m.label.slice(i)]; });
@@ -6110,6 +7146,10 @@ const TABS = [["overview", "Overview"], ["latency", "Latency"], ["slowops", "Slo
 const LOGTABS = [["logs", "Overview"], ["logs-health", "Health monitor"], ["logs-exceptions", "Exceptions"], ["logs-migrations", "Migrations"],
   ["logs-cp", "CP Subsystem"]];
 const HASLOGS = !!(D.logs && D.logs.info && D.logs.info.length);
+// whose logs: members', clients' or both
+const LOGCL = HASLOGS ? D.logs.info.filter(r => MEMBERS[r[0]].client).length : 0, LOGMB = HASLOGS ? D.logs.info.length - LOGCL : 0;
+const LOGSRC = LOGCL ? (LOGMB ? "Member and client logs" : "Client logs") : "Member logs";
+const LOGWHO = LOGCL ? (LOGMB ? "the members and clients" : LOGCL === 1 ? "the client" : "the clients") : "the members";
 const HASDIAG = MEMBERS.some(m => !m.logsOnly);
 const GCD = D.gc || { kinds: [], causes: [], mem: [], files: [], extra: [] };
 const HASGC = GCD.files.length > 0;
@@ -6118,14 +7158,20 @@ const HASSTORE = ST.dumps.length > 0;
 const IV = D.inv || { ops: [], ser: [], tot: [], inv: [], raw: [], dumps: [], capped: false };
 const HASINV = IV.dumps.length > 0;
 const PR = D.props || { secs: [], keys: [], vals: [], rows: [], lives: [], changes: [] };
+const DUMPS = D.dumps || [];
+const HASDUMPS = DUMPS.length > 0;
 const HASPROPS = PR.rows.length > 0;
 if (HASGC && HASDIAG) TABS.splice(TABS.findIndex(t => t[0] === "system") + 1, 0, ["gc", "GC"]);
 if (HASSTORE) TABS.splice(TABS.findIndex(t => t[0] === "maps") + 1, 0, ["mapstore", "MapStore"]);
 if (HASINV) TABS.splice(TABS.findIndex(t => t[0] === "slowops") + 1, 0, ["invocations", "Invocations"]);
 if (HASPROPS) TABS.splice(TABS.findIndex(t => t[0] === "other"), 0, ["config", "Configuration"]);
-const ALLTABS = TABS.concat(HASLOGS ? LOGTABS : []).concat(HASGC && !HASDIAG ? [["gc", "GC"]] : []);
-const DEFTAB = HASDIAG ? "overview" : HASLOGS ? "logs" : "gc";
-const groupOf = id => id === "logs" || id.indexOf("logs-") === 0 || (id === "gc" && !HASDIAG && HASLOGS) ? "logs" : id === "gc" && !HASDIAG ? "gc" : "diag";
+if (HASDUMPS && HASDIAG) TABS.splice(TABS.findIndex(t => t[0] === "threads") + 1, 0, ["dumps", "Dumps"]);
+if (HASDUMPS && !HASDIAG && HASLOGS) LOGTABS.push(["dumps", "Dumps"]);
+const ALLTABS = TABS.concat(HASLOGS ? LOGTABS : []).concat(HASGC && !HASDIAG ? [["gc", "GC"]] : []).concat(HASDUMPS && !HASDIAG && !HASLOGS ? [["dumps", "Dumps"]] : []);
+const DEFTAB = HASDIAG ? "overview" : HASLOGS ? "logs" : HASGC ? "gc" : "dumps";
+// the dumps go with the diagnostics tabs, else with the member logs', else with the GC tab
+const DUMPGROUP = HASDIAG ? "diag" : HASLOGS ? "logs" : "gc";
+const groupOf = id => id === "dumps" ? DUMPGROUP : id === "logs" || id.indexOf("logs-") === 0 || (id === "gc" && !HASDIAG && HASLOGS) ? "logs" : id === "gc" && !HASDIAG ? "gc" : "diag";
 const LOG_OOME = HASLOGS ? D.logs.oome : [];
 const LOGX = HASLOGS ? D.logs.exc : [];
 const LOGCP = HASLOGS ? D.logs.cp : [];
@@ -6134,6 +7180,7 @@ const state = { tab: "overview", member: "all", prof: "both", group: "member", q
   evKind: "all", thSel: null, thSort: { key: "a", dir: 1 }, last: {},
   logCat: "all", excSel: null, excSort: { key: "n", dir: -1 }, cpKind: "all", satSort: { key: "a", dir: 1 },
   dragMode: "zoom", msel: null, trKind: "all", trSel: null, trSort: { key: "tot", dir: -1 }, wanPub: null, cpGroup: null,
+  dumpSel: null, dumpGroup: null, dumpSort: { key: "t0", dir: 1 }, dumpLockSort: { key: "w", dir: -1 }, dumpFamSort: { key: "n", dir: -1 },
   lat: { f: 12, s: 19, t: 17 } };      // latency groups: fastest < 4.1 ms, slowest >= 524 ms, slow from 131 ms
 const selMembers = () => state.member === "all" ? MEMBERS.map((m, i) => i) : [+state.member];
 const selSet = () => new Set(selMembers());
@@ -6276,16 +7323,52 @@ function drawMarkers(ch, labels) {
       }
     }
   }
+  // thread and heap dumps: a dotted line each (dumps at the same pixel share one), labelled where there is room
+  const dv = dumpsInView();
+  if (dv.length) {
+    const at = [];                      // dumps a few pixels apart share a line and a label
+    for (const d of dv.slice().sort((a, b) => a.t - b.t)) {
+      const X = Math.round(ch.sx(d.t)) + 0.5, q = at[at.length - 1];
+      if (q && X - q[0] <= 4) q[1].push(d); else at.push([X, [d]]);
+    }
+    let lastX = -1e9;
+    for (const [X, ds] of at) {
+      svgEl("line", { x1: X, x2: X, y1: ch.top, y2: ch.bottom, class: "dumpline" }, ch.g.events);
+      const nt = ds.filter(d => d.k === "thread").length, nh = ds.length - nt;
+      const text = ds.length === 1 ? (nh ? "heap dump" : "thread dump") : (nt ? nt + " thread dump" + (nt === 1 ? "" : "s") : "") + (nt && nh ? " + " : "") + (nh ? nh + " heap dump" + (nh === 1 ? "" : "s") : "");
+      const w = text.length * 6.3;
+      if (labels !== false && X - lastX > w + 12) {
+        const right = X + 4 + w <= ch.W - ch.M.r;
+        svgEl("text", { x: right ? X + 4 : X - 4, y: ch.bottom - 19, class: "dump-label", "text-anchor": right ? "start" : "end" }, ch.g.events).textContent = text;
+        lastX = X;
+      }
+    }
+  }
 }
 
-// the legend entry of those lines, when one is in view
+// the legend entries of those lines (and of the dumps'), when one is in view
 function oomeLegend(host) {
   const ss = selSet();
-  if (!LOG_OOME.some(o => ss.has(o[1]) && o[0] >= state.x0 && o[0] <= state.x1)) return false;
-  const it = el("span", "lg lg-static", host);
-  el("span", "key key-oome", it);
-  el("span", null, it, "OutOfMemoryError (member logs)");
-  return true;
+  let any = false;
+  if (LOG_OOME.some(o => ss.has(o[1]) && o[0] >= state.x0 && o[0] <= state.x1)) {
+    const it = el("span", "lg lg-static", host);
+    el("span", "key key-oome", it);
+    el("span", null, it, "OutOfMemoryError (member logs)");
+    any = true;
+  }
+  if (dumpsInView().length) {
+    const it = el("span", "lg lg-static", host);
+    el("span", "key key-dump", it);
+    el("span", null, it, "Thread or heap dump taken (Dumps tab)");
+    any = true;
+  }
+  return any;
+}
+// the dumps with a time, in the time range in view, of the members selected (or of no member)
+function dumpsInView() {
+  if (!DUMPS.length) return [];
+  const ss = selSet();
+  return DUMPS.filter(d => d.t != null && d.t >= state.x0 && d.t <= state.x1 && (d.m < 0 || ss.has(d.m)));
 }
 
 /* ---------- hover, tooltip, zoom */
@@ -7220,7 +8303,7 @@ const TABINFO = {
   "logs-cp": { find: "group, member or text" }, gc: { find: "kind, cause or member" }, "logs-migrations": { find: "text or member" },
   mapstore: { find: "map, method or member", item: "By map" },
   invocations: { find: "operation, name or partition", item: "By operation" },
-  config: { find: "property or value" }
+  config: { find: "property or value" }, dumps: { find: "file, member, thread name, frame or class" }
 };
 const sections = {};
 // what a tab shows (operation, WAN publisher, CP group, kind, metric...): picked in a row of the bar that stays at the top
@@ -7255,7 +8338,7 @@ function buildTabs() {
     };
     const d = mk(null, "Diagnostics", fmtInt(META.files) + " files", "diag");
     if (!HASDIAG) { d.disabled = true; d.title = "No diagnostics files in this report"; }
-    mk("logs", "Member logs", fmtInt(META.logfiles) + " files", "logs");
+    mk("logs", LOGSRC, fmtInt(META.logfiles) + " files", "logs");
   }
   for (const [id, label] of ALLTABS) {
     const b = el("button", null, nav, label);
@@ -7268,7 +8351,7 @@ function buildTabs() {
       cnt.textContent = tabCount(id);
       cnt.classList.toggle("warn", (id === "threads" && STUCK_TOTAL > 0) || (id === "operations" && SAT_TOTAL > 0) ||
         ((id === "logs" || id === "logs-exceptions") && LOG_OOME.length > 0) || (id === "gc" && GCEV.some(e => e.cat === 3)) ||
-        (id === "logs-migrations" && MIG.bins.some(b => MIG.kinds[b[0]][0] === "lost")));
+        (id === "logs-migrations" && MIG.bins.some(b => MIG.kinds[b[0]][0] === "lost")) || (id === "dumps" && DUMPS.some(d => d.k === "thread" && d.deadlock.length)));
     });
     const sec = el("div", "tabsec", $("main"));
     sec.setAttribute("role", "tabpanel"); sec.setAttribute("aria-labelledby", "tab-" + id);
@@ -7293,6 +8376,7 @@ function tabCount(id) {
   if (id === "gc") { const n = GCEV.filter(e => e.cat === 3).length, h = GCEV.filter(e => e.hum).length; return n ? n + " failure" + (n === 1 ? "" : "s") : h ? h + " humongous" : ""; }
   if (id === "logs-exceptions") return LOGX.length ? String(LOGX.length) : "";
   if (id === "logs-cp") { const n = new Set(LOGCP.filter(e => e[2]).map(e => e[2])).size; return n ? String(n) : ""; }
+  if (id === "dumps") return DUMPS.some(d => d.k === "thread" && d.deadlock.length) ? "deadlock" : String(DUMPS.length);
   if (id === "logs-migrations") {
     const parts = new Set(MIG.rows.filter(e => MIG.kinds[e[2]][0] === "lost").map(e => (LOST_PART_RE.exec(e[4]) || [])[1]).filter(x => x));
     const lost = parts.size || MIG.bins.filter(b => MIG.kinds[b[0]][0] === "lost").reduce((a, b) => a + b[2], 0);
@@ -7326,13 +8410,18 @@ function buildToolbar() {
     const wrap = el("label", "ctl", tb);
     el("span", "ctl-label", wrap, "Member");
     const sel = el("select", null, wrap);
-    const nreal = MEMBERS.filter(m => !m.gcOnly).length;
-    el("option", null, sel, "All " + (nreal === NM ? NM + " members" : (nreal ? nreal + " member" + (nreal === 1 ? "" : "s") + " + " : "") + (NM - nreal) + " GC log" + (NM - nreal === 1 ? "" : "s"))).value = "all";
-    let grp = null;
-    MEMBERS.forEach((m, i) => {
-      if (m.gcOnly && !grp && nreal) { grp = el("optgroup", null, sel); grp.label = "GC logs not linked to a member"; }
-      const o = el("option", null, grp || sel, m.label); o.value = String(i);
-    });
+    const nmem = MEMBERS.filter((m, i) => isMember(i)).length, ngc = MEMBERS.filter(m => m.gcOnly).length;
+    const parts = [nmem ? nmem + " member" + (nmem === 1 ? "" : "s") : "", NCLIENT ? NCLIENT + " client" + (NCLIENT === 1 ? "" : "s") : "",
+      ngc ? ngc + " GC log" + (ngc === 1 ? "" : "s") : ""].filter(x => x);
+    el("option", null, sel, "All " + parts.join(" + ")).value = "all";
+    const kinds = [[i => isMember(i), null], [i => MEMBERS[i].client, "Clients"], [i => MEMBERS[i].gcOnly, "GC logs not linked to a member"]];
+    for (const [test, label] of kinds) {
+      const idx = MEMBERS.map((m, i) => i).filter(test);
+      if (!idx.length) continue;
+      let host = sel;
+      if (label && (nmem || label !== "Clients")) { host = el("optgroup", null, sel); host.label = label; }
+      for (const i of idx) { const o = el("option", null, host, MEMBERS[i].label); o.value = String(i); }
+    }
     sel.addEventListener("change", () => { state.member = sel.value; update(); });
     syncers.push(() => { sel.value = state.member; });
   }
@@ -7586,11 +8675,16 @@ function buildOverview(sec) {
   const renderK = () => {
     clear(kp);
     const sel = selMembers(), ss = new Set(sel);
-    const dsel = sel.filter(i => !MEMBERS[i].logsOnly), gonly = sel.filter(i => MEMBERS[i].gcOnly).length, lonly = sel.length - dsel.length - gonly;
+    const dsel = sel.filter(i => !MEMBERS[i].logsOnly && !MEMBERS[i].client), gonly = sel.filter(i => MEMBERS[i].gcOnly).length;
+    const csel = sel.filter(i => MEMBERS[i].client).length, lonly = sel.length - dsel.length - gonly - csel;
     const lts = dsel.reduce((a, i) => a + MEMBERS[i].lifetimes.length, 0);
-    kpi(kp, dsel.length > 1 ? "Members" : "Member", dsel.length > 1 ? String(dsel.length) : dsel.length ? MEMBERS[dsel[0]].label : MEMBERS[sel[0]].label,
-      (!dsel.length ? (MEMBERS[sel[0]].gcOnly ? "a GC log only, no diagnostics" : "member logs only, no diagnostics") : lts > dsel.length ? lts + " lifetimes: " + (lts - dsel.length) + " restart" + (lts - dsel.length === 1 ? "" : "s") : (dsel.length > 1 ? "no restarts" : "no restart")) +
-      (lonly && dsel.length ? " · " + lonly + " more with member logs only" : "") + (gonly && dsel.length ? " · " + gonly + " GC log" + (gonly === 1 ? "" : "s") + " with no member" : ""));
+    const only = sel.length ? MEMBERS[sel[0]] : null;
+    kpi(kp, dsel.length > 1 ? "Members" : !dsel.length && only && only.client ? "Client" : "Member",
+      dsel.length > 1 ? String(dsel.length) : dsel.length ? MEMBERS[dsel[0]].label : only ? only.label : "-",
+      (!dsel.length ? (!only ? "" : only.client ? "a client, not a member" + (only.logsOnly ? " (its logs only)" : "") : only.gcOnly ? "a GC log only, no diagnostics" : "member logs only, no diagnostics")
+        : lts > dsel.length ? lts + " lifetimes: " + (lts - dsel.length) + " restart" + (lts - dsel.length === 1 ? "" : "s") : (dsel.length > 1 ? "no restarts" : "no restart")) +
+      (lonly && dsel.length ? " · " + lonly + " more with member logs only" : "") + (csel && dsel.length ? " · + " + csel + " client" + (csel === 1 ? "" : "s") : "") +
+      (gonly && dsel.length ? " · " + gonly + " GC log" + (gonly === 1 ? "" : "s") + " with no member" : ""));
     kpi(kp, "Time range", dur((state.x1 - state.x0) / 1000), span(state.x0, state.x1));
     const mk = MARKERS.filter(e => e.t >= state.x0 && e.t <= state.x1);
     const left = mk.filter(e => e.kind === "MemberRemoved").length, joined = mk.length - left;
@@ -7644,7 +8738,7 @@ function buildOverview(sec) {
     }
     if (HASLOGS) {
       const oo = LOG_OOME.filter(o => ss.has(o[1]) && inView(o[0])), last = oo[oo.length - 1];
-      const k = linkKpi(kpi(kp, "OutOfMemoryError in member logs", fmtInt(oo.length), last ? "last: " + MEMBERS[last[1]].label + " at " + shortTime(last[0]) + (last[2] ? " · " + last[2] : "") : "none in " + fmtInt(META.logfiles) + " log file" + (META.logfiles === 1 ? "" : "s")),
+      const k = linkKpi(kpi(kp, "OutOfMemoryError in " + (LOGCL ? "logs" : "member logs"), fmtInt(oo.length), last ? "last: " + MEMBERS[last[1]].label + " at " + shortTime(last[0]) + (last[2] ? " · " + last[2] : "") : "none in " + fmtInt(META.logfiles) + " log file" + (META.logfiles === 1 ? "" : "s")),
         "logs-exceptions", "Open the member logs: Exceptions");
       if (oo.length) { k.classList.add("alert"); k.querySelector(".kpi-value").classList.add("bad"); }
     }
@@ -7669,6 +8763,14 @@ function buildOverview(sec) {
       let best = null;
       for (const s of hp) { const e = seriesExtent(s, state.x0, state.x1); if (e.hi > -Infinity && (!best || e.hi > best[0])) best = [e.hi, s]; }
       if (best) kpi(kp, "Highest heap use", fmtPct(best[0]), "of max heap · " + best[1].label);
+    }
+    if (HASDUMPS) {
+      const dv = DUMPS.filter(d => (d.m < 0 || ss.has(d.m)) && (d.t == null || (d.t >= state.x0 && d.t <= state.x1)));
+      const nt = dv.filter(d => d.k === "thread"), nh = dv.length - nt.length, dl = nt.filter(d => d.deadlock.length);
+      const bl = nt.reduce((a, d) => a + (d.states.BLOCKED || 0), 0);
+      const k = linkKpi(kpi(kp, "Thread and heap dumps", fmtInt(dv.length), fmtInt(nt.length) + " thread dump" + (nt.length === 1 ? "" : "s") + ", " + fmtInt(nh) + " heap dump" + (nh === 1 ? "" : "s") +
+        (dl.length ? " · DEADLOCK in " + dl.map(d => dumpWho(d)).join(", ") : bl ? " · " + fmtInt(bl) + " blocked thread" + (bl === 1 ? "" : "s") : "")), "dumps", "Open the Dumps tab");
+      if (dl.length) { k.classList.add("alert"); k.querySelector(".kpi-value").classList.add("bad"); }
     }
     const hb = D.hb.filter(h => ss.has(h[1]) && h[0] >= state.x0 && h[0] <= state.x1);
     if (D.hb.length) {
@@ -7710,18 +8812,29 @@ function buildOverview(sec) {
     for (const e of D.events) {
       if (!kinds.has(e[2]) || !ss.has(e[1]) || e[0] < state.x0 || e[0] > state.x1) continue;
       const g = groups.find(x => x.kind === e[2] && x.text === e[3] && Math.abs(x.t - e[0]) < 60000);
-      if (g) { g.seen.push(e[1]); continue; }
+      if (g) { if (g.seen.indexOf(e[1]) < 0) g.seen.push(e[1]); continue; }
       groups.push({ t: e[0], kind: e[2], text: e[3], seen: [e[1]] });
     }
-    evNote.textContent = groups.length ? fmtInt(groups.length) + " membership, lifecycle and version events · the Cluster tab lists every event" : "";
+    const nev = groups.length;
+    for (const d of dumpsInView()) groups.push({ t: d.t, kind: dumpKind(d), text: dumpSummary(d), seen: d.m >= 0 ? [d.m] : [], dump: DUMPS.indexOf(d) });
+    groups.sort((a, b) => a.t - b.t);
+    evNote.textContent = groups.length ? (nev ? fmtInt(nev) + " membership, lifecycle and version events · the Cluster tab lists every event" : "") +
+      (groups.length > nev ? (nev ? " · " : "") + fmtInt(groups.length - nev) + " thread or heap dump" + (groups.length - nev === 1 ? "" : "s") + ": click one to open it" : "") : "";
     if (!groups.length) { el("div", "empty-note", wrap, "No membership or lifecycle events in this range."); return; }
     const t = el("table", null, wrap), hr = el("tr", null, el("thead", null, t));
     ["Time", "Event", "Details", "Seen by"].forEach(h => el("th", null, hr, h));
     const tb = el("tbody", null, t);
     for (const g of groups.slice(0, 200)) {
-      const tr = el("tr", null, tb);
-      el("td", "num", tr, shortTime(g.t)); el("td", null, tr, g.kind); el("td", "wide", tr, g.text);
-      el("td", "wide", tr, g.seen.length === NDIAG && NDIAG > 1 ? "all members" : g.seen.map(m => MEMBERS[m].label).join(", "));
+      const tr = el("tr", g.dump != null ? "click" : null, tb);
+      el("td", "num", tr, shortTime(g.t)); el("td", g.dump != null && dumpAlert(DUMPS[g.dump]) ? "lvl-E" : null, tr, g.kind); el("td", "wide", tr, g.text);
+      const sm = g.seen.filter(isMember);
+      el("td", "wide", tr, g.dump != null && !g.seen.length ? "not matched to a member" : sm.length === NDIAG && NDIAG > 1 && sm.length === g.seen.length ? "all members"
+        : sm.length === NDIAG && NDIAG > 1 ? "all members, " + g.seen.filter(m => !isMember(m)).map(m => MEMBERS[m].label).join(", ") : g.seen.map(m => MEMBERS[m].label).join(", "));
+      if (g.dump != null) {
+        tr.tabIndex = 0; tr.title = "Open it on the Dumps tab";
+        tr.addEventListener("click", () => openDump(g.dump));
+        tr.addEventListener("keydown", ev => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); openDump(g.dump); } });
+      }
     }
     if (groups.length > 200) el("div", "hint", wrap, "First 200 of " + fmtInt(groups.length) + "; zoom in to see the rest.");
   };
@@ -10213,9 +11326,9 @@ const CAPPED_NOTE = " · some kinds had more lines than the report keeps: 1,000 
 function logBanner(sec, what) {
   sec.classList.add("logsec");
   const b = el("div", "srcbanner", sec);
-  el("b", null, b, "Member logs");
+  el("b", null, b, LOGSRC);
   b.appendChild(document.createTextNode(" · " + what + " · " + fmtInt(META.logfiles) + " log file" + (META.logfiles === 1 ? "" : "s") + " (" +
-    fmtBytes(META.logbytes) + ") from " + LOGS.info.length + " member" + (LOGS.info.length === 1 ? "" : "s")));
+    fmtBytes(META.logbytes) + ") from " + [LOGMB ? LOGMB + " member" + (LOGMB === 1 ? "" : "s") : "", LOGCL ? LOGCL + " client" + (LOGCL === 1 ? "" : "s") : ""].filter(Boolean).join(" and ")));
 }
 // rows of dots on a time axis, the dot area by how many: rows [{key, label, title, color, bins: [[t, count]...]}]
 function renderDotLanes(p, rows, o) {
@@ -10326,7 +11439,7 @@ function catRows() {
 }
 const perText = r => Array.from(r.per.entries()).filter(x => x[1]).map(x => MEMBERS[x[0]].label + (r.per.size > 1 ? " " + fmtInt(x[1]) : "")).join(", ");
 function buildLogsOverview(sec) {
-  logBanner(sec, "what the members logged");
+  logBanner(sec, "what " + LOGWHO + " logged");
   const kp = el("div", "kpis", sec);
   const renderK = () => {
     clear(kp);
@@ -11577,9 +12690,14 @@ function gcFilesCard(sec) {
 /* ---------- header */
 function buildHeader() {
   // GC logs linked to no member have a lane of their own, but they are not members
-  const real = MEMBERS.filter(m => !m.gcOnly), ngc = NM - real.length;
+  const real = MEMBERS.filter((m, i) => isMember(i)), ngc = MEMBERS.filter(m => m.gcOnly).length;
   $("title").textContent = real.length > 1 ? "Hazelcast cluster: " + real.length + " members" : real.length ? "Hazelcast member " + real[0].label
-    : ngc > 1 ? "Hazelcast GC logs: " + ngc : "Hazelcast " + MEMBERS[0].label;
+    : NCLIENT ? "Hazelcast " + (NCLIENT > 1 ? NCLIENT + " clients" : MEMBERS.find(m => m.client).label) : ngc > 1 ? "Hazelcast GC logs: " + ngc
+    : NM ? "Hazelcast " + MEMBERS[0].label : "Hazelcast thread and heap dumps";
+  if (NCLIENT && real.length) {
+    const t = el("span", "title-note", $("title"), " + " + NCLIENT + " client" + (NCLIENT === 1 ? "" : "s"));
+    t.title = "Clients' diagnostics and logs (diagnostics-client-... files, log lines with the client's name before [cluster] [version]): a line of their own, not counted as members";
+  }
   if (ngc && real.length) {
     const t = el("span", "title-note", $("title"), " + " + ngc + " GC log" + (ngc === 1 ? "" : "s") + " not linked to a member");
     t.title = "GC logs whose folder, name and JVM start time match none of the members: each has a line of its own on the GC tab (Members and files lists them)";
@@ -11589,7 +12707,8 @@ function buildHeader() {
   add(META.timeNote);
   if (META.window) add("--from/--to applied");
   if (META.files || (!META.logfiles && !META.gcfiles)) add(fmtInt(META.files) + " diagnostics file" + (META.files === 1 ? "" : "s") + ", " + fmtBytes(META.bytes));
-  if (META.logfiles) add(fmtInt(META.logfiles) + " member log file" + (META.logfiles === 1 ? "" : "s") + ", " + fmtBytes(META.logbytes));
+  const nclf = HASLOGS ? D.logs.files.filter(f => MEMBERS[f[0]] && MEMBERS[f[0]].client).length : 0;
+  if (META.logfiles) add(fmtInt(META.logfiles) + (!nclf ? " member" : nclf === META.logfiles ? " client" : " member and client") + " log file" + (META.logfiles === 1 ? "" : "s") + ", " + fmtBytes(META.logbytes));
   if (META.gcfiles) add(fmtInt(META.gcfiles) + " GC log file" + (META.gcfiles === 1 ? "" : "s") + ", " + fmtBytes(META.gcbytes));
   const box = $("files-box");
   box.hidden = false;
@@ -11602,15 +12721,21 @@ function buildHeader() {
     const logs = lf.length ? lf.length + " member log file" + (lf.length === 1 ? "" : "s") + " (" + fmtBytes(lf.reduce((a, f) => a + f[2], 0)) + ")" : "";
     const gf = GCD.files.filter(f => f[0] === mi);
     const gcl = gf.length ? (gf.length === 1 ? "GC log " + gf[0][1] + " (" + gf[0][2] + ")" : gf.length + " GC log files (" + Array.from(new Set(gf.map(f => f[2]))).join(", ") + ")") : "";
+    const dm = DUMPS.filter(d => d.m === mi), dl = dm.length ? " · " + dm.map(d => (d.k === "heap" ? "heap dump " : "thread dump ") + d.f).join(", ") : "";
     if (m.gcOnly) { li.appendChild(document.createTextNode(" · GC log only, no member's files near it: " + gf.map(f => f[1]).join(", "))); return; }
-    if (m.logsOnly) { li.appendChild(document.createTextNode(" · member logs only: " + logs + (m.dirs.length ? " · " + m.dirs.join(", ") : "") + (gcl ? " · " + gcl : ""))); return; }
+    if (m.logsOnly) { li.appendChild(document.createTextNode(" · " + (m.client ? "client logs only: " + logs.replace("member log", "log") : "member logs only: " + logs) +
+      (m.dirs.length ? " · " + m.dirs.join(", ") : "") + (gcl ? " · " + gcl : "") + dl)); return; }
+    if (m.client) li.appendChild(document.createTextNode(" · a client, not a member"));
     li.appendChild(document.createTextNode(" · " + m.files + " file" + (m.files === 1 ? "" : "s") + ", " + (m.bytes / 1048576).toFixed(1) + " MB, " +
       m.lifetimes.length + " lifetime" + (m.lifetimes.length === 1 ? "" : "s") + (m.dirs.length ? " · " + m.dirs.join(", ") : "") +
-      (m.cover.length ? " · " + span(m.cover[0][0], m.cover[m.cover.length - 1][1]) : "") + (logs ? " · " + logs : "") + (gcl ? " · " + gcl : "")));
+      (m.cover.length ? " · " + span(m.cover[0][0], m.cover[m.cover.length - 1][1]) : "") + (logs ? " · " + (m.client ? logs.replace("member log", "client log") : logs) : "") +
+      (gcl ? " · " + gcl : "") + dl));
   });
+  const nod = DUMPS.filter(d => d.m < 0);
+  if (nod.length) el("li", null, ul, "Dumps not matched to a member (their threads' names and file names match none): " + nod.map(d => d.f).join(", ") + " (Dumps tab)");
   const lost = GCD.files.filter(f => f[0] < 0);
   if (lost.length) el("li", null, ul, "GC log" + (lost.length === 1 ? "" : "s") + " not linked to a member, with no pause to chart: " + lost.map(f => f[1]).join(", ") + " (GC tab)");
-  if (META.skipped && META.skipped.length) el("li", null, ul, "Neither diagnostics, member logs nor GC logs, skipped: " + META.skipped.join(", "));
+  if (META.skipped && META.skipped.length) el("li", null, ul, "Neither diagnostics, member or client logs, GC logs nor dumps, skipped: " + META.skipped.join(", "));
   $("tz-note").textContent = "are " + META.timeNote;
   const lim = [];
   const res = (D.g ? stepName(G.step) + " for metrics and per " : "") + stepName(PSTEP) + " for the profilers";
@@ -11629,6 +12754,204 @@ function buildHeader() {
   if (META.timestamps && META.timestamps.length) lim.push("Timestamp metrics, not charted: " + META.timestamps.join(", ") + ".");
   $("limits-note").textContent = lim.join(" ");
   $("gen-note").textContent = "Generated " + META.generated + " by hz_diag_parser.py " + META.version + ": " + META.cmd;
+}
+
+/* ---------- Dumps: the thread dumps and heap dumps found with the logs */
+const dumpWho = d => d.m >= 0 ? MEMBERS[d.m].label : "not matched to a member";
+const dumpKind = d => d.k === "heap" ? "Heap dump" : "Thread dump";
+const TD_STATES = ["BLOCKED", "RUNNABLE", "WAITING", "TIMED_WAITING", "NEW", "TERMINATED", "JVM", "?"];
+const tdStateName = s => ({ BLOCKED: "blocked", RUNNABLE: "runnable", WAITING: "waiting", TIMED_WAITING: "timed waiting", NEW: "new",
+  TERMINATED: "terminated", JVM: "JVM-internal", "?": "state not in the dump" })[s] || s.toLowerCase();
+const tdStates = d => TD_STATES.filter(s => d.states[s]).concat(Object.keys(d.states).filter(s => TD_STATES.indexOf(s) < 0))
+  .map(s => fmtInt(d.states[s]) + " " + tdStateName(s)).join(", ");
+const tdBusy = d => d.groups.filter(g => !g.idle).reduce((a, g) => a + g.n, 0);
+function dumpSummary(d) {
+  if (d.k === "heap") {
+    if (d.skipped) return fmtBytes(d.size) + " file · not read (--heap-seconds 0): its time only";
+    if (d.error) return fmtBytes(d.size) + " file · " + d.error;
+    return fmtBytes(d.size) + " file · " + fmtInt(d.objects) + " objects, about " + fmtBytes(d.bytes) + (d.partial ? " (the part read)" : "") + " · " +
+      fmtInt(d.threads) + " threads · biggest class " + (d.top[0] ? shortCls(d.top[0][0]) + " " + fmtBytes(d.top[0][2]) : "-");
+  }
+  const busy = d.groups.filter(g => !g.idle && g.state !== "JVM").sort((a, b) => b.n - a.n)[0];
+  return (d.deadlock.length ? "DEADLOCK between " + d.deadlock.length + " threads · " : "") + fmtInt(d.n) + " threads: " + tdStates(d) +
+    (busy ? " · most: " + fmtInt(busy.n) + " " + tdStateName(busy.state) + (busy.where ? " in " + busy.where : "") : "");
+}
+const dumpAlert = d => d.k === "thread" && (d.deadlock.length > 0 || (d.states.BLOCKED || 0) > 0);
+// open a dump on the Dumps tab
+function openDump(i) { state.dumpSel = i; state.dumpGroup = null; setTab("dumps"); }
+function buildDumps(sec) {
+  el("p", "lead", sec, "Thread dumps (jstack, kill -3 in a console output, jcmd Thread.print or Thread.dump_to_file, or written by an application) and heap dumps " +
+    "(HPROF) found with the logs: when each was taken (its date line, the time in a heap dump, or a date in its file name), whose it is (the names of its threads, else its " +
+    "file name) and a first look. Each one is marked on the time charts. Click a row for the details.");
+  const kp = el("div", "kpis", sec);
+  const card = el("section", "card", sec), cap = el("div", "cap", card);
+  el("h3", null, cap, "Dumps");
+  const note = el("span", "note", cap);
+  const wrap = el("div", "table-wrap", card);
+  const detail = el("div", null, sec);
+  const render = () => {
+    clear(kp); clear(wrap); clear(detail);
+    const ss = selSet(), q = findQ();
+    // Find: the file, the member, and anything in a thread dump's text (thread names, frames, locks) or a heap dump's class lists
+    const hit = d => !q || (d.f + " " + dumpWho(d)).toLowerCase().indexOf(q) >= 0 ||
+      (d.k === "thread" && ((d.lc || (d.lc = (d.txt || "").toLowerCase())).indexOf(q) >= 0 ||
+        d.groups.some(g => g.names.some(n => n.toLowerCase().indexOf(q) >= 0) || g.frames.some(f => f.toLowerCase().indexOf(q) >= 0)))) ||
+      (d.k === "heap" && ["top", "top_count", "largest", "hz"].some(k => (d[k] || []).some(r => String(r[0]).toLowerCase().indexOf(q) >= 0)));
+    // in the time range in view; those with no time, or far from the rest of the data, always
+    const rows = DUMPS.map((d, i) => ({ d, i })).filter(x => (x.d.m < 0 || ss.has(x.d.m)) && (x.d.t == null || inView(x.d.t) || x.d.t < X_MIN || x.d.t > X_MAX) && hit(x.d));
+    const td = rows.filter(x => x.d.k === "thread"), hd = rows.filter(x => x.d.k === "heap");
+    kpi(kp, "Thread dumps", fmtInt(td.length), td.length ? fmtInt(new Set(td.map(x => x.d.m)).size) + " JVM" + (new Set(td.map(x => x.d.m)).size === 1 ? "" : "s") +
+      " · " + fmtInt(td.reduce((a, x) => a + x.d.n, 0)) + " threads" : "none in this selection");
+    const dl = td.filter(x => x.d.deadlock.length);
+    const k1 = kpi(kp, "Deadlocks", fmtInt(dl.length), dl.length ? dl.map(x => dumpWho(x.d) + " " + shortTime(x.d.t)).join(" · ") : "none reported or found");
+    if (dl.length) { k1.classList.add("alert"); k1.querySelector(".kpi-value").classList.add("bad"); }
+    const bl = td.reduce((a, x) => a + (x.d.states.BLOCKED || 0), 0);
+    const k2 = kpi(kp, "Blocked threads", fmtInt(bl), "waiting for a monitor another thread holds");
+    if (bl) k2.querySelector(".kpi-value").classList.add("bad");
+    kpi(kp, "Heap dumps", fmtInt(hd.length), hd.length ? hd.map(x => fmtBytes(x.d.size) + " " + dumpWho(x.d)).join(" · ") : "none in this selection");
+    note.textContent = fmtInt(rows.length) + " of " + fmtInt(DUMPS.length) + " · the selected members, the time range in view and Find · click one for the details";
+    sortableTable(wrap, [
+      { key: "t0", label: "Time", num: true, val: x => x.d.t == null ? Infinity : x.d.t, fmt: x => x.d.t == null ? "no time" : x.d.t < X_MIN || x.d.t > X_MAX ? logTime(x.d.t) : shortTime(x.d.t),
+        title: x => "time from " + x.d.how + (x.d.t != null && (x.d.t < X_MIN || x.d.t > X_MAX) ? " · outside the time range of the rest of the data" : "") },
+      { key: "k", label: "Kind", val: x => dumpKind(x.d), lv: x => dumpAlert(x.d) ? "E" : "" },
+      { key: "m", label: "Member", val: x => dumpWho(x.d), title: x => x.d.by ? "matched by " + x.d.by : "its threads' names and its file name match no member" },
+      { key: "s", label: "What it shows", val: x => dumpSummary(x.d), cls: "wrapcell" },
+      { key: "f", label: "File", val: x => x.d.f + (x.d.of > 1 ? " (" + x.d.nth + " of " + x.d.of + ")" : ""), cls: "wrapcell" }
+    ], rows, state.dumpSort, render, x => { state.dumpSel = state.dumpSel === x.i ? null : x.i; state.dumpGroup = null; update(); },
+      "No thread or heap dump in this selection.", x => x.i === state.dumpSel);
+    let sel = state.dumpSel != null ? DUMPS[state.dumpSel] : null;
+    if (!sel && rows.length === 1) sel = rows[0].d;
+    if (!sel) return;
+    if (sel.k === "thread") threadDumpDetail(detail, sel, render); else heapDumpDetail(detail, sel);
+  };
+  tabUpdaters.push(Object.assign(render, { tab: "dumps" }));
+}
+function dumpHead(host, d) {
+  el("h2", null, host, dumpKind(d) + " · " + dumpWho(d) + (d.t != null ? " · " + shortTime(d.t) : ""));
+  const parts = [d.f + (d.line > 1 ? ", line " + fmtInt(d.line) : "") + (d.of > 1 ? " (dump " + d.nth + " of " + d.of + " in the file)" : ""),
+    d.t != null ? "time from " + d.how : "no time: " + d.how, d.m >= 0 && d.by ? "matched to the " + (MEMBERS[d.m].client ? "client" : "member") + " by " + d.by : "matched to no member"];
+  if (d.vm) parts.push(d.vm);
+  el("p", "lead", host, parts.join(" · "));
+}
+function textCard(host, title, noteText, lines, alert) {
+  const c = el("section", "card" + (alert ? " alert" : ""), host), cp = el("div", "cap", c);
+  el("h3", null, cp, title);
+  if (noteText) el("span", "note", cp, noteText);
+  el("pre", "sample", c, lines.join("\n"));
+  return c;
+}
+function threadDumpDetail(host, d, rerender) {
+  dumpHead(host, d);
+  const kp = el("div", "kpis", host);
+  kpi(kp, "Threads", fmtInt(d.n), tdStates(d) + (d.daemon ? " · " + fmtInt(d.daemon) + " daemon" : "") + (d.virtual ? " · " + fmtInt(d.virtual) + " virtual" : ""));
+  const busy = tdBusy(d);
+  kpi(kp, "Doing something", fmtInt(busy), "threads not waiting for work (idle pool threads, selectors and JVM threads left out)");
+  const k = kpi(kp, "Blocked", fmtInt(d.states.BLOCKED || 0), d.locks.length ? fmtInt(d.locks.length) + " contended lock" + (d.locks.length === 1 ? "" : "s") : "no contended lock");
+  if (d.states.BLOCKED) k.querySelector(".kpi-value").classList.add("bad");
+  if (d.deadlock.length) {
+    const k3 = kpi(kp, "Deadlock", fmtInt(d.deadlock.length) + " threads", d.deadlock.join(" ↔ "));
+    k3.classList.add("alert"); k3.querySelector(".kpi-value").classList.add("bad");
+    textCard(host, "Deadlock", d.dl.length ? "as the JVM reported it" : "found from the monitors each thread holds and waits for", d.dl.length ? d.dl : d.deadlock.map(n => "\"" + n + "\""), true);
+  }
+  // the threads grouped by the same stack
+  const c = el("section", "card", host), cp = el("div", "cap", c);
+  el("h3", null, cp, "Threads with the same stack");
+  el("span", "note", cp, fmtInt(d.ngroups) + " group" + (d.ngroups === 1 ? "" : "s") + " (same state and top 12 frames)" + (d.ngroups > d.groups.length ? ", the first " + d.groups.length : "") +
+    " · busy ones first, idle ones (waiting for work) after, greyed · click one for its stack");
+  const w = el("div", "table-wrap", c);
+  const t = el("table", null, w), hr = el("tr", null, el("thead", null, t));
+  ["Threads", "State", "Where", "Called from", "Names"].forEach((h, i) => el("th", i === 0 ? "num" : null, hr, h));
+  const tb = el("tbody", null, t);
+  d.groups.forEach((g, gi) => {
+    const tr = el("tr", "click" + (state.dumpGroup === gi ? " sel" : ""), tb);
+    if (g.idle) tr.style.color = "var(--muted)";
+    el("td", "num", tr, fmtInt(g.n));
+    el("td", g.state === "BLOCKED" ? "lvl-E" : null, tr, tdStateName(g.state));
+    el("td", "wrapcell", tr, g.where || (g.frames.length ? "" : "(no Java frames)"));
+    el("td", "wrapcell", tr, g.app || "");
+    el("td", "msg", tr, g.names.join(", ") + (g.more ? " and " + fmtInt(g.more) + " more" : ""));
+    tr.tabIndex = 0;
+    const pick = () => { state.dumpGroup = state.dumpGroup === gi ? null : gi; rerender(); };
+    tr.addEventListener("click", pick);
+    tr.addEventListener("keydown", ev => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); pick(); } });
+    if (state.dumpGroup === gi) {
+      const tr2 = el("tr", null, tb), td2 = el("td", null, tr2);
+      td2.colSpan = 5;
+      el("pre", "sample", td2, (g.frames.length ? g.frames.map(f => "at " + f).join("\n") : "(no Java frames)") + (g.frames.length >= 30 ? "\n..." : ""));
+    }
+  });
+  if (d.locks.length) {
+    const c2 = el("section", "card" + (d.states.BLOCKED ? " alert" : ""), host), cp2 = el("div", "cap", c2);
+    el("h3", null, cp2, "Contended locks");
+    el("span", "note", cp2, "monitors (synchronized) and locks (ReentrantLock...) that threads wait for, and who holds them" +
+      (d.locks.some(l => !l.owner) ? " · a lock's owner is in the dump only with jstack -l (or jcmd Thread.print -l)" : ""));
+    const w2 = el("div", "table-wrap", c2);
+    sortableTable(w2, [
+      { key: "w", label: "Waiting", num: true, val: l => l.waiters, fmt: l => fmtInt(l.waiters) },
+      { key: "c", label: "Lock", val: l => l.class, title: l => l.lock, cls: "wrapcell" },
+      { key: "o", label: "Held by", val: l => l.owner || "(not in the dump)", cls: "wrapcell" },
+      { key: "n", label: "Waiting threads", val: l => l.names.join(", ") + (l.waiters > l.names.length ? " and " + fmtInt(l.waiters - l.names.length) + " more" : ""), cls: "msg" }
+    ], d.locks, state.dumpLockSort, rerender, null, "");
+  }
+  const c3 = el("section", "card", host), cp3 = el("div", "cap", c3);
+  el("h3", null, cp3, "Thread names");
+  el("span", "note", cp3, "the threads by name without their number (one pool, one family of Hazelcast threads)");
+  const w3 = el("div", "table-wrap", c3);
+  sortableTable(w3, [
+    { key: "f", label: "Threads named", val: f => f.family, cls: "wrapcell" },
+    { key: "n", label: "Threads", num: true, val: f => f.n, fmt: f => fmtInt(f.n) },
+    { key: "i", label: "Idle", num: true, val: f => f.idle, fmt: f => fmtInt(f.idle) },
+    { key: "s", label: "States", val: f => Object.keys(f.states).map(s => fmtInt(f.states[s]) + " " + tdStateName(s)).join(", "), cls: "wrapcell" }
+  ], d.families, state.dumpFamSort, rerender, null, "");
+  if (d.cpu && d.cpu.length) {
+    const c4 = el("section", "card", host), cp4 = el("div", "cap", c4);
+    el("h3", null, cp4, "Most CPU");
+    el("span", "note", cp4, "CPU time each thread used since it started (cpu= in the dump, JDK 11 and later)");
+    const w4 = el("div", "table-wrap", c4);
+    sortableTable(w4, [
+      { key: "n", label: "Thread", val: x => x.name, cls: "wrapcell" },
+      { key: "c", label: "CPU", num: true, val: x => x.cpu_ms, fmt: x => fmtMs(x.cpu_ms) },
+      { key: "s", label: "State", val: x => tdStateName(x.state) }
+    ], d.cpu, { key: "c", dir: -1 }, rerender, null, "");
+  }
+  if (d.heap && d.heap.length) textCard(host, "Heap", "the heap as the JVM printed it after the threads", d.heap);
+  const det = el("details", "sect", host), sum = el("summary", null, det, "The whole dump (" + fmtInt(d.txt.split("\n").length) + " lines)");
+  sum.title = "As it is in " + d.f;
+  det.addEventListener("toggle", () => { if (det.open && !det.querySelector("pre")) el("pre", "sample tall", det, d.txt); });
+}
+function heapDumpDetail(host, d) {
+  dumpHead(host, d);
+  if (d.skipped || d.error) { el("p", "lead", host, d.skipped ? "Not read: --heap-seconds 0 keeps only the time it was taken." : "Could not read it: " + d.error); return; }
+  el("p", "lead", host, "Shallow sizes (an object's own size, not what it keeps alive), estimated for a 64-bit JVM" + (d.compressed ? " with compressed references (the heap sits below 32 GB)" : "") +
+    ". What an object keeps alive (retained size) needs the whole object graph: open the dump in Eclipse MAT or VisualVM for that." +
+    (d.partial ? " Only part of the dump was read" + (d.read ? " (" + fmtBytes(d.read) + " of " + fmtBytes(d.size) + ")" : "") + " within --heap-seconds: the counts are for that part." : ""));
+  const kp = el("div", "kpis", host);
+  kpi(kp, "Objects", fmtInt(d.objects), "about " + fmtBytes(d.bytes) + " (shallow)");
+  kpi(kp, "Classes", fmtInt(d.classes), fmtInt(d.instances_classes) + " with instances");
+  kpi(kp, "Threads", fmtInt(d.threads), "thread objects (GC roots)");
+  kpi(kp, "Hazelcast objects", fmtInt(d.hz_total[0]), "about " + fmtBytes(d.hz_total[1]) + " in com.hazelcast classes");
+  const table = (title, noteText, rows, cols) => {
+    if (!rows || !rows.length) return;
+    const c = el("section", "card", host), cp = el("div", "cap", c);
+    el("h3", null, cp, title);
+    if (noteText) el("span", "note", cp, noteText);
+    const w = el("div", "table-wrap", c), t = el("table", null, w), hr = el("tr", null, el("thead", null, t));
+    cols.forEach(cdef => el("th", cdef.num ? "num" : null, hr, cdef.label));
+    const tb = el("tbody", null, t);
+    for (const r of rows) { const tr = el("tr", null, tb); cols.forEach(cdef => el("td", cdef.num ? "num" : "wrapcell", tr, cdef.fmt(r))); }
+  };
+  const pct = v => d.bytes ? (100 * v / d.bytes).toFixed(1) + "%" : "";
+  table("Classes by size", "the " + d.top.length + " biggest, by the shallow size of all their instances", d.top,
+    [{ label: "Class", fmt: r => r[0] }, { label: "Instances", num: true, fmt: r => fmtInt(r[1]) }, { label: "Shallow size", num: true, fmt: r => fmtBytes(r[2]) },
+      { label: "Of the heap", num: true, fmt: r => pct(r[2]) }]);
+  table("Classes by instances", "the " + d.top_count.length + " with the most instances", d.top_count,
+    [{ label: "Class", fmt: r => r[0] }, { label: "Instances", num: true, fmt: r => fmtInt(r[1]) }, { label: "Shallow size", num: true, fmt: r => fmtBytes(r[2]) }]);
+  table("Largest objects", "single arrays (or objects) of 64 KB and more", d.largest,
+    [{ label: "Class", fmt: r => r[0] }, { label: "Size", num: true, fmt: r => fmtBytes(r[1]) }, { label: "Elements", num: true, fmt: r => fmtInt(r[2]) }]);
+  table("Hazelcast classes", "com.hazelcast classes by size (a client's invocations, a member's records and operations...)", d.hz,
+    [{ label: "Class", fmt: r => r[0] }, { label: "Instances", num: true, fmt: r => fmtInt(r[1]) }, { label: "Shallow size", num: true, fmt: r => fmtBytes(r[2]) }]);
+  const roots = Object.keys(d.roots || {});
+  if (roots.length) el("p", "hint", host, "GC roots: " + roots.map(k => fmtInt(d.roots[k]) + " " + k).join(", ") + " · " + d.format + ", " + d.ids + "-byte object ids.");
 }
 
 /* ---------- build everything */
@@ -11658,6 +12981,7 @@ if (HASGC) buildGc(sections.gc);
 buildCluster(sections.cluster);
 buildCp(sections.cp);
 if (HASPROPS) buildConfig(sections.config);
+if (HASDUMPS) buildDumps(sections.dumps);
 buildGeneric("other", sections.other, [], "Every metric that fits none of the other tabs.");
 if (HASLOGS) {
   buildLogsOverview(sections.logs);
