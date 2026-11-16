@@ -96,7 +96,8 @@ are listed with the reason, in the console and in the report's *Members and file
 In an application's log, only Hazelcast's own lines (with its `[host]:port [cluster] [version]` prefix, or from a
 Hazelcast logger) make the notable lines and the migrations: an application line about a SQL `merge into` or a
 database connection is not a split brain or a closed member connection. OutOfMemoryError, thread starvation and clock
-jumps count from any line, as they are about the whole JVM.
+jumps count from any line, as they are about the whole JVM. Warnings and errors count from any line too: the
+application's ERROR lines are in *Errors and warnings by message* and *Other errors* with Hazelcast's.
 
 ### Clients (optional)
 
@@ -193,6 +194,68 @@ objects, the Hazelcast classes and the GC roots. A shallow size is an object's o
 suspects and the paths to the GC roots, open the dump in Eclipse MAT or VisualVM. Reading a heap dump stops after
 `--heap-seconds` (120 s by default): the tables then cover the part read, and `--heap-seconds 0` keeps its time only.
 
+Two checks look for what most often fills a member's heap or stops its threads:
+
+- **Hazelcast calls never woken:** each thread parked in `AbstractInvocationFuture.get` / `join` / `joinInternal`,
+  with the future it waits on. A thread parked on a future that already holds its result was never woken and never
+  will be (a lost wake-up); the other ones are listed as waiting for their response.
+- **Large values:** the byte arrays of 64 KB and more, grouped by size and content, and what holds them; each
+  connection's outbound queue; the client and the requests behind it. See below.
+
+#### Large values in a heap dump
+
+A member keeps what it has not written to a connection yet in that connection's outbound queue. A client that reads
+slower than it asks, or many calls for one large entry at once, fill the heap with copies of the entry: each
+`Map.Get` response carries its own copy of the value's bytes. In Eclipse MAT that means the dominator tree, then OQL
+query after OQL query; the report does it in one go:
+
+- **Values of the same size:** every `byte[]` of 64 KB or more, grouped by length, with how many have the same
+  content (compared at their start, middle and end, 4 KB each; a checksum of all of it in a `.gz` dump), their total
+  and share of the heap. What each one is, when it is Hazelcast's serialized form (held by a message frame or a
+  `HeapData`): Java Serializable and its class, Compact and its type name, IdentifiedDataSerializable's factory and
+  class id, JSON, String. What holds them: a client message's frame (with the message type: `2,000 Map.Get
+  responses`), a member `Packet`, a `HeapData`, or something else.
+- **Outbound queues:** for each connection with something queued (`NioOutboundPipeline`: `writeQueue` and
+  `priorityWriteQueue`), its address, its type (Java client, Python client, member...), the client's name, version
+  and uuid, the number of messages and bytes, the message types (decoded from each message's first frame: message
+  type and correlation id) and the range of correlation ids.
+- **Requests in the heap:** the message tasks of that connection still in the heap, with what they asked for: the
+  call (`Map.Get`), the data structure's name, the key (a String key in full), the partition and the correlation id,
+  and whether its response is in the queue.
+
+It is red when one value has 10 copies or more adding up to 64 MB or more, or one connection has 64 MB or more
+queued, and the console and the Overview say it in one line:
+
+```
+ALERT : heap dump member-3.hprof (10.0.0.3:5701): 2,000 copies of one 3.0 MB value (Java Serializable:
+        com.example.cache.PrefixTrie): 5.9 GB (62% of the heap); 2,000 Map.Get responses (5.9 GB) queued to
+        10.0.1.17:30220, Java client pricing-api; its requests still in the heap: Map.Get on prefixes, key ROOT
+```
+
+When the diagnostics of the same member have the connection's write queue (next section), each queue shows its peak
+there, with a button to the Network tab, and the other way round.
+
+Clicking a row gives the object addresses and the OQL to continue in Eclipse MAT (`SELECT * FROM OBJECTS 0x...`):
+retained sizes and paths to GC roots still need it. Sizes here are shallow. In a client's heap dump the same check
+shows its requests queued to the members.
+
+### Outbound write queues (diagnostics)
+
+What a member has not written to a connection yet waits in that connection's outbound queue. The metrics give it per
+connection (`tcp.connection.out.writeQueuePendingBytes` and `priorityWriteQueuePendingBytes`, `writeQueueSize`, tagged
+`pipelineId=/10.0.0.3:5701->client-host/10.0.1.17:30220`). It stays near 0 and clears within a dump; when it grows to
+hundreds of MB on a few connections while the others stay low, those peers read slower than they are sent to, and the
+member keeps all of it on its heap until it runs out of memory. This is often the first sign, minutes before the
+OutOfMemoryError.
+
+- **Overview:** an *Outbound write queues* tile with the most waiting on one connection, red when a connection had
+  64 MB or more; the connections that went over 64 MB are rows of *What happened*, at the time they did.
+- **Network tab:** the bytes waiting on each connection over time (the 12 with the most), and a table of every
+  connection that had 1 MB (or 1,000 frames) or more waiting at some dump: member, peer (member, client, another
+  cluster), peak and when, when it went over 64 MB, its value at its last dump and whether the connection closed.
+- **With a heap dump** of the same member, the table links each connection to its queue in the dump (the messages, their
+  type, the client, the requests behind them), and the heap dump links back.
+
 ## Options
 
 | Option | |
@@ -204,7 +267,7 @@ suspects and the paths to the GC roots, open the dump in Eclipse MAT or VisualVM
 | `--points max\|N` | `max` (default) keeps every metric and profiler dump. `N` merges them into about N points across the time range, for a smaller file |
 | `--top N` | Per metric, chart data for the N most active maps, threads, pipelines, AtomicLongs... (default 40). The others still count in the totals |
 | `--budget N` | At most about N values for the per-item lines. Past that they get coarser and the rest keeps its resolution (default 8,000,000; 0 means no limit) |
-| `--heap-seconds N` | At most N seconds reading each heap dump for its class histogram (default 120). Past that, the histogram covers what was read. `0` keeps only the time it was taken |
+| `--heap-seconds N` | At most N seconds reading each heap dump for its class histogram and large values (default 120), and as long again for the extra passes that read the names of the connections, clients and requests and what waiting threads wait for. Past that, the tables cover what was read. `0` keeps only the time it was taken |
 | `--open` | Open the report in a browser when it's done |
 | `-q`, `--quiet` | Don't print progress |
 
@@ -225,14 +288,14 @@ and so on), **Find**, the time range and the theme.
 
 | Tab | What it shows |
 |---|---|
-| **Overview** | Members and restarts, membership changes, slow executions, slow operations, stuck threads, saturated executors, OutOfMemoryErrors, longest GC pause, heap use, late heartbeats, thread and heap dumps, and what happened when |
+| **Overview** | Members and restarts, membership changes, slow executions, slow operations, stuck threads, saturated executors, outbound write queues, OutOfMemoryErrors, longest GC pause, heap use, late heartbeats, thread and heap dumps (Hazelcast calls never woken, large values), and what happened when |
 | **Latency** | From the operation and invocation profilers: calls per latency group, average and max latency, when each operation was slow, and a table per operation and member. You set the latency groups and the slow threshold, from 1 ms to over 8 s |
 | **Slow operations** | What the slow operation detector reported: each slow invocation once, as a bar from its start to its end, with its stack trace and details. Invocations still running are marked |
 | **Invocations** | From the invocation sampler: how many invocations each member was waiting on at each sample, by operation, and how many of them for longer than the slow threshold; every invocation listed as slow, once, with its data structure, partition, target and how long it stayed pending, and which ones went past their call timeout; the partitions with the most (and their partition thread on the target). Only when the sampler is on |
 | **Operations** | Operation, response and executor queues, pending invocations, and executors whose pool was full while tasks waited (saturated) |
 | **Threads** | Stuck IO and operation threads: idle while work waited in their queue, at two dumps in a row or more. Per-thread metrics too |
-| **Dumps** | The thread dumps and heap dumps found: when each was taken and whose it is. For a thread dump, the threads with the same stack, contended locks, deadlocks, thread names, CPU and the whole dump; for a heap dump, the classes by shallow size and by instances, the largest objects, the Hazelcast classes and the GC roots. Find searches their text and class names. Only when there are dumps |
-| **Network** | Bytes in and out, connections and connection pipelines |
+| **Dumps** | The thread dumps and heap dumps found: when each was taken and whose it is. For a thread dump, the threads with the same stack, contended locks, deadlocks, thread names, CPU and the whole dump; for a heap dump, the Hazelcast calls never woken, the large values and outbound queues, the classes by shallow size and by instances, the largest objects, the Hazelcast classes and the GC roots. Find searches their text and class names. Only when there are dumps |
+| **Network** | The outbound write queue of each connection: the bytes waiting to be written to it over time, and every connection that had 1 MB or more waiting, linked to the heap dump that holds the same queue; bytes in and out, connections and connection pipelines |
 | **Transfer** | How much each member received from and sent to each peer (other members, client hosts, WAN targets), from the per-connection counters |
 | **WAN** | WAN replication per publisher: outbound queues, events published, acknowledgements, failures, sync and consistency checks, WAN bytes and WAN operations |
 | **Data structures** | Maps, multimaps, replicated maps, caches, queues, topics, ringbuffers, executors, PN counters... one kind and one metric at a time, with a table of every structure and every metric of the one you click |
@@ -250,7 +313,7 @@ When member logs (or client logs) are found, a *Source* switch adds these tabs:
 
 | Tab | What it shows |
 |---|---|
-| **Overview** | Warnings and errors over time, and the lines that matter: OutOfMemoryError, partitions lost (`partitionId=N is completely lost!`), WAN replication problems (event queue full and events dropped, failures, warnings and errors of the WAN classes), thread starvation and clock leaps, clock jumps, suspected members, split-brain protection failures, slow and delayed operations, closed connections, lifecycle and membership. Lost partitions and WAN problems are also on the diagnostics Overview, and WAN problems on the WAN tab |
+| **Overview** | Warnings and errors over time; every one of them grouped by message (*Errors and warnings by message*, which the *Errors* and *Warnings* tiles open): the lines of one level and logger whose text is the same but for its numbers, ids and addresses are one kind, with its count per member, first and last time, its exception (linked to the Exceptions tab) and some of its lines as they are; and the lines that matter: OutOfMemoryError, partitions lost (`partitionId=N is completely lost!`), WAN replication problems (event queue full and events dropped, failures, warnings and errors of the WAN classes), thread starvation and clock leaps, clock jumps, suspected members, split-brain protection failures, slow and delayed operations, closed connections, lifecycle and membership, then the other errors and warnings. Lost partitions and WAN problems are also on the diagnostics Overview, and WAN problems on the WAN tab |
 | **Health monitor** | The HealthMonitor lines, charted |
 | **Exceptions** | Every exception, grouped by class and root cause, over time, with the stack trace of the first one |
 | **Migrations** | What the master logged about migrations: each migration plan (`Repartitioning cluster data`), its progress (`Remaining migration tasks`) and how it ended (completed, or failed or aborted and planned again), how long it took; lost partitions, failed migrations and promotions, and partition table changes |

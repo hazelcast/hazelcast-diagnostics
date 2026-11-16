@@ -55,9 +55,10 @@ Operations tab and the Overview.
 Member logs: when the members' own logs are in the directory too (hazelcast.log, an application's log with the
 Hazelcast lines in it, console output with or without colours, rotated or .gz; java.util.logging, log4j, log4j2,
 logback, a date after a level or a prefix, JSON lines, the time of day with the date in the file name), they get
-their own tabs (Source: Member logs): Overview (warnings and errors, notable lines: OutOfMemoryError, partitions
-lost, WAN replication problems, thread starvation / clock leap, clock jumps, suspected members, quorum failures,
-split brain, slow and delayed operations...), Health monitor (the HealthMonitor lines charted), Exceptions (every
+their own tabs (Source: Member logs): Overview (warnings and errors, every one of them grouped by message, and the
+notable lines: OutOfMemoryError, partitions lost, WAN replication problems, thread starvation / clock leap, clock
+jumps, suspected members, quorum failures, split brain, slow and delayed operations..., then the other errors and
+warnings), Health monitor (the HealthMonitor lines charted), Exceptions (every
 exception, grouped by class and root cause), Migrations (the master's migration plans, their progress and how they
 ended, lost partitions, failed migrations and promotions) and CP Subsystem (groups, Raft roles and terms, elections,
 sessions, persistence). A log is recognised by its Hazelcast lines ([host]:port [cluster] [version]) wherever they
@@ -87,6 +88,33 @@ or client (the names of their threads, else their file name or folder), marked o
 Dumps tab: for a thread dump, the threads with the same stack, contended locks, a deadlock, thread names, CPU, the
 whole dump; for a heap dump, a class histogram by shallow size and by instances, the largest objects, the Hazelcast
 classes and the GC roots (read for at most --heap-seconds).
+
+Hazelcast calls never woken: a thread waiting on a Hazelcast call parks in AbstractInvocationFuture.get / join /
+joinInternal until the future completes and wakes it. In a heap dump, each such thread's future is read (its state, and
+what it called: operation, map, partition, correlation id, start time, tries) and the task the thread runs (cancelled
+with an interrupt or not): a thread parked on a future that already holds its result was never woken and never will be
+(a lost wake-up: 5.x, an interrupt racing with the response, then a park inside the warning it logs). Those come first,
+in red, on the Overview, the Dumps tab and the console summary; the other threads in those waits are listed as waiting
+for their response. In thread dumps: the same thread still in the same untimed wait in a later dump of the same JVM,
+with no CPU used in between (elapsed= and cpu=). In the logs: "Future.complete(Object) on completed future" warnings,
+told apart by which came first (the response, then the thread's InterruptedException: the thread can stay stuck; the
+interrupt, then the response: harmless).
+
+Large values: in a heap dump, every byte[] of 64 KB or more is grouped by size and by content (compared at its start,
+middle and end; by a checksum of all of it in a .gz dump) and followed to what holds it: a client message's frame, a
+member Packet, a HeapData. A message is followed to the connection whose outbound queue holds it (NioOutboundPipeline
+writeQueue / priorityWriteQueue), the connection's type and address, its client (ClientEndpointImpl: name, version,
+uuid), its message type (the client protocol's, from its first frame: Map.Get response...) and correlation ids, and the
+requests of that connection still in the heap (their message task: data structure name and key). Many copies of one
+large value (10 or more, 64 MB or more in all) or a connection with 64 MB or more queued come first, in red: what
+Eclipse MAT shows with its dominator tree and OQL, with the object addresses to open there.
+
+Outbound write queues: tcp.connection.out.writeQueuePendingBytes (and priorityWriteQueuePendingBytes, writeQueueSize) per
+connection: what a member has not written to a connection yet. They stay near 0; a connection whose pending bytes reach
+64 MB is a peer that reads slower than it is sent to, and the member keeps all of it on its heap. Those connections come
+first on the Overview (and in What happened, when they went over), with their peak, when, and the heap dump of the same
+member that holds the same connection's queue (what is in it); the Network tab charts the bytes waiting on each
+connection and lists every connection that had 1 MB or more waiting.
 
 Usage
   python3 hz_diag_parser.py <input_dir> [<output_dir>] [options]
@@ -120,7 +148,7 @@ import sys
 import time
 import zlib
 
-__version__ = "2.14.0"
+__version__ = "2.18.0"
 
 # --------------------------------------------------------------------------- line formats
 # "27-10-2026 15:21:16 1793114476412 Name[..."   (the epoch millis are optional)
@@ -3283,6 +3311,152 @@ def export_transfer(members):
                             if u.mtimes]] for mi, m in enumerate(members)]}
 
 
+# --------------------------------------------------------------------------- outbound write queues
+# What a member has not written to a connection yet waits in that connection's outbound queue (NioOutboundPipeline):
+# tcp.connection.out.writeQueuePendingBytes and writeQueueSize (and the priority queue's), per pipeline (pipelineId=
+# /local->/remote). They stay near 0 and clear within a dump; a connection whose pending bytes grow to hundreds of MB,
+# while the member's other connections stay low, is a peer that reads slower than it is sent to (a client asking for
+# large values faster than it reads them, a stuck consumer): the member keeps all of it on its heap. A heap dump of the
+# same member shows what is in that queue (the large values check).
+WQ_RE = re.compile(r"(?:^|,)metric=tcp\.connection\.out\.(?:priorityW|w)riteQueue(?:PendingBytes|Size)(?:,|$)")
+WQ_KINDS = {"tcp.connection.out.writeQueuePendingBytes": "b", "tcp.connection.out.priorityWriteQueuePendingBytes": "pb",
+            "tcp.connection.out.writeQueueSize": "c", "tcp.connection.out.priorityWriteQueueSize": "pc"}
+WQ_MIN = 1 << 20            # a connection with this many bytes waiting at some dump is listed
+WQ_MIN_COUNT = 1000         # ... or this many frames, when the metrics have no bytes
+WQ_ALERT = 64 << 20         # bytes waiting on one connection worth an alert (as the heap dumps' LV_QUEUE_ALERT)
+WQ_ROWS = 100
+WQ_LINES = 12               # connections drawn
+WQ_POINTS = 2000
+
+
+def export_writeq(members, transfer):
+    """The connections whose outbound queue held WQ_MIN bytes (or WQ_MIN_COUNT frames) or more at some dump: member,
+    addresses, peer, peak and when, first dump over WQ_ALERT, last value, whether the connection closed; the bytes at
+    each dump for the WQ_LINES with the most. None when the metrics have no write queue per connection."""
+    cache = {}
+    found = {}                              # (mi, unit index, pipelineId) -> {kind: MSeries}
+    npipes = set()
+    for mi, m in enumerate(members):
+        for ui, u in enumerate(m.units):
+            if not u.mtimes:
+                continue
+            for attrs, ms in u.series.items():
+                k = cache.get(attrs)
+                if k is None:
+                    k = False
+                    if "pipelineId=" in attrs and WQ_RE.search(attrs):
+                        name, _unit, tags = parse_attrs(attrs)
+                        pid = dict(tags).get("pipelineId")
+                        if pid and name in WQ_KINDS:
+                            k = (pid, WQ_KINDS[name])
+                    cache[attrs] = k
+                if k:
+                    found.setdefault((mi, ui, k[0]), {})[k[1]] = ms
+                    npipes.add((mi, k[0]))
+    if not found:
+        return None
+    # who each connection is with: the members' addresses (their files, the member lists) and the transfer's peers
+    maddr = {}
+    for mi, m in enumerate(members):
+        if m.key[0] == "addr":
+            maddr[(norm_ip(m.key[1]), m.key[2])] = m.label
+    for m in members:
+        for u in m.units:
+            for c in u.cluster:
+                for lab in c[3]:
+                    host, _sep, port = lab.rpartition(":")
+                    if host and port.isdigit():
+                        maddr.setdefault((norm_ip(host), int(port)), member_label(host, int(port)))
+    tpeer = {}
+    if transfer:
+        for c in transfer["conns"]:
+            pk = transfer["peers"][c[1]]
+            tpeer[(c[0], c[2])] = (pk[0], pk[1], c[7])
+
+    def val(ms, i):
+        if ms is None or i < ms.first or i >= ms.first + ms.length():
+            return None
+        v = ms.cval if ms.vals is None else ms.vals[i - ms.first]
+        return None if v != v else v
+    def top(ms):                            # its highest value (the series start with a value: max() skips the gaps)
+        if ms is None:
+            return 0.0
+        v = ms.cval if ms.vals is None else max(ms.vals)
+        return v if v == v else 0.0
+    rows = []
+    for (mi, ui, pid), kinds in found.items():
+        if top(kinds.get("b")) + top(kinds.get("pb")) < WQ_MIN and top(kinds.get("c")) + top(kinds.get("pc")) < WQ_MIN_COUNT:
+            continue                            # (an upper bound: most connections stop here)
+        u = members[mi].units[ui]
+        mt = u.mtimes
+        sers = [x for x in kinds.values() if x is not None]
+        i0 = max(0, min(x.first for x in sers))
+        i1 = min(len(mt) - 1, max(x.first + x.length() - 1 for x in sers))
+        has_b = "b" in kinds or "pb" in kinds
+        pts, mx, tmx, cmx, t_over, t_min, last = [], -1.0, None, 0.0, None, None, None
+        for i in range(i0, i1 + 1):
+            b, pb, c, pc = (val(kinds.get(x), i) for x in ("b", "pb", "c", "pc"))
+            if b is None and pb is None and c is None and pc is None:
+                continue
+            v = (b or 0.0) + (pb or 0.0) if has_b else None
+            n = (c or 0.0) + (pc or 0.0)
+            t = mt[i]
+            if v is not None:
+                pts.append((t, v))
+                if v > mx:
+                    mx, tmx = v, t
+                if t_min is None and v >= WQ_MIN:
+                    t_min = t
+                if t_over is None and v >= WQ_ALERT:
+                    t_over = t
+            if n > cmx:
+                cmx = n
+                if not has_b:
+                    tmx = t
+            last = (t, v, n)
+        if last is None or not (mx >= WQ_MIN or cmx >= WQ_MIN_COUNT):
+            continue
+        a, sep, bpart = pid.partition("->")
+        loc, rem = sock_addr(a) if sep else None, sock_addr(bpart) if sep else None
+        host = bpart.rsplit("/", 1)[0] if "/" in bpart else ""
+        tp = tpeer.get((mi, pid))
+        if tp:
+            kind, peer, ctype = tp
+        elif members[mi].key[0] == "client":
+            kind, peer, ctype = "member", maddr.get(rem, member_label(*rem) if rem else "?"), ""
+        elif rem in maddr:
+            kind, peer, ctype = "member", maddr[rem], ""
+        elif loc and members[mi].key[0] == "addr" and loc[1] == members[mi].key[2]:
+            kind, peer, ctype = "client", rem[0] if rem else "?", ""
+        else:
+            kind, peer, ctype = "other", member_label(*rem) if rem else "?", ""
+        rows.append({"m": mi, "pid": pid, "local": member_label(*loc) if loc else None, "remote": member_label(*rem) if rem else None,
+                     "host": host or None, "kind": kind, "peer": peer, "ctype": ctype or None,
+                     "max": int(mx) if mx >= 0 else None, "tmax": int(tmx) if tmx is not None else None,
+                     "t0": int(t_min) if t_min is not None else None, "t1": int(t_over) if t_over is not None else None,
+                     "first": int(mt[i0]), "last": int(last[0]), "lastv": int(last[1]) if last[1] is not None else None,
+                     "cmax": int(cmx), "gone": i1 < len(mt) - 2, "_pts": pts})
+    rows.sort(key=lambda r: (-(r["max"] or 0), -r["cmax"]))
+    rows = rows[:WQ_ROWS]
+    for k, r in enumerate(rows):
+        pts = r.pop("_pts")
+        if k < WQ_LINES and pts:
+            if len(pts) > WQ_POINTS:                # the highest in each slot
+                step = (pts[-1][0] - pts[0][0]) / float(WQ_POINTS) or 1
+                out, cur = [], None
+                for t, v in pts:
+                    slot = int((t - pts[0][0]) // step)
+                    if cur is None or slot != cur[0]:
+                        cur = [slot, t, v]
+                        out.append(cur)
+                    elif v > cur[2]:
+                        cur[1], cur[2] = t, v
+                pts = [(x[1], x[2]) for x in out]
+            r["pts"] = [[int(t), int(v)] for t, v in pts]
+    return {"thr": [WQ_MIN, WQ_ALERT], "rows": rows, "npipes": len(npipes), "alert": sum(1 for r in rows if r["t1"] is not None),
+            "bytes": any(r["max"] is not None for r in rows) or any("b" in k or "pb" in k for k in found.values())}
+
+
 # --------------------------------------------------------------------------- GC logs
 # JDK 9+ unified logging (-Xlog:gc*:file=...:time,uptime,...):
 #   [2026-10-01T06:23:05.509+0000][882.765s] GC(53) Pause Young (Concurrent Start) (G1 Humongous Allocation) 9586M->9526M(12288M) 19.075ms
@@ -4096,6 +4270,14 @@ LEVEL_BINS = 20000                  # time bins of the warning / error counts pe
 BIN_BUDGET = 400000                 # time bins of the exceptions and notable lines, all together
 MAX_EXTRA_LINES = 200               # continuation lines kept per record
 MAX_SAMPLE_LINES = 30               # lines of a stack trace kept as the sample of an exception
+# warning and error lines, grouped by level, logger, exception and text without its numbers (and names with a digit:
+# addresses, ids, pod names); with more than MAX_MSG_KINDS kinds, the rarest are counted together, one group per level
+MAX_MSG_KINDS = 500
+MAX_MSG_ROWS = 20                   # lines kept per kind of message: all of the first 39, then 20 to 39 spread over the log
+MSG_BINS = 1000                     # time bins per kind of message and member
+MSG_BIN_BUDGET = 150000             # time bins of the kinds of message, all together
+MSG_NORM_RE = re.compile(r"-[bcdfghjklmnpqrstvwxz2456789]{6,10}-[bcdfghjklmnpqrstvwxz2456789]{5}(?!\w)|"     # a Kubernetes pod's suffix
+                         r"(?<!\w)(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[A-Za-z_]*\d\w*)")
 # notable lines, by priority: a line goes to the first category it matches
 LOG_CATS = [
     ("oome", "Out of memory", 2, None),
@@ -4107,6 +4289,13 @@ LOG_CATS = [
                 r"\bwan\b.{0,80}\b(?:failed|failure|unreachable|not reachable|refused|timed out|timeout)\b")),
     ("starvation", "Thread starvation / clock leap", 2, re.compile(r"(?i)thread starvation|clock leap")),
     ("clockjump", "System clock jump", 2, re.compile(r"(?i)clock jump|clock apparently jumped|clock-jump")),
+    # "Future.complete(Object) on completed future": two completions of one Hazelcast future (set by completed_future()).
+    # The response first, then the waiting thread's InterruptedException: that thread can stay parked forever (a lost
+    # wake-up, see the heap dumps' Hazelcast waits); the interrupt first, then the response: harmless, but it shows calls
+    # being interrupted while they wait, which is what the first kind needs.
+    ("racelost", "Interrupted Hazelcast call, its response won (the thread can stay stuck)", 2, None),
+    ("racewon", "Interrupted Hazelcast call, the interrupt won (harmless)", 1, None),
+    ("dblcomplete", "Hazelcast future completed twice", 1, None),
     ("suspect", "Member suspected", 1, re.compile(r"(?i)\bsuspect(?:ing|ed)\b")),
     ("splitbrain", "Split brain / merge", 1,
      re.compile(r"(?i)split[- ]?brain(?![- ]?protection)|\bmerg(?:ing|e) (?:\[[^\]]*\] )?to\b|\bmerge (?:process|operation|instruction|tasks?)\b|"
@@ -4119,6 +4308,11 @@ LOG_CATS = [
     ("membership", "Membership", 0, None),
 ]
 CAT_INDEX = {c[0]: i for i, c in enumerate(LOG_CATS)}
+# the warnings and errors that are none of the above, listed with them (all of them are also grouped by message:
+# LogCollector.message); exported apart from them (ocats, oevents, oevbins, osampled), after them in the report
+OTHER_CATS = [("error", "Other errors", 2), ("warning", "Other warnings", 1)]
+OTHER_INDEX = {c[0]: len(LOG_CATS) + i for i, c in enumerate(OTHER_CATS)}
+OTHER_BIN_BUDGET = 100000           # time bins of the other errors and warnings, all together
 CAT_REGEX = [(c[0], c[3]) for c in LOG_CATS if c[3] is not None]
 # what any line can tell, Hazelcast's or not (HikariCP's "Thread starvation or clock leap detected" is the whole JVM's);
 # the other kinds are about Hazelcast and come from its own lines only (an application's SQL "merge into" is no merge)
@@ -4487,6 +4681,20 @@ class ExcGroup(object):
         self.oome = cls.endswith("OutOfMemoryError")
 
 
+class MsgGroup(object):
+    """Warning or error lines alike but for their numbers: one level, logger, exception and text (or, with more than
+    MAX_MSG_KINDS kinds, the rarest ones of a level)."""
+    __slots__ = ("lv", "lg", "exc", "x", "other", "n", "first", "last", "per", "rows", "cats")
+
+    def __init__(self, lv, lg, exc, x, other=False):
+        self.lv, self.lg, self.exc, self.x, self.other = lv, lg, exc, x, other
+        self.n = 0
+        self.first = self.last = None
+        self.per = {}                       # member index -> Bins
+        self.rows = Sample(MAX_MSG_ROWS)    # [t, member index, text, record number]
+        self.cats = {}                      # notable kind -> lines
+
+
 LEVEL_RANK = {"D": 0, "I": 1, "W": 2, "E": 3}
 
 
@@ -4565,12 +4773,37 @@ class Sample(object):
             self.stride *= 2
 
 
+CF_REQ_RE = re.compile(r"operation=([\w.$]+).*?correlationId=(-?\d+)")
+
+
+def completed_future(head, thread):
+    """A "Future.complete(Object) on completed future" warning: (category, a shorter text). Its current value is what
+    completed the future first, its offered value what came second (ExceptionalResult{cause=...} for an exception)."""
+    i = head.find("current value:")
+    j = head.find("offered value:", i + 1) if i >= 0 else -1
+    cur = head[i + 14:j] if j > i >= 0 else ""
+    off = head[j + 14:] if j >= 0 else ""
+    m = CF_REQ_RE.search(head, 0, i if i > 0 else len(head))
+    call = "%s correlationId=%s: " % (m.group(1), m.group(2)) if m else ""
+    who = thread + ": " if thread else ""
+    if "InterruptedException" in off and "InterruptedException" not in cur:
+        return "racelost", who + call + "its response completed the future first, then this thread's InterruptedException; " \
+                                        "if the logging parked the thread, its wake-up is gone and it stays parked in get()"
+    if "InterruptedException" in cur:
+        return "racewon", who + call + "an interrupt completed the future first, then its response (harmless)"
+    return "dblcomplete", who + head[:400]
+
+
 class LogCollector(object):
     def __init__(self):
         self.excs = {}
         self.oome = []                      # [t, member index, reason, logger, text]
         self.uuids = {}                     # CP member uuid -> address label
         self.cplog = {}                     # logger -> whether it is a CP Subsystem one
+        self.msgs = {}                      # (level, logger, exception, text without its numbers) -> MsgGroup
+        self.nmsg = 0                       # kinds of message told apart (at most MAX_MSG_KINDS)
+        self.folded = 0                     # kinds put with the other ones of their level, to make room
+        self.small, self.small_n = [], 0    # the next ones to put there: seen small_n times when listed
 
     def record(self, lm, rec, ctx):
         t, level, logger, thread, msg, extra, dropped = rec
@@ -4606,6 +4839,10 @@ class LogCollector(object):
             lm.levels.add(t, 0 if level == "W" else 1)
         if "heap.memory.used=" in msg or ("processors=" in msg and "load.process=" in msg):
             self.health(lm, t, msg)
+            if level in ("W", "E"):         # counted with the warnings and errors: listed with them too
+                head = msg.strip()
+                self.message(lm, t, level, logger, head, None, None)
+                self.event(lm, "error" if level == "E" else "warning", t, level, logger, head)
             return
         head = msg.strip() or next((x.strip() for x in extra[:6] if x.strip()), "")
         # exceptions and OutOfMemoryError: the message and the lines that are not stack frames
@@ -4617,14 +4854,16 @@ class LogCollector(object):
                     continue
                 text_lines.append(x)
         blob = "\n".join(text_lines)
-        cat = None
+        cat = exc = None
         if "OutOfMemoryError" in blob:
             mo = OOME_RE.search(blob)
             reason = (mo.group(1) or "").strip()[:120] if mo else ""
             self.oome.append([t, lm.index, reason, logger, head.strip()[:400]])
             cat = "oome"
         if "Exception" in blob or "Error" in blob or "Throwable" in blob:
-            self.exception(lm, t, level, logger, msg, extra, text_lines)
+            exc = self.exception(lm, t, level, logger, msg, extra, text_lines)
+        if cat is None and "on completed future" in head:
+            cat, head = completed_future(head, thread)
         low = (blob if head is msg else blob + "\n" + head).lower() if cat is None else ""
         if cat is None and any(w in low for w in CAT_WORDS):
             for key, rx in CAT_REGEX:
@@ -4652,6 +4891,10 @@ class LogCollector(object):
                 if ml:
                     head = ml.group(1)
                     cat = "lifecycle"
+        if level in ("W", "E"):
+            self.message(lm, t, level, logger, head, cat, exc)
+            if cat is None:                 # listed with the notable lines too, as one of the others
+                cat = "error" if level == "E" else "warning"
         if cat is not None:
             self.event(lm, cat, t, level, logger, head)
         cpl = self.cplog.get(logger)
@@ -4732,6 +4975,70 @@ class LogCollector(object):
         if rows.offer():
             rows.keep([t, level, short_logger(logger), text.strip()[:400], lm.records])
 
+    def message(self, lm, t, level, logger, head, cat, exc):
+        """A warning or error line: counted with the ones of the same level, logger and exception whose text is the
+        same but for its numbers (addresses, ids, sizes, names with a digit); a few of them are kept as they are."""
+        text = head.strip()
+        # the logger by its class name: members whose layouts abbreviate it (c.h.i.c.i.ClusterHeartbeatManager) or not
+        key = (level, short_logger(logger), exc, MSG_NORM_RE.sub("#", text[:600])[:300])
+        g = self.msgs.get(key)
+        if g is None:
+            if self.nmsg >= MAX_MSG_KINDS:
+                self.evict()
+            self.nmsg += 1
+            g = self.msgs[key] = MsgGroup(level, logger, exc, text[:400])
+        elif len(logger) > len(g.lg):
+            g.lg = logger                   # its whole name, where a layout gives it
+        g.n += 1
+        if g.first is None or t < g.first:
+            g.first = t
+        if g.last is None or t > g.last:
+            g.last = t
+        b = g.per.get(lm.index)
+        if b is None:
+            b = g.per[lm.index] = Bins(MSG_BINS)
+        b.add(t)
+        if g.rows.offer():
+            g.rows.keep([t, lm.index, text[:400], lm.records])
+        if cat is not None:
+            g.cats[cat] = g.cats.get(cat, 0) + 1
+
+    def evict(self):
+        """Room for a new kind of message: the oldest of the kinds seen the fewest times so far goes in with the other
+        ones of its level (the rarest kinds, counted together), so that the frequent kinds keep a row of their own
+        however late they start."""
+        while True:
+            while self.small:
+                key = self.small.pop()
+                g = self.msgs.get(key)
+                if g is not None and g.n <= self.small_n:
+                    del self.msgs[key]
+                    self.nmsg -= 1
+                    self.folded += 1
+                    self.fold(g)
+                    return
+            self.small_n = min(g.n for g in self.msgs.values() if not g.other)
+            self.small = [k for k, g in self.msgs.items() if not g.other and g.n == self.small_n][::-1]
+
+    def fold(self, g):
+        """A kind of message, counted with the other ones of its level from now on."""
+        key = (g.lv, None, None, None)
+        o = self.msgs.get(key)
+        if o is None:
+            o = self.msgs[key] = MsgGroup(g.lv, "", None, "", True)
+        o.n += g.n
+        o.first = g.first if o.first is None else min(o.first, g.first)
+        o.last = g.last if o.last is None else max(o.last, g.last)
+        for mi, b in g.per.items():
+            ob = o.per.get(mi)
+            if ob is None:
+                ob = o.per[mi] = Bins(MSG_BINS)
+            for k, v in b.d.items():
+                ob.add(k * 1000, 0, v[0])
+        for r in g.rows.rows:
+            if o.rows.offer():
+                o.rows.keep(r)
+
     def health(self, lm, t, text):
         vals = parse_health(text)
         if not vals:
@@ -4764,7 +5071,7 @@ class LogCollector(object):
                 if m:
                     top, top_msg = m.group(1), (m.group(2) or "").strip()
         if top is None:
-            return
+            return None
         if root == top:
             root = None
         key = (top, root)
@@ -4794,6 +5101,7 @@ class LogCollector(object):
         if g.sample is None:
             lines = [msg] + list(extra[:MAX_SAMPLE_LINES])
             g.sample = [t, lm.index, logger, "\n".join(x[:300] for x in lines)]
+        return key
 
     def cp(self, lm, t, level, logger, msg, extra):
         head = msg.strip() or next((x.strip() for x in extra[:6] if x.strip()), "")
@@ -4981,9 +5289,11 @@ def export_logs(lms, col):
     if not lms:
         return None
     files, levels, events, evbins, health, membership, cp, roles, sampled = [], [], [], [], [], [], [], [], []
+    oevents, oevbins, osampled = [], [], []
     hkeys, hidx = [], {}
-    fit_bins([b for lm in lms for b in lm.ebins.values()] + [b for g in col.excs.values() for b in g.per.values()]
+    fit_bins([b for lm in lms for k, b in lm.ebins.items() if k not in OTHER_INDEX] + [b for g in col.excs.values() for b in g.per.values()]
              + [b for lm in lms for b in lm.cpbins.values()], BIN_BUDGET)
+    fit_bins([b for lm in lms for k, b in lm.ebins.items() if k in OTHER_INDEX], OTHER_BIN_BUDGET)
     cpbins = []
     for lm in sorted(lms, key=lambda x: x.index):
         mi = lm.index
@@ -4992,12 +5302,13 @@ def export_logs(lms, col):
         if lm.levels:
             levels.append([mi, lm.levels.export(), lm.levels.step * 1000])
         for cat, smp in lm.events.items():
-            ci = CAT_INDEX[cat]
+            other = cat in OTHER_INDEX
+            ci = OTHER_INDEX[cat] if other else CAT_INDEX[cat]
             for r in smp.rows:
-                events.append([r[0], mi, ci, r[1], r[2], r[3], r[4]])
-            evbins.append([ci, mi, lm.ecount.get(cat, 0), lm.ebins[cat].export()])
+                (oevents if other else events).append([r[0], mi, ci, r[1], r[2], r[3], r[4]])
+            (oevbins if other else evbins).append([ci, mi, lm.ecount.get(cat, 0), lm.ebins[cat].export()])
             if smp.stride > 1:
-                sampled.append([mi, cat, smp.seen, len(smp.rows)])
+                (osampled if other else sampled).append([mi, cat, smp.seen, len(smp.rows)])
         if lm.health_t:
             cols = {}
             for k, vals in lm.health.items():
@@ -5018,16 +5329,29 @@ def export_logs(lms, col):
         for g, rows in lm.roles.items():
             roles.append([mi, g, rows])
     events.sort(key=lambda e: (e[0], e[1], e[6]))      # in the order they were logged, without the record number
+    oevents.sort(key=lambda e: (e[0], e[1], e[6]))
     cp.sort(key=lambda e: (e[0], e[1], e[7]))
     events = [e[:6] for e in events]
+    oevents = [e[:6] for e in oevents]
     cp = [e[:7] for e in cp]
-    excs = []
+    excs, exc_at = [], {}
     for g in sorted(col.excs.values(), key=lambda g: (-g.n, g.cls)):
+        exc_at[(g.cls, g.root)] = len(excs)
         excs.append({"c": g.cls, "r": g.root, "lv": g.lv, "n": g.n, "f": int(g.first), "l": int(g.last),
                      "ms": [[mi, per.export()] for mi, per in sorted(g.per.items())],
                      "lg": [k for k, _v in sorted(g.loggers.items(), key=lambda kv: -kv[1])[:4]],
                      "msg": [[v[1], v[0]] for _k, v in sorted(g.msgs.items(), key=lambda kv: -kv[1][0])[:8]],
                      "s": g.sample, "oome": g.oome})
+    # warnings and errors by message: [{lv, lg logger, x the first line, n, f, l, ms [[member, bins]], r kept lines
+    # [[t, member, text]], e exception (index in exc), c notable kind (index in cats), o the rarest kinds together}]
+    fit_bins([b for g in col.msgs.values() for b in g.per.values()], MSG_BIN_BUDGET)
+    msgs = []
+    for g in sorted(col.msgs.values(), key=lambda g: (-g.n, g.other, g.lv, g.lg, g.x)):
+        cat = max(sorted(g.cats.items()), key=lambda kv: kv[1])[0] if g.cats else None
+        msgs.append({"lv": g.lv, "lg": g.lg, "x": g.x, "n": g.n, "f": int(g.first), "l": int(g.last),
+                     "ms": [[mi, per.export()] for mi, per in sorted(g.per.items())],
+                     "r": [[int(r[0]), r[1], r[2]] for r in sorted(g.rows.rows, key=lambda r: (r[0], r[1], r[3]))],
+                     "e": exc_at.get(g.exc) if g.exc else None, "c": CAT_INDEX[cat] if cat else None, "o": 1 if g.other else 0})
     info = [[lm.index, lm.version, lm.cluster, lm.records, int(lm.first) if lm.first is not None else None,
              int(lm.last) if lm.last is not None else None, len(lm.files)] for lm in lms]
     mig = {"kinds": [[k[0], k[1], k[2]] for k in MIG_KINDS], "rows": [], "bins": [], "procs": []}
@@ -5047,7 +5371,8 @@ def export_logs(lms, col):
     return {"files": files, "info": info, "cats": [[c[0], c[1], c[2]] for c in LOG_CATS], "levels": levels,
             "events": events, "evbins": evbins, "exc": excs, "oome": sorted(col.oome, key=lambda r: r[0]),
             "health": {"keys": hkeys, "rows": health}, "membership": membership, "cp": cp, "roles": roles,
-            "uuids": col.uuids, "sampled": sampled, "cpbins": cpbins, "mig": mig}
+            "uuids": col.uuids, "sampled": sampled, "cpbins": cpbins, "mig": mig, "msgs": msgs, "msgcap": MAX_MSG_KINDS,
+            "ocats": [list(c) for c in OTHER_CATS], "oevents": oevents, "oevbins": oevbins, "osampled": osampled}
 
 
 def health_values(times, vals, counter):
@@ -5078,6 +5403,9 @@ TD_LOCK_RE = re.compile(r"^\s+- (locked|waiting to lock|waiting on|parking to wa
                         r"<(0x[0-9a-fA-F]+)> \(a (.+?)\)")
 TD_OWNABLE_RE = re.compile(r"^\s+- <(0x[0-9a-fA-F]+)> \(a (.+?)\)")
 TD_CPU_RE = re.compile(r"\bcpu=([\d.]+)ms")
+TD_ELAPSED_RE = re.compile(r"\belapsed=([\d.]+)s")
+# a thread waiting on a Hazelcast call: parked under AbstractInvocationFuture.get / join / joinInternal
+TD_HZW_RE = re.compile(r"^com\.hazelcast\.spi\.impl\.AbstractInvocationFuture\.(?:get|join|joinInternal)\(")
 TD_KEEP_RE = re.compile(r"^(?:Threads class SMR info|_java_thread_list=|0x[0-9a-fA-F]|\}|JNI global refs|Heap\s*$|Found (?:one|\d+) "
                         r"Java-level deadlock|Found \d+ deadlock|=====|Java stack information|Locked ownable|Thread-local|Compiler)")
 TD_MODULE_RE = re.compile(r"\((?:[\w.$-]+@[\w.+-]+/|[\w.$-]+//?)")
@@ -5251,9 +5579,10 @@ def parse_thread_dump(lines, fmt):
             rest = m.group("rest") or ""
             st = TD_STATE_ATTR_RE.search(rest)
             cpu = TD_CPU_RE.search(rest)
+            el = TD_ELAPSED_RE.search(rest)
             cur = {"name": m.group("name"), "daemon": " daemon" in rest or "daemon=true" in rest, "state": st.group(1) if st else "",
                    "detail": "", "frames": [], "locks": [], "owns": [], "cpu": float(cpu.group(1)) if cpu else None,
-                   "virtual": "virtual" in rest}
+                   "el": float(el.group(1)) if el else None, "virtual": "virtual" in rest}
             threads.append(cur)
             owns = False
             continue
@@ -5384,10 +5713,92 @@ def analyze_thread_dump(threads, deadlock):
                 dl = path
                 break
     cpu = sorted((t for t in threads if t["cpu"] is not None), key=lambda t: -t["cpu"])[:8]
-    return {"n": len(threads), "states": states, "daemon": sum(1 for t in threads if t["daemon"]),
-            "virtual": sum(1 for t in threads if t.get("virtual")), "groups": rows[:60], "ngroups": len(rows),
-            "families": fam[:40], "locks": locks[:30], "deadlock": dl,
-            "cpu": [{"name": t["name"], "cpu_ms": t["cpu"], "state": t["state"]} for t in cpu if t["cpu"] > 0]}
+    out = {"n": len(threads), "states": states, "daemon": sum(1 for t in threads if t["daemon"]),
+           "virtual": sum(1 for t in threads if t.get("virtual")), "groups": rows[:60], "ngroups": len(rows),
+           "families": fam[:40], "locks": locks[:30], "deadlock": dl,
+           "cpu": [{"name": t["name"], "cpu_ms": t["cpu"], "state": t["state"]} for t in cpu if t["cpu"] > 0]}
+    hw = td_hzwaits(threads)
+    if hw:
+        out["hzw"] = hw
+    return out
+
+
+def td_hzwait(frames):
+    """For a thread parked waiting on a Hazelcast call: (the index of its get / join / joinInternal frame, timed), else None."""
+    if not frames or not frames[0].startswith(("jdk.internal.misc.Unsafe.park", "sun.misc.Unsafe.park")):
+        return None
+    for i, f in enumerate(frames[:10]):
+        if TD_HZW_RE.match(f):
+            return i, any("LockSupport.parkNanos" in x or "LockSupport.parkUntil" in x for x in frames[:i])
+    return None
+
+
+def td_hzwaits(threads):
+    """The threads parked waiting on Hazelcast calls (AbstractInvocationFuture.get / join / joinInternal): untimed ones
+    first (a thread dump cannot tell whether a future already holds its result; a heap dump can, and a later thread
+    dump of the same JVM where the same thread still waits, having used no CPU, says it was never woken)."""
+    rows, fams = [], {}
+    for t in threads:
+        fam = re.sub(r"\d+$", "#", t["name"])
+        x = fams.setdefault(fam, [0, 0])
+        x[1] += 1
+        w = td_hzwait(t["frames"])
+        if w is None:
+            continue
+        i, timed = w
+        if not timed:
+            x[0] += 1
+        api = app = None
+        for f in t["frames"][i + 1:i + 60]:
+            cls, _d, meth = f.split("(", 1)[0].rpartition(".")
+            if api is None and cls.startswith("com.hazelcast.") and not hzw_internal(cls, meth):
+                api = td_short(f)
+            if app is None and cls and not cls.startswith("com.hazelcast.") and not TD_JDK_RE.match(cls):
+                app = td_short(f)
+            if api and app:
+                break
+        rows.append({"name": t["name"], "cpu": t["cpu"], "el": t.get("el"), "timed": timed, "api": api, "app": app})
+    if not rows:
+        return None
+    rows.sort(key=lambda r: (r["timed"], -(r["el"] or 0), r["name"]))
+    return {"n": sum(1 for r in rows if not r["timed"]), "timed": sum(1 for r in rows if r["timed"]), "rows": rows[:300],
+            "fams": sorted([[f, v[0], v[1]] for f, v in fams.items() if v[0]], key=lambda x: (-x[1], x[0]))[:12]}
+
+
+def td_same_jvm(a, b, ra, rb):
+    """Whether two thread dumps are of the same JVM, from threads they share (ra, rb: name -> row): their elapsed time
+    grew by the time between the dumps (JDK 11+); else the same member or client, or the same file."""
+    pairs = [(ra[n]["el"], rb[n]["el"]) for n in rb if n in ra and ra[n]["el"] is not None and rb[n]["el"] is not None]
+    if pairs:
+        dt = (b["t"] - a["t"]) / 1000.0 if a["t"] is not None and b["t"] is not None else None
+        grow = [y - x for x, y in pairs]
+        if dt is not None:
+            tol = max(5.0, 0.01 * abs(dt))
+            return sum(1 for g in grow if abs(g - dt) <= tol) * 2 > len(grow)
+        return all(g >= 0 for g in grow) and max(grow) - min(grow) <= 5.0
+    return (a["m"] >= 0 and a["m"] == b["m"]) or a["f"] == b["f"]
+
+
+def td_hzw_link(dumps):
+    """A thread still parked in the same Hazelcast wait in a later dump of the same JVM, having used no CPU in between,
+    was never woken: its row gets since (the first dump it was seen waiting in) and the dump's hzw gets still (how many)."""
+    tds = sorted((d for d in dumps if d["k"] == "thread" and d.get("hzw")), key=lambda d: (d["t"] is None, d["t"] or 0, d["f"], d.get("nth", 0)))
+    for j, b in enumerate(tds):
+        rb = dict((r["name"], r) for r in b["hzw"]["rows"] if not r["timed"])
+        for a in reversed(tds[:j]):
+            ra = dict((r["name"], r) for r in a["hzw"]["rows"] if not r["timed"])
+            common = [n for n in rb if n in ra]
+            if not common or not td_same_jvm(a, b, ra, rb):
+                continue
+            for n in common:
+                x, y = ra[n], rb[n]
+                if x["cpu"] is not None and y["cpu"] is not None and abs(y["cpu"] - x["cpu"]) > 1.0:
+                    continue                    # it ran in between: a new call, not the same wait
+                if "since" not in y:
+                    y["since"] = x.get("since", a["t"])
+                    y["sincef"] = x.get("sincef", a["f"])
+            break                               # the nearest earlier dump of the same JVM
+        b["hzw"]["still"] = sum(1 for r in rb.values() if "since" in r)
 
 
 # --------------------------------------------------------------------------- heap dumps
@@ -5436,8 +5847,10 @@ def hprof_class_name(raw):
     return raw.replace("/", ".") + "[]" * dims
 
 
-def read_hprof(path, deadline=None):
-    """The quick look at a heap dump (see above). deadline: time.time() past which the histogram stops (partial)."""
+def read_hprof(path, deadline=None, extra_seconds=None):
+    """The quick look at a heap dump (see above). deadline: time.time() past which the histogram stops (partial).
+    extra_seconds: how long the extra passes for the Hazelcast waits may take (default: as long as the first pass had)."""
+    started = time.time()
     h = hprof_header(path)
     if h is None:
         return None
@@ -5451,18 +5864,28 @@ def read_hprof(path, deadline=None):
     S_parr = struct.Struct(">" + idc + "IIB")
     S_id = struct.Struct(">" + idc)
     S_u2 = struct.Struct(">H")
+    S_root = struct.Struct(">" + idc + "II")         # thread object / Java frame root: id, thread serial, trace serial / frame number
+    S_frame = struct.Struct(">" + idc * 4 + "Ii")   # stack frame: id, method name, signature, source file, class serial, line
+    S_trace = struct.Struct(">III")                 # stack trace: serial, thread serial, frames
     strings, classes = {}, {}           # string id -> bytes; class object id -> name string id
     inst = {}                           # class id -> [instances, instance data bytes]
     arrs = {}                           # array class id (or -type for primitive arrays) -> [arrays, elements, shallow bytes w/o refs]
     cdump = {}                          # class id -> (super id, instance field types)
+    hm = HprofModel(IDS, strings, classes, cdump)   # the Hazelcast waits: stacks, roots, the objects worth reading
+    want, troots, jf_o, jf_t, jf_f = hm.want, hm.troots, hm.jf_o, hm.jf_t, hm.jf_f
+    lvm = hm.lv = HprofLarge(hm)                    # the large values: big byte[], outbound queues, messages
+    gzc = None                                      # a large byte[] read through in a .gz dump: [id, length, checksum, start]
+    sw, pend, ring_id, ring_len, ring_b, ri, ring_on = lvm.small_want, lvm.pend, lvm.ring_id, lvm.ring_len, lvm.ring_b, 0, False
+    nrec = 0
+    aif_frames = None
     roots, nthreads = {}, 0
     big = []                            # the largest objects: (bytes, class key, elements)
     maxid = 0
     partial = False
     root_size = {0xFF: IDS, 0x01: 2 * IDS, 0x02: IDS + 8, 0x03: IDS + 8, 0x04: IDS + 4, 0x05: IDS, 0x06: IDS + 4, 0x07: IDS, 0x08: IDS + 8}
-    seekable = not path.lower().endswith(".gz")
     CH = 4 * 1024 * 1024
     with hprof_open(path) as f:
+        seekable = not isinstance(f, gzip.GzipFile)
         f.read(len(fmt) + 1 + 12)
         while True:
             head = f.read(9)
@@ -5475,8 +5898,24 @@ def read_hprof(path, deadline=None):
                 continue
             if tag == 0x02:                             # LOAD CLASS: serial, class id, stack serial, name id
                 data = f.read(ln)
-                classes[S_id.unpack_from(data, 4)[0]] = S_id.unpack_from(data, 8 + IDS)[0]
+                cid = S_id.unpack_from(data, 4)[0]
+                classes[cid] = S_id.unpack_from(data, 8 + IDS)[0]
+                hm.cser[S_trace.unpack_from(data, 0)[0]] = cid
                 continue
+            if tag == 0x04 and ln >= S_frame.size:      # STACK FRAME (the threads' stacks)
+                fr = S_frame.unpack(f.read(ln)[:S_frame.size])
+                hm.frames[fr[0]] = fr[1:]
+                continue
+            if tag == 0x05 and ln >= 12:                # STACK TRACE: serial, thread serial, frames, frame ids
+                data = f.read(ln)
+                ser, tser, nfr = S_trace.unpack_from(data, 0)
+                nfr = min(nfr, (ln - 12) // IDS)
+                hm.traces[ser] = (tser, struct.unpack_from(">%d%s" % (nfr, idc), data, 12))
+                continue
+            if tag in (0x0C, 0x1C) and aif_frames is None:  # the stacks come before the heap: the frames of the futures' waits
+                aif_frames = hm.wait_frames()
+                # client messages' frames can be in this dump: keep the last small byte[] (their headers come just before)
+                ring_on = LV_FRAME_RAW in set(strings.get(x) for x in classes.values())
             if tag not in (0x0C, 0x1C) or partial:      # not a heap dump (segment)
                 if seekable:
                     f.seek(ln, 1)
@@ -5503,11 +5942,18 @@ def read_hprof(path, deadline=None):
                 if sub == 0x21:                         # INSTANCE: id, stack serial, class id, bytes, data
                     oid, _s, cid, nb = S_inst.unpack_from(b, p + 1)
                     c = inst.get(cid)
-                    if c is None:
-                        inst[cid] = [1, nb]
+                    if c is None:                       # a class's first instance: what its instances are to us (future...)
+                        c = inst[cid] = [1, nb, hm.kind(cid)]
                     else:
                         c[0] += 1
                     end = p + 1 + S_inst.size + nb
+                    if (c[2] is not None or (want and oid in want)) and end <= n:
+                        if c[2] == "lv_frame":          # a message frame: with the ring of the last small byte[]
+                            lvm.take_frame(oid, cid, b[p + 1 + S_inst.size:end], ri if ring_on else -1)
+                            if want and oid in want:
+                                hm.take(oid, cid, b[p + 1 + S_inst.size:end], None)
+                        else:
+                            hm.take(oid, cid, b[p + 1 + S_inst.size:end], c[2])
                 elif sub == 0x23:                       # PRIMITIVE ARRAY: id, stack serial, elements, type, data
                     oid, _s, ne, ty = S_parr.unpack_from(b, p + 1)
                     es = HPROF_TYPES.get(ty, 1)
@@ -5523,6 +5969,51 @@ def read_hprof(path, deadline=None):
                     if sz > 65536:
                         big.append((sz, k, ne, oid))
                     end = p + 1 + S_parr.size + ne * es
+                    if want and oid in want:
+                        hm.take_array(oid, ty, b[p + 1 + S_parr.size:min(end, n)])
+                    if ty == 8 and ne < LV_TRACK:       # a small byte[]: a message frame's content?
+                        if ring_on:
+                            ring_id[ri] = oid
+                            ring_len[ri] = ne
+                            if 13 <= ne <= 64:
+                                ring_b[ri] = b[end - ne:end]
+                            ri = (ri + 1) & (LV_RING - 1)
+                        if sw and oid in sw:
+                            lvm.came(oid, ne, b[end - ne:min(end, end - ne + 64)])
+                        if pend:
+                            pend.pop(oid, None)
+                    elif ty == 8:                       # byte[] from 1 KB: the large values, the lengths
+                        q = p + 1 + S_parr.size
+                        if ne >= LV_MIN:
+                            if n - q < LV_SAMPLE and rem > 0:       # its first bytes in the buffer
+                                data = f.read(min(CH, rem))
+                                rem -= len(data)
+                                b = b[p:] + data
+                                end -= p
+                                q -= p
+                                p, n = 0, len(b)
+                            vh = b[q:q + min(ne, LV_SAMPLE, n - q)]
+                            if seekable:                # its start, middle and end tell copies apart
+                                here = f.tell()
+                                base = here - (n - q)
+                                crc = zlib.crc32(vh)
+                                for at in (base + ne // 2, base + ne - LV_SAMPLE):
+                                    f.seek(at)
+                                    crc = zlib.crc32(f.read(LV_SAMPLE), crc)
+                                f.seek(here)
+                                lvm.add_big(oid, ne, crc, base, vh)
+                            elif end <= n:              # a .gz dump reads it all anyway: a checksum of all of it
+                                lvm.add_big(oid, ne, zlib.crc32(b[q:end]), -1, vh)
+                            else:
+                                gzc = [oid, ne, zlib.crc32(b[q:n]), vh]
+                        else:
+                            if len(lvm.t_id) < LV_TRACK_CAP:
+                                lvm.t_id.append(oid)
+                                lvm.t_len.append(ne)
+                            if pend:
+                                pend.pop(oid, None)
+                        if sw and oid in sw:
+                            lvm.came(oid, ne, b"")
                 elif sub == 0x22:                       # OBJECT ARRAY: id, stack serial, elements, class id, ids
                     oid, _s, ne, cid = S_oarr.unpack_from(b, p + 1)
                     c = arrs.get(cid)
@@ -5534,6 +6025,8 @@ def read_hprof(path, deadline=None):
                     if ne > 16384:
                         big.append((ne, cid, ne, oid))
                     end = p + 1 + S_oarr.size + ne * IDS
+                    if want and oid in want:
+                        hm.take_array(oid, 2, b"")
                 elif sub == 0x20:                       # CLASS: id, stack, super, loader, signers, domain, 2 reserved, size...
                     if n - p < 65536 and rem > 0:       # (variable length: have it all in the buffer)
                         data = f.read(min(CH, rem))
@@ -5550,12 +6043,16 @@ def read_hprof(path, deadline=None):
                         q += 3 + (HPROF_TYPES.get(ty, 0) or IDS)
                     nst = S_u2.unpack_from(b, q)[0]
                     q += 2
+                    aif = strings.get(classes.get(cid)) == HZW_AIF_RAW
                     for _i in range(nst):
                         ty = b[q + IDS]
+                        if aif and ty == 2 and strings.get(S_id.unpack_from(b, q)[0]) == b"UNRESOLVED":
+                            hm.unresolved = S_id.unpack_from(b, q + IDS + 1)[0]
                         q += IDS + 1 + (HPROF_TYPES.get(ty, 0) or IDS)
                     nfi = S_u2.unpack_from(b, q)[0]
                     q += 2
                     types = bytes(b[q + IDS + j * (IDS + 1)] for j in range(nfi))
+                    hm.cfld[cid] = tuple(S_id.unpack_from(b, q + j * (IDS + 1))[0] for j in range(nfi))
                     q += nfi * (IDS + 1)
                     cdump[cid] = (sup, types)
                     end = q
@@ -5563,6 +6060,19 @@ def read_hprof(path, deadline=None):
                 elif sub in root_size:
                     if sub == 0x08:
                         nthreads += 1
+                        toid, tser, trs = S_root.unpack_from(b, p + 1)
+                        troots[tser] = (toid, trs)
+                    elif sub == 0x03:                   # Java frame: object id, thread serial, frame number in its stack
+                        joid, jts, jfn = S_root.unpack_from(b, p + 1)
+                        if joid:
+                            jf_o.append(joid)
+                            jf_t.append(jts)
+                            jf_f.append(jfn)
+                            if aif_frames:
+                                tr = troots.get(jts)
+                                fids = hm.traces.get(tr[1]) if tr else None
+                                if fids and jfn < len(fids[1]) and fids[1][jfn] in aif_frames:
+                                    hm.held.add(joid)
                     roots[sub] = roots.get(sub, 0) + 1
                     end = p + 1 + root_size[sub]
                     oid = 0
@@ -5580,12 +6090,18 @@ def read_hprof(path, deadline=None):
                         f.seek(skip, 1)
                     else:
                         while skip > 0:
-                            k = len(f.read(min(skip, CH)))
-                            if not k:
+                            chunk = f.read(min(skip, CH))
+                            if not chunk:
                                 break
-                            skip -= k
+                            if gzc is not None:
+                                gzc[2] = zlib.crc32(chunk, gzc[2])
+                            skip -= len(chunk)
+                    if gzc is not None:
+                        lvm.add_big(gzc[0], gzc[1], gzc[2], -1, gzc[3])
+                        gzc = None
                     b, p, n = b"", 0, 0
-                if deadline is not None and (len(inst) & 1023) == 0 and time.time() > deadline:
+                nrec += 1
+                if deadline is not None and (nrec & 0xFFFF) == 0 and time.time() > deadline:
                     partial = True
                     break
             if rem > 0 and not partial:                 # the segment was not read to its end
@@ -5617,7 +6133,7 @@ def read_hprof(path, deadline=None):
             v = fields[cid] = own + (sup or 0)
         return v
     hist = []
-    for cid, (cnt, nb) in inst.items():
+    for cid, (cnt, nb, _k) in inst.items():
         fb = fbytes(cid)
         one = (hdr + fb + 7) & ~7 if fb is not None else (16 + nb + 7) & ~7
         hist.append([cname(cid), cnt, cnt * one])
@@ -5638,12 +6154,661 @@ def read_hprof(path, deadline=None):
             largest.append([cname(k), ((hdr + 4 + ne * ref + 7) & ~7), ne])
     largest.sort(key=lambda r: -r[1])
     hz = [r for r in hist if r[0].startswith("com.hazelcast.")]
-    return {"format": fmt, "ids": IDS, "epoch": ts, "objects": objs, "bytes": total, "classes": len(classes),
-            "instances_classes": len(inst), "compressed": comp, "threads": nthreads,
-            "roots": dict((HPROF_ROOTS[k], v) for k, v in sorted(roots.items())),
-            "top": hist[:60], "top_count": sorted(hist, key=lambda r: -r[1])[:30], "largest": largest[:15],
-            "hz": hz[:40], "hz_total": [sum(r[1] for r in hz), sum(r[2] for r in hz)], "partial": partial,
-            "read": pos if partial else None}
+    out = {"format": fmt, "ids": IDS, "epoch": ts, "objects": objs, "bytes": total, "classes": len(classes),
+           "instances_classes": len(inst), "compressed": comp, "threads": nthreads,
+           "roots": dict((HPROF_ROOTS[k], v) for k, v in sorted(roots.items())),
+           "top": hist[:60], "top_count": sorted(hist, key=lambda r: -r[1])[:30], "largest": largest[:15],
+           "hz": hz[:40], "hz_total": [sum(r[1] for r in hz), sum(r[2] for r in hz)], "partial": partial,
+           "read": pos if partial else None}
+    if extra_seconds is None:
+        extra_seconds = max(30.0, (deadline - started) if deadline is not None else 120.0)
+    lva = None
+    if lvm.active():                            # the large values: groups, holders, outbound queues
+        try:
+            lva = LvAnalysis(hm, lvm, partial)
+        except (struct.error, IndexError, KeyError, TypeError, ValueError) as e:
+            warn("cannot work out the large values in %s: %s" % (path, e))
+    extra = [lva.need] if lva is not None else []
+    if hm.futs or (partial and hm.held):        # threads waiting on Hazelcast calls: what each waits for
+        try:
+            w = hzw_analyze(path, hm, ts, partial, time.time() + extra_seconds, extra)
+        except (OSError, EOFError, struct.error, IndexError, KeyError, zlib.error) as e:
+            warn("cannot work out the Hazelcast waits in %s: %s" % (path, e))
+            w = None
+        if w:
+            out["hzw"] = w
+        elif extra:                             # no wait after all: the passes for the large values alone
+            hprof_more_safe(path, hm, extra, time.time() + extra_seconds)
+    elif extra:
+        hprof_more_safe(path, hm, extra, time.time() + extra_seconds)
+    if lva is not None:
+        try:
+            out["lv"] = lva.finish(total, not lva.need())
+            out["lv"]["passes"] = hm.passes
+        except (struct.error, IndexError, KeyError, TypeError, ValueError) as e:
+            warn("cannot work out the large values in %s: %s" % (path, e))
+    return out
+
+
+# --------------------------------------------------------------------------- heap dumps: Hazelcast calls never woken
+# A thread waiting for a Hazelcast call parks in AbstractInvocationFuture.get, join or joinInternal until the future
+# completes and whoever completes it unparks the thread. A heap dump holds both sides at the same instant: the future's
+# state (the response, an ExceptionalResult, or still the waiting thread itself) and the thread's stack. A thread still
+# parked in that wait on a future that already holds its result was never woken: a lost wake-up. In 5.x it happens when
+# an interrupt (Reactor cancelling a subscribeOn task calls Future.cancel(true)) races with the response: the response
+# completes the future and unparks the thread while it is awake (the wake-up stays as a permit), the thread's own
+# completion fails and it logs "Future.complete(Object) on completed future", the logging call parks on a lock and uses
+# up the permit, and get() parks again without checking isDone(): forever, in the untimed get(), join(), joinInternal().
+HZW_AIF = "com.hazelcast.spi.impl.AbstractInvocationFuture"
+HZW_AIF_RAW = HZW_AIF.replace(".", "/").encode("ascii")
+HZW_WAIT_METHODS = frozenset(("get", "join", "joinInternal"))
+HZW_LONG_MS = 120000        # a call still waiting for its response after this long is listed as long (the client's invocation timeout)
+HZW_STUCK_MS = 5000         # a parked thread whose future holds its result: stuck when the call is this old, or was interrupted;
+                            # a younger, uninterrupted one is most likely being woken as the dump was taken (its response just came)
+HZW_MAX_ROWS = 300
+HZW_ARRAY_CAP = 65536       # bytes kept of a captured array (a String's value, a message frame)
+HZW_FUTURES_CAP = 100000    # futures kept when a dump puts the objects before the threads' stacks
+HZW_PASSES = 4              # passes over a dump at most, the first one included
+HZW_TASK_STATES = {0: "NEW", 1: "COMPLETING", 2: "NORMAL", 3: "EXCEPTIONAL", 4: "CANCELLED", 5: "INTERRUPTING", 6: "INTERRUPTED"}
+# what to read further from an object of these classes (or their subclasses) to say what a call was
+HZW_FOLLOW = (
+    ("java.lang.String", ("value",)),
+    ("java.lang.Thread", ("name",)),
+    (HZW_AIF, ("state", "invocation", "request", "logger")),
+    ("com.hazelcast.client.impl.spi.impl.ClientInvocation", ("objectName",)),
+    ("com.hazelcast.spi.impl.operationservice.impl.Invocation", ("op",)),
+    ("com.hazelcast.spi.impl.operationservice.Operation", ("name",)),
+    ("com.hazelcast.client.impl.protocol.ClientMessage", ("startFrame", "operationName")),
+    ("com.hazelcast.client.impl.protocol.ClientMessage$Frame", ("content",)),
+    (HZW_AIF + "$ExceptionalResult", ("cause",)),
+)
+HZW_LOG_ROUTES = (("StandardLoggerFactory$StandardLogger", "java.util.logging"), ("Slf4jFactory$Slf4jLogger", "SLF4J"),
+                  ("Log4j2Factory$Log4j2Logger", "Log4j 2"), ("Log4jFactory$Log4jLogger", "Log4j"),
+                  ("NoLogFactory$NoLogger", "none (Hazelcast logging off)"))
+HPROF_FIELD_FMT = {4: ">?", 5: ">H", 6: ">f", 7: ">d", 8: ">b", 9: ">h", 10: ">i", 11: ">q"}
+
+
+class HprofModel(object):
+    """What read_hprof keeps of a heap dump to tell what the threads waiting on Hazelcast calls wait for: the thread
+    stacks, the thread and Java frame roots, the classes' fields, and the objects worth reading (the futures in a wait,
+    the threads, the tasks threads run, and what those point to: a future's state, invocation, request, logger...)."""
+
+    def __init__(self, ids, strings, classes, cdump):
+        self.ids = ids
+        self.S_id = struct.Struct(">Q" if ids == 8 else ">I")
+        self.strings, self.classes, self.cdump = strings, classes, cdump
+        self.cfld = {}                  # class id -> its own fields' name ids, in the order of cdump's types
+        self.cser = {}                  # class serial -> class id
+        self.frames = {}                # frame id -> (method name id, signature id, source file id, class serial, line)
+        self.traces = {}                # trace serial -> (thread serial, frame ids, top first)
+        self.troots = {}                # thread serial -> (thread object id, trace serial)
+        tc = "Q" if ids == 8 else "I"
+        self.jf_o, self.jf_t, self.jf_f = array.array(tc), array.array("I"), array.array("I")    # Java frame roots
+        self.held = set()               # objects that a frame of a future's wait refers to
+        self.heldready = False          # whether held was worked out while reading (the stacks came before the heap)
+        self.obj = {}                   # object id -> (class id, instance data), or (-type, data) for a primitive array
+        self.want = set()               # object ids to keep when they come by
+        self.futs = set()               # the futures kept (AbstractInvocationFuture subclasses)
+        self.ftask = {}                 # thread object id -> (state, class id) of the FutureTask the thread runs
+        self.unresolved = 0             # AbstractInvocationFuture.UNRESOLVED (its static field)
+        self.passes = 1
+        self.lv = None                  # HprofLarge: what the large-value check keeps (set by read_hprof)
+        self._name, self._layout, self._follow, self._sub = {}, {}, {}, {}
+
+    def cname(self, cid):
+        nm = self._name.get(cid)
+        if nm is None:
+            raw = self.strings.get(self.classes.get(cid))
+            nm = self._name[cid] = hprof_class_name(raw.decode("utf-8", "replace")) if raw else "class@%x" % cid
+        return nm
+
+    def is_sub(self, cid, name):
+        """Whether the class is name or extends it (superclasses only: a heap dump has no interfaces)."""
+        key = (cid, name)
+        v = self._sub.get(key)
+        if v is None:
+            v, c, depth = False, cid, 0
+            while c and depth < 60:
+                if self.cname(c) == name:
+                    v = True
+                    break
+                d = self.cdump.get(c)
+                c = d[0] if d else 0
+                depth += 1
+            self._sub[key] = v
+        return v
+
+    def wait_frames(self):
+        """The stack frames of the futures' waits (AbstractInvocationFuture and its ManagedBlocker), once the stacks are read."""
+        self.heldready = bool(self.traces)
+        out = set()
+        for fid, fr in self.frames.items():
+            cls = self.cname(self.cser.get(fr[3], 0))
+            if cls == HZW_AIF or cls == HZW_AIF + "$ManagedBlocker":
+                out.add(fid)
+        return out
+
+    def kind(self, cid):
+        """What a class's instances are to us: a future, a FutureTask, a thread, or None (asked at its first instance)."""
+        if self.is_sub(cid, HZW_AIF):
+            return "fut"
+        if self.is_sub(cid, "java.util.concurrent.FutureTask"):
+            return "task"
+        if self.is_sub(cid, "java.lang.Thread"):
+            return "thread"
+        return lv_kind(self, cid) if self.lv is not None else None
+
+    def layout(self, cid):
+        """field name -> (offset, basic type) in an instance's data: its class's fields, then its superclass's..."""
+        lay = self._layout.get(cid)
+        if lay is None:
+            lay, off, c, depth = {}, 0, cid, 0
+            while c and depth < 60:
+                d = self.cdump.get(c)
+                if d is None:
+                    break
+                names = self.cfld.get(c, ())
+                for j, t in enumerate(d[1]):
+                    nm = self.strings.get(names[j]) if j < len(names) else None
+                    if nm is not None:
+                        key = nm.decode("utf-8", "replace")
+                        if key not in lay:
+                            lay[key] = (off, t)
+                    off += self.ids if t == 2 else HPROF_TYPES.get(t, 0)
+                c = d[0]
+                depth += 1
+            self._layout[cid] = lay
+        return lay
+
+    def value(self, cid, data, name):
+        """A field of an instance: an object id (0 for null), a number, or None when it has no such field."""
+        x = self.layout(cid).get(name)
+        if x is None:
+            return None
+        off, t = x
+        try:
+            if t == 2:
+                return self.S_id.unpack_from(data, off)[0]
+            return struct.unpack_from(HPROF_FIELD_FMT[t], data, off)[0]
+        except (struct.error, KeyError):
+            return None
+
+    def field(self, oid, name):
+        """A field of a kept object, None when the object was not kept (or has no such field)."""
+        o = self.obj.get(oid) if oid else None
+        if o is None or o[0] < 0:
+            return None
+        return self.value(o[0], o[1], name)
+
+    def cls_of(self, oid):
+        o = self.obj.get(oid) if oid else None
+        if o is None:
+            return None
+        return self.cname(o[0]) if o[0] >= 0 else HPROF_PRIM.get(-o[0], "Object[]")
+
+    def follow_offsets(self, cid, lv=False):
+        """The reference fields read further from an object of this class: HZW_FOLLOW's (and LV_FOLLOW's with lv)."""
+        offs = self._follow.get((cid, lv))
+        if offs is None:
+            offs, lay = [], self.layout(cid)
+            rules = list(HZW_FOLLOW) + (list(LV_FOLLOW) if lv else [])
+            cn = self.cname(cid)
+            if cn.startswith("com.hazelcast.") and cn.endswith("$DefaultLogger"):     # the member's and the client's logger
+                rules.append((cn, ("name", "logger")))                                 # wrappers (their package moves)
+            for cls, names in rules:
+                if self.is_sub(cid, cls):
+                    for nm in names:
+                        x = lay.get(nm)
+                        if x is not None and x[1] == 2 and x[0] not in offs:
+                            offs.append(x[0])
+            self._follow[(cid, lv)] = offs
+        return offs
+
+    def follow(self, cid, data):
+        """Ask for the objects this one points to that tell more about a call or a connection (HZW_FOLLOW, LV_FOLLOW)."""
+        for off in self.follow_offsets(cid, True):
+            try:
+                v = self.S_id.unpack_from(data, off)[0]
+            except struct.error:
+                continue
+            if v and v not in self.obj:
+                self.want.add(v)
+
+    def keep(self, oid, cid, data):
+        if oid not in self.obj:
+            self.obj[oid] = (cid, data)
+            self.follow(cid, data)
+
+    def take(self, oid, cid, data, kind):
+        """An instance came by: keep it when it is wanted or of a kind we look at."""
+        if kind is not None and kind.startswith("lv_"):            # the large values' objects (queues, messages...)
+            self.lv.take(oid, cid, data, kind)
+            if oid in self.want:
+                self.want.discard(oid)
+                self.keep(oid, cid, data)
+            return
+        if kind is None and oid in self.held and self.is_sub(cid, HZW_AIF):   # an extra pass: a future of a wait
+            kind = "fut"
+        if oid in self.want:
+            self.want.discard(oid)
+            self.keep(oid, cid, data)
+        if kind == "fut":
+            if oid in self.held or (not self.heldready and len(self.futs) < HZW_FUTURES_CAP):
+                self.futs.add(oid)
+                self.keep(oid, cid, data)
+        elif kind == "thread":
+            self.keep(oid, cid, data)
+        elif kind == "task":
+            runner = self.value(cid, data, "runner")
+            if runner:
+                self.ftask[runner] = (self.value(cid, data, "state"), cid)
+
+    def take_array(self, oid, ty, data):
+        self.want.discard(oid)
+        if oid not in self.obj:
+            self.obj[oid] = (-ty, data[:HZW_ARRAY_CAP])
+
+    def string(self, oid):
+        """A java.lang.String's text, None when it was not read."""
+        o = self.obj.get(oid) if oid else None
+        if o is None or o[0] < 0:
+            return None
+        v = self.value(o[0], o[1], "value")
+        if not v:
+            return "" if v == 0 else None
+        a = self.obj.get(v)
+        if a is None or a[0] >= 0:
+            return None
+        if a[0] == -5:                          # char[]: JDK 8
+            return a[1].decode("utf-16-be", "replace")
+        coder = self.value(o[0], o[1], "coder") or 0
+        return a[1].decode("latin-1") if coder == 0 else a[1].decode("utf-16-le", "replace")
+
+    def frame(self, fid):
+        """(class, method, signature, 'class.method(File.java:line)') of a stack frame."""
+        fr = self.frames.get(fid)
+        if fr is None:
+            return ("?", "?", "", "?")
+        mn, sg, sf, cs, line = fr
+        cls = self.cname(self.cser[cs]) if cs in self.cser else "?"
+        meth = (self.strings.get(mn) or b"?").decode("utf-8", "replace")
+        sig = (self.strings.get(sg) or b"").decode("utf-8", "replace")
+        src = (self.strings.get(sf) or b"").decode("utf-8", "replace")
+        if line > 0:
+            loc = "%s:%d" % (src, line) if src else "line %d" % line
+        elif line == -3:
+            loc = "Native Method"
+        elif line == -2:
+            loc = "Compiled Code"
+        else:
+            loc = src or "Unknown Source"
+        return (cls, meth, sig, "%s.%s(%s)" % (cls, meth, loc))
+
+
+def hprof_skip(f, n, seekable, ch):
+    if seekable:
+        f.seek(n, 1)
+        return
+    while n > 0:
+        k = len(f.read(min(n, ch)))
+        if not k:
+            break
+        n -= k
+
+
+def hprof_fetch(path, hm, deadline):
+    """One more pass over a heap dump for the objects in hm.want (and what they point to, when it comes after them).
+    False when the time ran out."""
+    h = hprof_header(path)
+    if h is None:
+        return False
+    fmt, IDS = h[0], h[1]
+    idc = "Q" if IDS == 8 else "I"
+    S_rec = struct.Struct(">BII")
+    S_inst = struct.Struct(">" + idc + "I" + idc + "I")
+    S_oarr = struct.Struct(">" + idc + "II" + idc)
+    S_parr = struct.Struct(">" + idc + "IIB")
+    S_u2 = struct.Struct(">H")
+    root_size = {0xFF: IDS, 0x01: 2 * IDS, 0x02: IDS + 8, 0x03: IDS + 8, 0x04: IDS + 4, 0x05: IDS, 0x06: IDS + 4, 0x07: IDS, 0x08: IDS + 8}
+    CH = 4 * 1024 * 1024
+    want, count = hm.want, 0
+    hm.passes += 1
+    with hprof_open(path) as f:
+        seekable = not isinstance(f, gzip.GzipFile)
+        f.read(len(fmt) + 1 + 12)
+        while want:
+            head = f.read(9)
+            if len(head) < 9:
+                break
+            tag, _t, ln = S_rec.unpack(head)
+            if tag not in (0x0C, 0x1C):
+                hprof_skip(f, ln, seekable, CH)
+                continue
+            rem = ln
+            b = f.read(min(CH, rem))
+            rem -= len(b)
+            p, n = 0, len(b)
+            while want:
+                if n - p < 512 and rem > 0:
+                    data = f.read(min(CH, rem))
+                    rem -= len(data)
+                    b = b[p:] + data
+                    p, n = 0, len(b)
+                if p >= n:
+                    break
+                sub = b[p]
+                if sub == 0x21:
+                    oid, _s, cid, nb = S_inst.unpack_from(b, p + 1)
+                    end = p + 1 + S_inst.size + nb
+                    if oid in want and end <= n:
+                        hm.take(oid, cid, b[p + 1 + S_inst.size:end], None)
+                elif sub == 0x23:
+                    oid, _s, ne, ty = S_parr.unpack_from(b, p + 1)
+                    end = p + 1 + S_parr.size + ne * HPROF_TYPES.get(ty, 1)
+                    if oid in want:
+                        hm.take_array(oid, ty, b[p + 1 + S_parr.size:min(end, n)])
+                elif sub == 0x22:
+                    oid, _s, ne, _c = S_oarr.unpack_from(b, p + 1)
+                    end = p + 1 + S_oarr.size + ne * IDS
+                    if oid in want:
+                        hm.take_array(oid, 2, b"")
+                elif sub == 0x20:
+                    if n - p < 65536 and rem > 0:
+                        data = f.read(min(CH, rem))
+                        rem -= len(data)
+                        b = b[p:] + data
+                        p, n = 0, len(b)
+                    q = p + 1 + 7 * IDS + 8
+                    ncp = S_u2.unpack_from(b, q)[0]
+                    q += 2
+                    for _i in range(ncp):
+                        q += 3 + (HPROF_TYPES.get(b[q + 2], 0) or IDS)
+                    nst = S_u2.unpack_from(b, q)[0]
+                    q += 2
+                    for _i in range(nst):
+                        q += IDS + 1 + (HPROF_TYPES.get(b[q + IDS], 0) or IDS)
+                    end = q + 2 + S_u2.unpack_from(b, q)[0] * (IDS + 1)
+                elif sub in root_size:
+                    end = p + 1 + root_size[sub]
+                else:                                   # a sub-record we do not know (not HotSpot): what was found is all
+                    return True
+                if end <= n:
+                    p = end
+                else:
+                    skip = end - n
+                    rem -= skip
+                    hprof_skip(f, skip, seekable, CH)
+                    b, p, n = b"", 0, 0
+                count += 1
+                if (count & 0xFFFF) == 0 and time.time() > deadline:
+                    return False
+            if not want:
+                break
+    return True
+
+
+def hprof_more(path, hm, needs, deadline):
+    """Extra passes over a heap dump until the analyses' need() functions find nothing missing, at most HZW_PASSES passes
+    in all (the first one included) and until deadline. True when nothing is missing."""
+    try:
+        while True:
+            miss = set()
+            for nd in needs:
+                miss |= nd()
+            if not miss:
+                return True
+            if hm.passes >= HZW_PASSES or time.time() > deadline:
+                return False
+            before = len(hm.obj)
+            hm.want.clear()
+            hm.want.update(miss)
+            ok = hprof_fetch(path, hm, deadline)
+            if not ok or len(hm.obj) == before:
+                return False
+    finally:
+        hm.want.clear()
+
+
+def hprof_more_safe(path, hm, needs, deadline):
+    try:
+        return hprof_more(path, hm, needs, deadline)
+    except (OSError, EOFError, struct.error, IndexError, KeyError, zlib.error) as e:
+        warn("cannot read more of the heap dump %s: %s" % (path, e))
+        return False
+
+
+def hzw_done(hm, st):
+    """Whether a future's state is its result (AbstractInvocationFuture.isDone): True, False, or None when not known."""
+    if st is None:
+        return None
+    if st == 0:
+        return True
+    if st == hm.unresolved:
+        return False
+    o = hm.obj.get(st)
+    if o is None:
+        return None
+    if o[0] < 0:
+        return True
+    if hm.is_sub(o[0], "java.lang.Thread"):     # the waiting thread itself: the only waiter
+        return False
+    name = hm.cname(o[0])
+    if name.startswith(HZW_AIF + "$"):          # WaitNode, the completion nodes (Waiter), UNRESOLVED's own class
+        return name == HZW_AIF + "$ExceptionalResult"
+    return True
+
+
+def hzw_internal(cls, meth):
+    """A frame of Hazelcast's invocation machinery, below the API call a thread made (ClientMapProxy.get...)."""
+    short = cls.rsplit(".", 1)[-1]
+    return cls == HZW_AIF or short.startswith("ClientProxy") or "Invocation" in short or "Invoker" in short or \
+        meth.endswith("Internal") or meth.startswith("invoke") or short in ("OperationServiceImpl", "InvocationBuilder")
+
+
+def hzw_analyze(path, hm, epoch, partial, deadline, extra=()):
+    """The threads waiting on Hazelcast calls in a heap dump and what each waits for: rows (never woken first), counts,
+    the thread pools they belong to, how the futures log. None when no thread waits on one. extra: the need() of other
+    analyses of the same dump (the large values), read in the same extra passes."""
+    started = time.time()
+    if partial and hm.held:                     # the first pass stopped early: the futures of the waits it did not reach
+        lost = [o for o in hm.held if o not in hm.obj]
+        if lost and time.time() < deadline:
+            hm.want.clear()
+            hm.want.update(lost)
+            hprof_fetch(path, hm, deadline)
+    meta = {}
+
+    def fmeta(fid):
+        m = meta.get(fid)
+        if m is None:
+            m = meta[fid] = hm.frame(fid)
+        return m
+    holders = {}
+    futs = hm.futs
+    for o, t, fn in zip(hm.jf_o, hm.jf_t, hm.jf_f):
+        if o in futs:
+            holders.setdefault(o, []).append((t, fn))
+    # each thread in a future's wait: the innermost frame of get / join / joinInternal, and the future it waits on
+    waits = {}
+    for fut, hs in holders.items():
+        for tser, fn in hs:
+            tr = hm.troots.get(tser)
+            st = hm.traces.get(tr[1]) if tr else None
+            if not st:
+                continue
+            fids = st[1]
+            # the frame that refers to the future is the wait itself or the manageParking above it; else (when the dump
+            # kept only the caller's local) the frame that called get(), with the wait just above it
+            found = None
+            for k in range(fn, min(fn + 4, len(fids))):
+                cls, meth, sig, _txt = fmeta(fids[k])
+                if cls == HZW_AIF and meth in HZW_WAIT_METHODS:
+                    found = (k, sig, 0)
+                    break
+                if cls not in (HZW_AIF, HZW_AIF + "$ManagedBlocker") and not cls.startswith("java.util.concurrent.ForkJoin"):
+                    break
+            if found is None:
+                for k in range(fn - 1, max(-1, fn - 3), -1):
+                    cls, meth, sig, _txt = fmeta(fids[k])
+                    if cls == HZW_AIF and meth in HZW_WAIT_METHODS:
+                        found = (k, sig, 1)
+                        break
+            if found is not None:
+                cur = waits.get(tser)
+                if cur is None or (found[0], found[2]) < (cur[1], cur[3]):
+                    waits[tser] = (fut, found[0], found[1], found[2])
+    if not waits:
+        return None
+    # the task each waiting thread runs: its FutureTask.run frame refers to it (cancelled with an interrupt, or not)
+    tasks = {}
+    for o, t, fn in zip(hm.jf_o, hm.jf_t, hm.jf_f):
+        if t in waits:
+            tr = hm.troots.get(t)
+            st = hm.traces.get(tr[1]) if tr else None
+            if st and fn < len(st[1]):
+                c, m, _s, _x = fmeta(st[1][fn])
+                if m == "run" and c.endswith("FutureTask"):
+                    tasks.setdefault(t, []).append(o)
+    # what the rows need: the futures' state, invocation, request, logger and what those point to; the threads' names
+    threads = [t[0] for t in hm.troots.values()]
+
+    def need():
+        out, seen, todo = set(), set(), [w[0] for w in waits.values()] + threads + [o for v in tasks.values() for o in v]
+        while todo:
+            oid = todo.pop()
+            if not oid or oid in seen:
+                continue
+            seen.add(oid)
+            o = hm.obj.get(oid)
+            if o is None:
+                out.add(oid)
+            elif o[0] >= 0:
+                for off in hm.follow_offsets(o[0]):
+                    try:
+                        todo.append(hm.S_id.unpack_from(o[1], off)[0])
+                    except struct.error:
+                        pass
+        return out
+    hprof_more(path, hm, [need] + list(extra), deadline)
+    complete = not partial and not need()
+    for tser, objs in tasks.items():            # tasks read in the extra passes (not seen by the first one)
+        toid = hm.troots[tser][0]
+        if toid in hm.ftask:
+            continue
+        for o in objs:
+            c = hm.obj.get(o)
+            if c is not None and c[0] >= 0 and hm.is_sub(c[0], "java.util.concurrent.FutureTask") and hm.field(o, "runner") == toid:
+                hm.ftask[toid] = (hm.field(o, "state"), c[0])
+                break
+    fam_total, tnames = {}, {}
+    for tser, (toid, _trs) in hm.troots.items():
+        nm = hm.string(hm.field(toid, "name"))
+        tnames[tser] = nm
+        if nm:
+            fam = re.sub(r"\d+$", "#", nm)
+            fam_total[fam] = fam_total.get(fam, 0) + 1
+    short = lambda c: c.rsplit(".", 1)[-1] if c else None
+    rows = []
+    for tser, (fut, fn, sig, _prio) in waits.items():
+        toid, trs = hm.troots[tser]
+        fids = hm.traces[trs][1]
+        top = [fmeta(x) for x in fids[:fn + 1]]
+        parked = bool(top) and top[0][1] == "park" and top[0][0].endswith(".Unsafe")
+        timed = "J" in sig.split(")", 1)[0] or any(c == "java.util.concurrent.locks.LockSupport" and m in ("parkNanos", "parkUntil")
+                                                   for c, m, _s, _t in top)
+        st = hm.field(fut, "state")
+        done = hzw_done(hm, st)
+        code = "R" if not parked else "?" if done is None else ("L" if timed else "S") if done else "W"
+        inv = hm.field(fut, "invocation") or 0
+        req = hm.field(fut, "request") or 0
+        op = hm.field(inv, "op") or 0
+        opname = hm.string(hm.field(req, "operationName")) if req else None
+        if not opname and op:
+            opname = short(hm.cls_of(op))
+        objn = hm.string(hm.field(inv, "objectName")) if inv else None
+        if objn is None and op:
+            objn = hm.string(hm.field(op, "name"))
+        part = hm.field(inv, "partitionId")
+        if part is None and op:
+            part = hm.field(op, "partitionId")
+        corr = None
+        if req:
+            fr = hm.field(req, "startFrame") or 0
+            ct = hm.obj.get(hm.field(fr, "content") or 0)
+            if ct is not None and ct[0] == -8 and len(ct[1]) >= 12:
+                corr = struct.unpack_from("<q", ct[1], 4)[0]
+        elif op:
+            corr = hm.field(op, "callId")
+        t0 = hm.field(inv, "startTimeMillis")
+        if t0 is None:
+            t0 = hm.field(inv, "firstInvocationTimeMillis")
+        if t0 is not None and t0 <= 0:
+            t0 = None
+        if done:
+            c = hm.cls_of(st) if st else None
+            res = "null" if not st else short(c) or "?"
+            if c == HZW_AIF + "$ExceptionalResult":
+                res = "ExceptionalResult(%s)" % (short(hm.cls_of(hm.field(st, "cause"))) or "?")
+        elif done is False:
+            c = hm.cls_of(st)
+            res = "nothing yet" if st == hm.unresolved else "this thread (its only waiter)" if st == toid else \
+                "waiters (WaitNode)" if c == HZW_AIF + "$WaitNode" else "waiter: " + (short(c) or "?")
+        else:
+            res = "not read"
+        task = hm.ftask.get(toid)
+        api = app = None
+        for x in fids[fn + 1:fn + 60]:
+            c, m, _s, _t = fmeta(x)
+            if api is None and c.startswith("com.hazelcast.") and not hzw_internal(c, m):
+                api = short(c) + "." + m
+            if app is None and not c.startswith("com.hazelcast.") and not TD_JDK_RE.match(c):
+                app = short(c) + "." + m
+            if api and app:
+                break
+        intr = hm.field(fut, "interrupted")          # a member's InvocationFuture remembers an interrupt
+        age = epoch - t0 if t0 is not None and epoch else None
+        if code in ("S", "L") and not ((task and task[0] in ("INTERRUPTED", "INTERRUPTING")) or intr) and \
+                age is not None and age < HZW_STUCK_MS:
+            code = "C"                              # completing: its response came in just before the dump
+        rows.append({"th": tnames.get(tser) or "thread #%d" % tser, "st": code, "fut": short(hm.cls_of(fut)), "res": res,
+                     "op": opname, "obj": objn, "pt": part, "cid": corr, "t0": t0,
+                     "age": age, "tries": hm.field(inv, "invokeCount"),
+                     "task": [HZW_TASK_STATES.get(task[0], str(task[0])), short(hm.cname(task[1]))] if task else None,
+                     "fi": bool(intr) if intr is not None else None, "api": api, "app": app,
+                     "fr": [fmeta(x)[3] for x in fids[:40]], "_f": fut})
+    order = {"S": 0, "L": 1, "?": 2, "C": 3, "R": 4, "W": 5}
+    rows.sort(key=lambda r: (order[r["st"]], r["t0"] if r["st"] in "SL" and r["t0"] is not None else 0,
+                             -(r["age"] or 0) if r["st"] == "W" else 0, r["th"]))
+    n = {}
+    for r in rows:
+        n[r["st"]] = n.get(r["st"], 0) + 1
+    stuck = [r for r in rows if r["st"] in ("S", "L")]
+    fam_stuck = {}
+    for r in stuck:
+        fam = re.sub(r"\d+$", "#", r["th"])
+        fam_stuck[fam] = fam_stuck.get(fam, 0) + 1
+    pools = sorted([[f, k, fam_total.get(f, k)] for f, k in fam_stuck.items()], key=lambda x: (-x[1], x[0]))
+
+    def route(fut):
+        lg = hm.field(fut, "logger") or 0
+        c = hm.cls_of(lg)
+        if not c:
+            return None
+        name = None
+        if c.endswith("$DefaultLogger"):                 # LoggingServiceImpl's (member), ClientLoggingService's (client)
+            name = hm.string(hm.field(lg, "name"))
+            d = hm.cls_of(hm.field(lg, "logger") or 0)
+            if d:
+                c = d
+        return [next((label for suf, label in HZW_LOG_ROUTES if c.endswith(suf)), short(c)), name]
+    first = rows[0]["_f"]                       # how the futures log: the first stuck one's (else any)
+    for r in rows:
+        del r["_f"]
+    return {"rows": rows[:HZW_MAX_ROWS], "nrows": len(rows), "n": n,
+            "long": sum(1 for r in rows if r["st"] == "W" and (r["age"] or 0) >= HZW_LONG_MS),
+            "intr": sum(1 for r in stuck if (r["task"] and r["task"][0] in ("INTERRUPTED", "INTERRUPTING")) or r["fi"]),
+            "pools": pools[:12], "log": route(first), "complete": complete, "passes": hm.passes,
+            "secs": round(time.time() - started, 2)}
 
 
 HEAP_EXTS = (".hprof", ".bin", ".dump", ".heap")
@@ -5651,6 +6816,915 @@ TD_EXTS = (".tdump", ".jstack", ".threads", ".json", ".dump")
 DUMP_WORDS = frozenset("heap heapdump hprof dump dumps thread threads threaddump tdump jstack jcmd stack stacks td hd java pid oom out "
                        "stdout stderr console log logs txt json diagnostics gc bin".split())
 TD_MAX_TOTAL = 24 * 1024 * 1024     # characters of thread dump text kept in the report, all together
+
+
+# --------------------------------------------------------------------------- heap dumps: large values and the queues holding them
+# A member that has more to send to a client than the client reads keeps it in the connection's outbound queue
+# (NioOutboundPipeline.writeQueue): ClientMessage objects, each a chain of frames whose content is a byte[] (the first, the
+# header: message type and correlation id; then the parameters, a value as serialized Data). One large entry read by many
+# calls (a 3 MB value read 2,000 times) fills the heap with copies of the same bytes. In a heap dump: the byte[] of 64 KB and
+# more, grouped by size and content (compared at their start, middle and end); what holds each one (a message frame, a member
+# Packet, a HeapData); for a queued message, its type, its queue, connection and client; the requests of that connection
+# still in the heap (their message task: data structure and key). What Eclipse MAT shows by hand with OQL, in one pass.
+LV_MIN = 65536              # a byte[] this big or bigger is a large value: grouped by size and content, followed to its holder
+LV_TRACK = 1024             # byte[] lengths kept from this size up (the bytes queued per connection)
+LV_TRACK_CAP = 4000000
+LV_BIG_CAP = 500000         # large byte[] kept at most
+LV_SAMPLE = 4096            # bytes compared at the start, middle and end of a large byte[] (all of it in a .gz dump)
+LV_OBJ_CAP = 2000000        # messages, frames, queue nodes, connections... kept at most (about 100 bytes each)
+LV_PEND_CAP = 1000000       # HeapData whose byte[] has not come by yet, kept at most
+LV_RING = 4096              # the last small byte[] seen (a power of 2): a message's header comes just before its Frame (or after)
+LV_FRAME_RAW = b"com/hazelcast/client/impl/protocol/ClientMessage$Frame"
+LV_QUEUE_ALERT = 64 << 20   # bytes queued to one connection worth an alert
+LV_COPIES_ALERT = 10        # copies of one large value worth an alert, with LV_COPIES_BYTES or more in all
+LV_COPIES_BYTES = 64 << 20
+LV_GROUPS = 12
+LV_SINGLE = 1 << 20         # a byte[] this big is listed even with no other of its size
+LV_QUEUES = 20
+LV_TASKS = 20
+LV_QUEUE_FIELDS = ("writeQueue", "priorityWriteQueue", "urgentWriteQueue")
+# the client protocol's message types (service << 16 | method << 8 | kind: 0 request, 1 response, 2 and up events): service id
+# -> (name, its methods from id 1, "-" where not known), from the protocol definitions (hazelcast-client-protocol)
+HZ_PROTO = {
+    0: ("Client", "Authentication AuthenticationCustom AddClusterViewListener CreateProxy DestroyProxy AddPartitionLostListener "
+                  "RemovePartitionLostListener GetDistributedObjects AddDistributedObjectListener RemoveDistributedObjectListener Ping "
+                  "Statistics DeployClasses CreateProxies - - TriggerPartitionAssignment RemoveMigrationListener - FetchSchema - "
+                  "TpcAuthentication"),
+    1: ("Map", "Put Get Remove Replace ReplaceIfSame ContainsKey ContainsValue RemoveIfSame Delete Flush TryRemove TryPut PutTransient "
+               "PutIfAbsent Set Lock TryLock IsLocked Unlock AddInterceptor RemoveInterceptor AddEntryListenerToKeyWithPredicate "
+               "AddEntryListenerWithPredicate AddEntryListenerToKey AddEntryListener RemoveEntryListener AddPartitionLostListener "
+               "RemovePartitionLostListener GetEntryView Evict EvictAll LoadAll LoadGivenKeys KeySet GetAll Values EntrySet "
+               "KeySetWithPredicate ValuesWithPredicate EntriesWithPredicate AddIndex Size IsEmpty PutAll Clear ExecuteOnKey SubmitToKey "
+               "ExecuteOnAllKeys ExecuteWithPredicate ExecuteOnKeys ForceUnlock KeySetWithPagingPredicate ValuesWithPagingPredicate "
+               "EntriesWithPagingPredicate FetchKeys FetchEntries Aggregate AggregateWithPredicate Project ProjectWithPredicate "
+               "FetchNearCacheInvalidationMetadata RemoveAll AddNearCacheInvalidationListener FetchWithQuery EventJournalSubscribe "
+               "EventJournalRead SetTtl PutWithMaxIdle PutTransientWithMaxIdle PutIfAbsentWithMaxIdle SetWithMaxIdle ReplaceAll"),
+    2: ("MultiMap", "Put Get Remove KeySet Values EntrySet ContainsKey ContainsValue ContainsEntry Size Clear ValueCount "
+                    "AddEntryListenerToKey AddEntryListener RemoveEntryListener Lock TryLock IsLocked Unlock ForceUnlock RemoveEntry"),
+    3: ("Queue", "Offer Put Size Remove Poll Take Peek Iterator DrainTo DrainToMaxSize Contains ContainsAll CompareAndRemoveAll "
+                 "CompareAndRetainAll Clear AddAll AddListener RemoveListener RemainingCapacity"),
+    4: ("Topic", "Publish AddMessageListener RemoveMessageListener"),
+    5: ("List", "Size Contains ContainsAll Add Remove AddAll CompareAndRemoveAll CompareAndRetainAll Clear GetAll AddListener "
+                "RemoveListener IsEmpty AddAllWithIndex Get Set AddWithIndex RemoveWithIndex LastIndexOf IndexOf Sub Iterator"),
+    6: ("Set", "Size Contains ContainsAll Add Remove AddAll CompareAndRemoveAll CompareAndRetainAll Clear GetAll AddListener RemoveListener"),
+    7: ("FencedLock", "Lock TryLock Unlock GetLockOwnership"),
+    8: ("ExecutorService", "Shutdown IsShutdown CancelOnPartition CancelOnMember SubmitToPartition SubmitToMember"),
+    9: ("AtomicLong", "Apply Alter AddAndGet CompareAndSet Get GetAndAdd"),
+    10: ("AtomicRef", "Apply CompareAndSet Contains Get Set"),
+    11: ("CountDownLatch", "TrySetCount Await CountDown GetCount"),
+    12: ("Semaphore", "Init Acquire Release Drain Change AvailablePermits"),
+    13: ("ReplicatedMap", "Put Size IsEmpty ContainsKey ContainsValue Get Remove PutAll Clear AddEntryListenerToKeyWithPredicate "
+                         "AddEntryListenerWithPredicate AddEntryListenerToKey AddEntryListener RemoveEntryListener KeySet Values EntrySet "
+                         "AddNearCacheEntryListener PutAllWithMetadata FetchEntryViews"),
+    14: ("TransactionalMap", "ContainsKey Get GetForUpdate Size IsEmpty Put Set PutIfAbsent Replace ReplaceIfSame Remove Delete "
+                             "RemoveIfSame KeySet KeySetWithPredicate Values ValuesWithPredicate ContainsValue"),
+    15: ("TransactionalMultiMap", "Put Get Remove RemoveEntry ValueCount Size"),
+    16: ("TransactionalSet", "Add Remove Size"),
+    17: ("TransactionalList", "Add Remove Size"),
+    18: ("TransactionalQueue", "Offer Take Poll Peek Size"),
+    19: ("Cache", "AddEntryListener Clear RemoveAllKeys RemoveAll ContainsKey CreateConfig Destroy EntryProcessor GetAll GetAndRemove "
+                 "GetAndReplace GetConfig Get Iterate ListenerRegistration LoadAll ManagementConfig PutIfAbsent Put RemoveEntryListener "
+                 "RemoveInvalidationListener Remove Replace Size AddPartitionLostListener RemovePartitionLostListener PutAll "
+                 "IterateEntries AddNearCacheInvalidationListener FetchNearCacheInvalidationMetadata EventJournalSubscribe "
+                 "EventJournalRead SetExpiryPolicy"),
+    20: ("XATransaction", "ClearRemote CollectTransactions Finalize Commit Create Prepare Rollback"),
+    21: ("Transaction", "Commit Create Rollback"),
+    22: ("ContinuousQuery", "PublisherCreateWithValue PublisherCreate MadePublishable AddListener SetReadCursor"),
+    23: ("Ringbuffer", "Size TailSequence HeadSequence Capacity RemainingCapacity Add ReadOne AddAll ReadMany"),
+    24: ("DurableExecutor", "Shutdown IsShutdown SubmitToPartition RetrieveResult DisposeResult"),
+    25: ("CardinalityEstimator", "Add Estimate"),
+    26: ("ScheduledExecutor", "Shutdown SubmitToPartition SubmitToMember GetAllScheduledFutures GetStatsFromPartition GetStatsFromMember "
+                             "GetDelayFromPartition GetDelayFromMember CancelFromPartition CancelFromMember IsCancelledFromPartition "
+                             "IsCancelledFromMember IsDoneFromPartition IsDoneFromMember GetResultFromPartition GetResultFromMember "
+                             "DisposeFromPartition DisposeFromMember"),
+    27: ("DynamicConfig", "AddMultiMapConfig AddRingbufferConfig AddCardinalityEstimatorConfig AddListConfig AddSetConfig "
+                         "AddReplicatedMapConfig AddTopicConfig AddExecutorConfig AddDurableExecutorConfig AddScheduledExecutorConfig "
+                         "AddQueueConfig AddMapConfig AddReliableTopicConfig AddCacheConfig AddFlakeIdGeneratorConfig AddPNCounterConfig "
+                         "AddDataConnectionConfig AddWanReplicationConfig AddUserCodeNamespaceConfig AddVectorCollectionConfig"),
+    28: ("FlakeIdGenerator", "NewIdBatch"),
+    29: ("PNCounter", "Get Add GetConfiguredReplicaCount"),
+    30: ("CPGroup", "CreateCPGroup DestroyCPObject"),
+    31: ("CPSession", "CreateSession CloseSession HeartbeatSession GenerateThreadId"),
+    32: ("MC", ""),
+    33: ("Sql", "Execute_reserved - Close Execute Fetch"),
+    34: ("CPSubsystem", "AddMembershipListener RemoveMembershipListener AddGroupAvailabilityListener RemoveGroupAvailabilityListener - "
+                       "GetCPObjectInfos"),
+    35: ("CPMap", "Get Put Set Remove Delete CompareAndSet PutIfAbsent"),
+    36: ("VectorCollection", "- PutIfAbsent PutAll - Remove Set Delete SearchNearVector"),
+    253: ("Experimental", "PipelineSubmit"),
+    254: ("Jet", "- - - - - - - - - - - - - - - - - - AddJobStatusListener RemoveJobStatusListener"),
+}
+HZ_PROTO_M = dict((k, (v[0], v[1].split())) for k, v in HZ_PROTO.items())
+# Hazelcast's serializer type ids (the second int of a serialized Data, after its partition hash)
+HZ_DATA_TYPES = {0: "null", -1: "Portable", -2: "DataSerializable", -3: "Byte", -4: "Boolean", -5: "Character", -6: "Short",
+                 -7: "Integer", -8: "Long", -9: "Float", -10: "Double", -11: "String", -12: "byte[]", -13: "boolean[]", -14: "char[]",
+                 -15: "short[]", -16: "int[]", -17: "long[]", -18: "float[]", -19: "double[]", -20: "String[]", -21: "UUID",
+                 -22: "SimpleEntry", -23: "SimpleImmutableEntry", -55: "Compact", -56: "Compact (with its schema)",
+                 -100: "Java Serializable", -101: "Java Externalizable", -110: ".NET serialized", -120: "Python pickle",
+                 -130: "JSON (HazelcastJsonValue)", -140: "Go gob"}
+# the connection types of a member's connections (TcpServerConnection.connectionType)
+LV_CONN_TYPES = {"MEMBER": "member", "JVM": "Java client", "CSP": ".NET client", "CPP": "C++ client", "PHY": "Python client",
+                 "NJS": "Node.js client", "GOO": "Go client", "RBY": "Ruby client", "MCJVM": "Management Center", "REST": "REST",
+                 "MEMCACHED": "Memcache", "NONE": "not identified yet"}
+LV_CLASS_RE = re.compile(r"(?<![\w$.])(?:[a-z][a-z0-9_]*\.){2,}[A-Z][A-Za-z0-9_$]*")
+LV_ADDR_CLASSES = frozenset(("java.net.InetSocketAddress", "java.net.InetSocketAddress$InetSocketAddressHolder", "java.net.Inet4Address",
+                             "java.net.Inet6Address", "java.net.InetAddress$InetAddressHolder", "java.net.Inet6Address$Inet6AddressHolder",
+                             "com.hazelcast.cluster.Address", "com.hazelcast.nio.Address"))
+LV_FOLLOW = (                   # what to read further from these objects (the extra passes)
+    ("com.hazelcast.internal.serialization.impl.HeapData", ("payload",)),
+    ("com.hazelcast.cluster.Address", ("host",)),
+    ("com.hazelcast.nio.Address", ("host",)),
+    ("java.net.InetSocketAddress", ("holder",)),
+    ("java.net.InetSocketAddress$InetSocketAddressHolder", ("addr", "hostname")),
+    ("java.net.InetAddress", ("holder",)),
+    ("java.net.Inet6Address", ("holder6",)),
+    ("java.net.Inet6Address$Inet6AddressHolder", ("ipaddress",)),
+)
+
+
+def hz_msg_name(t):
+    """A client protocol message type: 0x010201 -> 'Map.Get response'."""
+    svc, meth, kind = (t >> 16) & 0xFF, (t >> 8) & 0xFF, t & 0xFF
+    s = HZ_PROTO_M.get(svc)
+    names = s[1] if s else ()
+    m = names[meth - 1] if 0 < meth <= len(names) and names[meth - 1] != "-" else "method %d" % meth
+    return "%s.%s %s" % (s[0] if s else "service %d" % svc, m, "request" if kind == 0 else "response" if kind == 1 else "event")
+
+
+def lv_kind(hm, cid):
+    """What a class's instances are to the large-value check (asked at its first instance), or None."""
+    cn = hm.cname(cid)
+    if cn == "java.util.concurrent.ConcurrentLinkedQueue$Node":
+        return "lv_node"
+    if cn == "java.util.concurrent.ConcurrentLinkedQueue":
+        return "lv_clq"
+    if cn in LV_ADDR_CLASSES:
+        return "lv_addr"
+    if not cn.startswith("com.hazelcast."):
+        return None
+    if cn == "com.hazelcast.client.impl.protocol.ClientMessage$Frame":
+        return "lv_frame"
+    if cn == "com.hazelcast.client.impl.protocol.ClientMessage":
+        return "lv_msg"
+    if cn == "com.hazelcast.internal.serialization.impl.HeapData":
+        return "lv_hdata"
+    if cn == "com.hazelcast.internal.serialization.impl.compact.Schema":
+        return "lv_schema"
+    lay = hm.layout(cid)
+    if "writeQueue" in lay:                                     # NioOutboundPipeline (and its older names)
+        return "lv_pipe"
+    if cn.endswith(".Packet") and "payload" in lay:             # a member-to-member message
+        return "lv_packet"
+    if cn.endswith("$RequestParameters") and ".protocol.codec." in cn:
+        return "lv_params"
+    if cn.endswith(".ClientEndpointImpl"):
+        return "lv_ep"
+    if "channel" in lay and cn.endswith("Connection"):          # TcpServerConnection, TcpClientConnection, TcpIpConnection
+        return "lv_conn"
+    if cn.endswith(".NioChannel") or hm.is_sub(cid, "com.hazelcast.internal.networking.AbstractChannel"):
+        return "lv_chan"
+    if hm.is_sub(cid, "com.hazelcast.client.impl.protocol.task.AbstractMessageTask"):
+        return "lv_task"
+    return None
+
+
+class HprofLarge(object):
+    """What read_hprof keeps of a heap dump for the large values: each large byte[] (id, length, a checksum of its content,
+    where it starts in the file), the first bytes of the first of each content, the lengths of the byte[] from 1 KB, the
+    messages, frames and queue nodes (compact), the queues, pipelines, channels, connections, endpoints and message tasks
+    (whole, in hm.obj), and which HeapData holds a large byte[]."""
+
+    def __init__(self, hm):
+        self.hm = hm
+        tc = "Q" if hm.ids == 8 else "I"
+        self.big = {}                   # large byte[] id -> its index in b_*
+        self.b_id, self.b_len, self.b_fp, self.b_off = array.array(tc), array.array("Q"), array.array("L"), array.array("q")
+        self.heads = {}                 # (length, checksum) -> the first bytes of the first such byte[]
+        self.t_id, self.t_len = array.array(tc), array.array("L")     # byte[] from LV_TRACK up to LV_MIN
+        self.fr_id, self.fr_content, self.fr_next = array.array(tc), array.array(tc), array.array(tc)
+        self.fr_len = array.array("L")  # the frame content's length (0: not known)
+        self.fr_type, self.fr_part, self.fr_corr = array.array("l"), array.array("l"), array.array("q")   # a first frame's header
+        self.msg_id, self.msg_start = array.array(tc), array.array(tc)
+        self.nd_id, self.nd_item, self.nd_next = array.array(tc), array.array(tc), array.array(tc)
+        self.small_want = {}            # a frame's content still to come -> the frame (index; ~index for a first frame)
+        self.ring_id, self.ring_len, self.ring_b = [0] * LV_RING, [0] * LV_RING, [b""] * LV_RING   # the last small byte[]
+        self.pend = {}                  # byte[] id not come by yet -> the HeapData holding it
+        self.hdata = {}                 # large byte[] id -> the HeapData holding it
+        self.kept = {}                  # kind -> the object ids kept whole (pipelines, queues, connections...)
+        self.n = 0
+        self.capped = False
+        self._offs = {}
+
+    def offs(self, cid, names):
+        k = (cid, names)
+        v = self._offs.get(k)
+        if v is None:
+            lay = self.hm.layout(cid)
+            v = self._offs[k] = tuple((lay[nm][0] if nm in lay and lay[nm][1] in (2, 10) else -1) for nm in names)
+        return v
+
+    def take(self, oid, cid, data, kind):
+        """An instance of a kind we look at came by."""
+        hm = self.hm
+        S = hm.S_id
+        if self.n >= LV_OBJ_CAP:
+            self.capped = True
+            return
+        if kind == "lv_hdata":                  # which HeapData holds a large byte[] (most hold small ones: not kept)
+            o = self.offs(cid, ("payload",))[0]
+            if o < 0:
+                return
+            pay = S.unpack_from(data, o)[0]
+            if pay in self.big:
+                self.hdata[pay] = oid
+            elif pay > oid and len(self.pend) < LV_PEND_CAP:   # most likely after it in the dump
+                self.pend[pay] = oid
+            return
+        self.n += 1
+        if kind == "lv_node":
+            o = self.offs(cid, ("item", "next"))
+            if o[0] >= 0 and o[1] >= 0:
+                self.nd_id.append(oid)
+                self.nd_item.append(S.unpack_from(data, o[0])[0])
+                self.nd_next.append(S.unpack_from(data, o[1])[0])
+            return
+        if kind == "lv_frame":                  # (take_frame: in the first pass)
+            self.take_frame(oid, cid, data, -1)
+            return
+        if kind == "lv_msg":
+            o = self.offs(cid, ("startFrame",))[0]
+            if o >= 0:
+                self.msg_id.append(oid)
+                self.msg_start.append(S.unpack_from(data, o)[0])
+            return
+        if oid not in hm.obj:                   # the rest is few: kept whole
+            hm.obj[oid] = (cid, data)
+        self.kept.setdefault(kind, []).append(oid)
+
+    def take_frame(self, oid, cid, data, ri):
+        """A message frame: its content, its next frame; its content's length and, for a message's first frame (flags
+        BEGIN / END_FRAGMENT), the header: from the last small byte[] seen (its content comes just before it), else when
+        its content comes by. ri: where the ring of the last small byte[] stands (-1: not known)."""
+        if self.n >= LV_OBJ_CAP:
+            self.capped = True
+            return
+        self.n += 1
+        o = self.offs(cid, ("content", "next", "flags"))
+        if o[0] < 0 or o[1] < 0:
+            return
+        S = self.hm.S_id
+        ct = S.unpack_from(data, o[0])[0]
+        first = bool(struct.unpack_from(">i", data, o[2])[0] & 0xC000) if o[2] >= 0 else False
+        j = len(self.fr_id)
+        self.fr_id.append(oid)
+        self.fr_content.append(ct)
+        self.fr_next.append(S.unpack_from(data, o[1])[0])
+        self.fr_len.append(0)
+        self.fr_type.append(0)
+        self.fr_part.append(-2)
+        self.fr_corr.append(0)
+        if not ct:
+            return
+        x = -1
+        if ri >= 0:                             # the last 16 small byte[]
+            rid = self.ring_id
+            for k in range(ri - 1, ri - 17, -1):
+                if rid[k] == ct:                # (k < 0 reads the end of the ring: it wraps)
+                    x = k
+                    break
+        if x != -1:
+            ne = self.ring_len[x]
+            self.fr_len[j] = ne
+            if first and 13 <= ne <= 64:
+                self.header(j, self.ring_b[x])
+        elif ct in self.big:
+            self.fr_len[j] = self.b_len[self.big[ct]]
+        elif len(self.small_want) < LV_PEND_CAP:
+            self.small_want[ct] = ~j if first else j
+
+    def header(self, j, raw):
+        """A first frame's content: message type, correlation id, partition id (requests and events) or backup acks."""
+        if len(raw) >= 12:
+            t, corr = struct.unpack_from("<iq", raw, 0)
+            self.fr_type[j] = t
+            self.fr_corr[j] = corr
+            self.fr_part[j] = struct.unpack_from("<i", raw, 12)[0] if (t & 0xFF) != 1 and len(raw) >= 16 else -1
+
+    def came(self, oid, ne, raw):
+        """A byte[] some frame waited for came by: its length, and the header of a first frame."""
+        j = self.small_want.pop(oid)
+        if j < 0:
+            j = ~j
+            self.header(j, raw)
+        self.fr_len[j] = ne
+
+    def add_big(self, oid, ne, fp, off, head):
+        if len(self.b_id) >= LV_BIG_CAP:
+            self.capped = True
+            return
+        self.big[oid] = len(self.b_id)
+        self.b_id.append(oid)
+        self.b_len.append(ne)
+        self.b_fp.append(fp & 0xFFFFFFFF)
+        self.b_off.append(off)
+        k = (ne, fp & 0xFFFFFFFF)
+        if k not in self.heads:
+            self.heads[k] = head
+        h = self.pend.pop(oid, None) if self.pend else None
+        if h:
+            self.hdata[oid] = h
+
+    def active(self):
+        return bool(self.b_id or self.kept.get("lv_pipe") or self.msg_id)
+
+
+class LvIndex(object):
+    """id -> its index in an id array: a dict for a few; else bisect on the array (in address order, as most dumps are)
+    or on a sorted copy."""
+
+    def __init__(self, ids):
+        n = len(ids)
+        self.d = self.perm = None
+        if n <= 200000:
+            self.d = dict(zip(ids, range(n)))
+        elif all(ids[i] < ids[i + 1] for i in range(n - 1)):
+            self.sid = ids
+        else:
+            perm = sorted(range(n), key=ids.__getitem__)
+            self.sid = array.array(ids.typecode, (ids[i] for i in perm))
+            self.perm = array.array("l", perm)
+
+    def get(self, oid):
+        if self.d is not None:
+            return self.d.get(oid, -1)
+        i = bisect.bisect_left(self.sid, oid)
+        if i < len(self.sid) and self.sid[i] == oid:
+            return self.perm[i] if self.perm is not None else i
+        return -1
+
+
+def lv_data(raw, schemas=None):
+    """What a serialized Hazelcast value (Data: partition hash, serializer type id, then the payload; big-endian) holds:
+    {'type': name, 'cls': a class or type name when the format says it, 'text': for a String or JSON}, or None."""
+    if len(raw) < 8:
+        return None
+    tid = struct.unpack_from(">i", raw, 4)[0]
+    if tid < -1000 or tid > 1000000 or (tid == 0 and len(raw) > 8):
+        return None
+    out = {"type": HZ_DATA_TYPES.get(tid) or ("a JDK type (Hazelcast's default serializer %d)" % tid if -54 <= tid <= -24 else
+                                               "custom serializer, type id %d" % tid if tid > 0 else "serializer %d" % tid)}
+
+    def utf(at):                        # Hazelcast's writeString: the length in bytes, then UTF-8
+        if len(raw) >= at + 4:
+            n = struct.unpack_from(">i", raw, at)[0]
+            if 0 <= n and len(raw) >= at + 4 + min(n, 200):
+                return raw[at + 4:at + 4 + min(n, 200)].decode("utf-8", "replace") + ("…" if n > 200 else "")
+        return None
+    if tid == -100 and raw[8:12] == b"\xac\xed\x00\x05" and len(raw) > 16 and raw[12:14] == b"\x73\x72":
+        n = struct.unpack_from(">H", raw, 14)[0]
+        out["cls"] = raw[16:16 + n].decode("utf-8", "replace")
+    elif tid == -101:
+        out["cls"] = utf(8)
+    elif tid == -2 and len(raw) >= 17:
+        if raw[8] & 1:
+            out["cls"] = "factory %d, class %d (IdentifiedDataSerializable)" % struct.unpack_from(">ii", raw, 9)
+        else:
+            out["cls"] = utf(9)
+    elif tid == -1 and len(raw) >= 16:
+        out["cls"] = "factory %d, class %d (Portable)" % struct.unpack_from(">ii", raw, 8)
+    elif tid == -55 and len(raw) >= 16:
+        sid = struct.unpack_from(">q", raw, 8)[0]
+        out["cls"] = (schemas or {}).get(sid) or "schema %d" % sid
+    elif tid == -56:
+        out["cls"] = utf(8)
+    elif tid in (-11, -130):
+        out["text"] = utf(8)
+    return out
+
+
+def lv_classes(raw):
+    """Class names written in a value's bytes (Java serialization, JSON type fields...), the application's first."""
+    found = []
+    for m in LV_CLASS_RE.finditer(raw[:65536].decode("latin-1")):
+        c = m.group(0)
+        if c not in found:
+            found.append(c)
+        if len(found) >= 12:
+            break
+    found.sort(key=lambda c: c.startswith(("java.", "javax.", "sun.", "jdk.", "com.sun.")))
+    return found[:6]
+
+
+def lv_printable(raw):
+    """The start of a value that is mostly text (from its first run of 16 printable characters), else None."""
+    s = raw[:240]
+    if len(s) < 16:
+        return None
+    ok = sum(1 for c in s if 32 <= c < 127 or c in (9, 10, 13))
+    if ok < 0.9 * len(s):
+        return None
+    m = re.search(rb"[ -~\t\r\n]{16,}", s)
+    return m.group(0).decode("latin-1")[:160] if m else None
+
+
+def lv_uuid(hm, oid):
+    hi, lo = hm.field(oid, "mostSigBits"), hm.field(oid, "leastSigBits")
+    if hi is None or lo is None:
+        return None
+    h = "%032x" % (((hi & 0xFFFFFFFFFFFFFFFF) << 64) | (lo & 0xFFFFFFFFFFFFFFFF))
+    return "%s-%s-%s-%s-%s" % (h[:8], h[8:12], h[12:16], h[16:20], h[20:])
+
+
+def lv_inet(hm, oid):
+    """An InetAddress's IP, None when not read."""
+    c = hm.cls_of(oid)
+    if c == "java.net.Inet4Address":
+        a = hm.field(hm.field(oid, "holder"), "address")
+        if a is not None:
+            a &= 0xFFFFFFFF
+            return "%d.%d.%d.%d" % (a >> 24, (a >> 16) & 255, (a >> 8) & 255, a & 255)
+        return None
+    if c == "java.net.Inet6Address":
+        arr = hm.obj.get(hm.field(hm.field(oid, "holder6"), "ipaddress") or 0)
+        if arr is not None and arr[0] == -8 and len(arr[1]) == 16:
+            return ":".join("%x" % v for v in struct.unpack(">8H", arr[1]))
+    return None
+
+
+def lv_sockaddr(hm, oid):
+    """An InetSocketAddress or a Hazelcast Address as host:port, None when not read."""
+    c = hm.cls_of(oid)
+    if c in ("com.hazelcast.cluster.Address", "com.hazelcast.nio.Address"):
+        host, port = hm.string(hm.field(oid, "host")), hm.field(oid, "port")
+        return member_label(norm_ip(host), port) if host and port is not None else None
+    if c == "java.net.InetSocketAddress":                 # as the diagnostics write it: ip:port, [ipv6]:port
+        h = hm.field(oid, "holder")
+        port = hm.field(h, "port")
+        ip = lv_inet(hm, hm.field(h, "addr")) or hm.string(hm.field(h, "hostname"))
+        return member_label(norm_ip(ip), port) if ip and port is not None else None
+    return None
+
+
+class LvAnalysis(object):
+    """The large values of a heap dump after the first pass: their groups and holders, the outbound queues; need() says
+    what is still to read (names, addresses, headers), finish() what the report shows."""
+
+    def __init__(self, hm, lvm, partial):
+        self.hm, self.lvm, self.partial = hm, lvm, partial
+        fr = LvIndex(lvm.fr_id)
+        msgi = LvIndex(lvm.msg_id)
+        nodes = LvIndex(lvm.nd_id)
+        self.fr, self.msgi = fr, msgi
+        # each message's frames: its bytes, its large byte[] (the walk of all of them is bounded)
+        self.big_msg = {}                       # large byte[] id -> the message (index) one of whose frames holds it
+        nm = len(lvm.msg_id)
+        self.m_bytes = array.array("Q", [0]) * nm
+        self.m_unknown = array.array("L", [0]) * nm
+        tlen = None                             # the byte[] from 1 KB: for a frame whose content came before it, further back
+        budget = 50000000
+        big, fr_len, fr_content, fr_next, fr_id = lvm.big, lvm.fr_len, lvm.fr_content, lvm.fr_next, lvm.fr_id
+        for i in range(nm):
+            j, first = fr.get(lvm.msg_start[i]), True
+            while j >= 0 and budget > 0:
+                budget -= 1
+                ct = fr_content[j]
+                k = big.get(ct)
+                if k is not None:
+                    self.m_bytes[i] += lvm.b_len[k]
+                    self.big_msg[ct] = i
+                elif fr_len[j]:
+                    self.m_bytes[i] += fr_len[j]
+                elif ct:
+                    if tlen is None:
+                        tlen = LvIndex(lvm.t_id)
+                    t = tlen.get(ct)
+                    if t >= 0:
+                        self.m_bytes[i] += lvm.t_len[t]
+                    elif not first:
+                        self.m_unknown[i] += 1
+                nx = fr_next[j]
+                j = fr.get(nx) if nx and nx != fr_id[j] else -1
+                first = False
+        # the outbound queues: each pipeline's queues, walked from their head node
+        self.item_q = {}                        # queued item id -> pipeline index
+        self.pipes = []
+        for p in lvm.kept.get("lv_pipe", ()):
+            q = {"id": p, "chan": hm.field(p, "channel") or 0, "items": [], "pri": 0, "walked": True}
+            for fname in LV_QUEUE_FIELDS:
+                clq = hm.field(p, fname)
+                if not clq:
+                    continue
+                node, steps = hm.field(clq, "head"), 0
+                if node is None:
+                    q["walked"] = False
+                    continue
+                while node and steps < 50000000:
+                    j = nodes.get(node)
+                    if j < 0:
+                        q["walked"] = False
+                        break
+                    it = lvm.nd_item[j]
+                    if it:
+                        q["items"].append(it)
+                        if fname != "writeQueue":
+                            q["pri"] += 1
+                    nx = lvm.nd_next[j]
+                    if nx == node:
+                        break
+                    node = nx
+                    steps += 1
+            for it in q["items"]:
+                self.item_q[it] = len(self.pipes)
+            self.pipes.append(q)
+        # connections, endpoints and message tasks, by channel / connection
+        self.conn_of_chan, self.ep_of_conn, self.tasks_of_conn = {}, {}, {}
+        for c in lvm.kept.get("lv_conn", ()):
+            ch = hm.field(c, "channel")
+            if ch:
+                self.conn_of_chan[ch] = c
+        for e in lvm.kept.get("lv_ep", ()):
+            c = hm.field(e, "connection")
+            if c:
+                self.ep_of_conn[c] = e
+        for t in lvm.kept.get("lv_task", ()):
+            c = hm.field(t, "connection")
+            if c:
+                self.tasks_of_conn.setdefault(c, []).append(t)
+        self.packet_of = {}                     # large byte[] id -> the Packet holding it
+        for pk in lvm.kept.get("lv_packet", ()):
+            pay = hm.field(pk, "payload")
+            if pay in lvm.big:
+                self.packet_of[pay] = pk
+        self.in_frame = set(ct for ct in lvm.fr_content if ct in lvm.big)     # large byte[] a frame holds
+        # each pipeline's bytes and message types
+        self.mtype = {}                         # message index -> its header (type, correlation id, partition id)
+        for qi, q in enumerate(self.pipes):
+            self.queue_stats(qi, q)
+        self.pipes_order = sorted(range(len(self.pipes)), key=lambda k: (-self.pipes[k]["bytes"], -len(self.pipes[k]["items"])))
+
+    def header(self, i):
+        """A message's header from its first frame: (message type, correlation id, partition id or None), None when not read."""
+        lvm = self.lvm
+        j = self.fr.get(lvm.msg_start[i])
+        if j < 0:
+            return None
+        if lvm.fr_type[j]:
+            pt = lvm.fr_part[j]
+            return lvm.fr_type[j], lvm.fr_corr[j], pt if pt >= 0 else None
+        o = self.hm.obj.get(lvm.fr_content[j])             # read in an extra pass
+        raw = o[1] if o is not None and o[0] == -8 else None
+        if raw is None or len(raw) < 12:
+            return None
+        t, corr = struct.unpack_from("<iq", raw, 0)
+        part = struct.unpack_from("<i", raw, 12)[0] if (t & 0xFF) != 1 and len(raw) >= 16 else None
+        return t, corr, part
+
+    def queue_stats(self, qi, q):
+        lvm, hm = self.lvm, self.hm
+        nbytes, unknown, msgs, packets, pbytes, other = 0, 0, [], 0, 0, {}
+        for it in q["items"]:
+            i = self.msgi.get(it)
+            if i >= 0:
+                msgs.append(i)
+                nbytes += self.m_bytes[i]
+                unknown += self.m_unknown[i]
+                continue
+            c = hm.cls_of(it)
+            if c is not None and c.endswith(".Packet"):
+                packets += 1
+                pay = hm.field(it, "payload") or 0
+                k = lvm.big.get(pay)
+                if k is not None:
+                    pbytes += lvm.b_len[k]
+                continue
+            other[c or "?"] = other.get(c or "?", 0) + 1
+        q.update({"bytes": nbytes + pbytes, "unknown": unknown, "msgs": msgs, "packets": packets, "pbytes": pbytes, "other": other})
+
+    def focus(self):
+        """The pipelines, connections and messages the report names (the queues with the most bytes, the holders of the
+        largest groups)."""
+        return [self.pipes[k] for k in self.pipes_order[:LV_QUEUES] if self.pipes[k]["items"] or self.pipes[k]["bytes"]]
+
+    def need(self):
+        """The objects still to read for the report: names, addresses, headers, keys (empty when all are in)."""
+        hm, lvm, miss = self.hm, self.lvm, set()
+
+        def obj(oid):
+            if oid and oid not in hm.obj:
+                miss.add(oid)
+                return False
+            return bool(oid)
+
+        def string(oid):
+            if obj(oid):
+                v = hm.field(oid, "value")
+                if v and v not in hm.obj:
+                    miss.add(v)
+
+        def sockaddr(oid):
+            if not obj(oid):
+                return
+            c = hm.cls_of(oid)
+            if c in ("com.hazelcast.cluster.Address", "com.hazelcast.nio.Address"):
+                string(hm.field(oid, "host"))
+            elif c == "java.net.InetSocketAddress":
+                h = hm.field(oid, "holder")
+                if obj(h):
+                    a = hm.field(h, "addr")
+                    if obj(a):
+                        ac = hm.cls_of(a)
+                        if ac == "java.net.Inet4Address":
+                            obj(hm.field(a, "holder"))
+                        elif ac == "java.net.Inet6Address":
+                            h6 = hm.field(a, "holder6")
+                            if obj(h6):
+                                obj(hm.field(h6, "ipaddress"))
+                    elif not a:
+                        string(hm.field(h, "hostname"))
+
+        def header(i):
+            j = self.fr.get(lvm.msg_start[i])
+            if j >= 0 and not lvm.fr_type[j]:
+                obj(lvm.fr_content[j])
+
+        for q in self.focus():
+            ch = q["chan"]
+            if obj(ch):
+                sockaddr(hm.field(ch, "remoteAddress"))
+                sockaddr(hm.field(ch, "localAddress"))
+            c = self.conn_of_chan.get(ch)
+            if c:
+                string(hm.field(c, "connectionType"))
+                sockaddr(hm.field(c, "remoteAddress"))
+                e = self.ep_of_conn.get(c)
+                if e:
+                    string(hm.field(e, "clientName"))
+                    sockaddr(hm.field(e, "socketAddress"))
+                    for f in ("clientVersionString", "clientVersion"):
+                        lay = hm.layout(hm.obj[e][0]).get(f)
+                        if lay and lay[1] == 2:
+                            string(hm.field(e, f))
+                    obj(hm.field(e, "clientUuid"))
+                for t in self.tasks_of_conn.get(c, ())[:LV_TASKS]:
+                    pr = hm.field(t, "parameters")
+                    if obj(pr):
+                        string(hm.field(pr, "name"))
+                        k = hm.field(pr, "key")
+                        if obj(k):
+                            obj(hm.field(k, "payload"))
+                    i = self.msgi.get(hm.field(t, "clientMessage") or 0)
+                    if i >= 0:
+                        header(i)
+            for i in q["msgs"][:2000]:
+                header(i)
+        for i in self.group_msgs():
+            header(i)
+        for s in lvm.kept.get("lv_schema", ()):
+            string(hm.field(s, "typeName"))
+        return miss
+
+    def group_msgs(self):
+        """A few messages holding each large group's byte[] (their headers name the message type)."""
+        out, seen = [], set()
+        for ln, idx in self.groups()[:LV_GROUPS]:
+            n = 0
+            for k in idx:
+                i = self.big_msg.get(self.lvm.b_id[k])
+                if i is not None and i not in seen:
+                    seen.add(i)
+                    out.append(i)
+                    n += 1
+                    if n >= 50:
+                        break
+        return out
+
+    def groups(self):
+        """The large byte[] by length, the ones worth listing (repeated, or of LV_SINGLE and more) first: by the bytes of
+        their copies with the same content, then by their total."""
+        g = getattr(self, "_groups", None)
+        if g is None:
+            by = {}
+            for k, ln in enumerate(self.lvm.b_len):
+                by.setdefault(ln, []).append(k)
+            lvm = self.lvm
+
+            def rank(x):
+                fps = {}
+                for k in x[1]:
+                    fps[lvm.b_fp[k]] = fps.get(lvm.b_fp[k], 0) + 1
+                same = max(fps.values())
+                return (len(x[1]) < 2 and x[0] < LV_SINGLE, -(same if same > 1 else 0) * x[0], -x[0] * len(x[1]))
+            g = self._groups = sorted(by.items(), key=rank)
+        return g
+
+    def conn_text(self, q):
+        """(remote address, local address, type, the client: name, version, uuid) of a queue's connection."""
+        hm = self.hm
+        ch = q["chan"]
+        remote = lv_sockaddr(hm, hm.field(ch, "remoteAddress")) if ch else None
+        local = lv_sockaddr(hm, hm.field(ch, "localAddress")) if ch else None
+        c = self.conn_of_chan.get(ch)
+        ctype = ccls = None
+        client = None
+        if c:
+            ccls = hm.cls_of(c)
+            raw = hm.string(hm.field(c, "connectionType"))
+            if raw:
+                ctype = [LV_CONN_TYPES.get(raw, raw), raw]
+            elif ccls and ccls.endswith("TcpClientConnection"):
+                ctype = ["member", "this JVM is a client"]
+            if not remote:
+                remote = lv_sockaddr(hm, hm.field(c, "remoteAddress"))
+            e = self.ep_of_conn.get(c)
+            if e and not remote:
+                remote = lv_sockaddr(hm, hm.field(e, "socketAddress"))
+            if e:
+                ver = None
+                for f in ("clientVersionString", "clientVersion"):
+                    lay = hm.layout(hm.obj[e][0]).get(f)
+                    if lay and lay[1] == 2:
+                        ver = hm.string(hm.field(e, f))
+                        if ver:
+                            break
+                client = {"name": hm.string(hm.field(e, "clientName")), "ver": ver, "uuid": lv_uuid(hm, hm.field(e, "clientUuid")),
+                          "ep": "0x%x" % e}
+        return remote, local, ctype, client, c
+
+    def task_rows(self, c, queued_corr):
+        hm, rows = self.hm, []
+        for t in self.tasks_of_conn.get(c, ())[:LV_TASKS]:
+            r = {"cls": hm.cls_of(t).rsplit(".", 1)[-1], "id": "0x%x" % t}
+            pr = hm.field(t, "parameters")
+            if pr:
+                r["name"] = hm.string(hm.field(pr, "name"))
+                k = hm.field(pr, "key")
+                ko = hm.obj.get(hm.field(k, "payload") or 0) if k else None
+                if ko is not None and ko[0] == -8:
+                    d = lv_data(ko[1])
+                    if d:
+                        r["key"] = d.get("text") or (d["type"] + (": " + d["cls"] if d.get("cls") else ""))
+            i = self.msgi.get(hm.field(t, "clientMessage") or 0)
+            h = self.header(i) if i >= 0 else None
+            if h:
+                r["op"] = hz_msg_name(h[0])
+                r["corr"] = h[1]
+                if h[2] is not None:
+                    r["pt"] = h[2]
+                r["queued"] = (h[1] in queued_corr)
+            rows.append(r)
+        rows.sort(key=lambda r: (r.get("corr") is None, r.get("corr") or 0))
+        return rows
+
+    def finish(self, heap_bytes, complete):
+        hm, lvm = self.hm, self.lvm
+        schemas = {}
+        for s in lvm.kept.get("lv_schema", ()):
+            sid, nm = hm.field(s, "schemaId"), hm.string(hm.field(s, "typeName"))
+            if sid is not None and nm:
+                schemas[sid] = nm
+        # the queues
+        queues, qrow = [], {}
+        for k in self.pipes_order[:LV_QUEUES]:
+            q = self.pipes[k]
+            if not q["items"]:
+                continue
+            types, corr = {}, []
+            for i in q["msgs"]:
+                h = self.header(i)
+                nm = hz_msg_name(h[0]) if h else "message type not read"
+                x = types.setdefault(nm, [0, 0])
+                x[0] += 1
+                x[1] += self.m_bytes[i]
+                if h:
+                    corr.append(h[1])
+            if q["packets"]:
+                types["member Packet"] = [q["packets"], q["pbytes"]]
+            for c, n in q["other"].items():
+                types[c.rsplit(".", 1)[-1]] = [n, 0]
+            remote, local, ctype, client, c = self.conn_text(q)
+            row = {"remote": remote, "local": local, "type": ctype, "client": client, "n": len(q["items"]), "pri": q["pri"],
+                   "bytes": q["bytes"], "unknown": q["unknown"], "walked": q["walked"],
+                   "types": sorted(([nm, v[0], v[1]] for nm, v in types.items()), key=lambda x: (-x[2], -x[1]))[:8],
+                   "corr": [min(corr), max(corr)] if corr else None, "pipe": "0x%x" % q["id"], "conn": "0x%x" % c if c else None,
+                   "tasks": self.task_rows(c, set(corr)) if c else []}
+            if c and len(self.tasks_of_conn.get(c, ())) > LV_TASKS:
+                row["ntasks"] = len(self.tasks_of_conn[c])
+            qrow[k] = len(queues)
+            queues.append(row)
+        # the groups of large byte[]: same length; same content within (the checksum)
+        groups = []
+        for ln, idx in [x for x in self.groups() if len(x[1]) > 1 or x[0] >= LV_SINGLE][:LV_GROUPS]:
+            fps = {}
+            for k in idx:
+                fps[lvm.b_fp[k]] = fps.get(lvm.b_fp[k], 0) + 1
+            fp, same = max(fps.items(), key=lambda x: x[1])
+            head = lvm.heads.get((ln, fp), b"")
+            held = {"frame": 0, "packet": 0, "hdata": 0, "other": 0}
+            mtypes, qs = {}, {}
+            for k in idx:
+                b = lvm.b_id[k]
+                if b in self.in_frame:
+                    held["frame"] += 1
+                    i = self.big_msg.get(b)
+                    if i is not None:
+                        h = self.header(i)
+                        nm = hz_msg_name(h[0]) if h else "message type not read"
+                        mtypes[nm] = mtypes.get(nm, 0) + 1
+                        qi = self.item_q.get(lvm.msg_id[i])
+                        key = qrow.get(qi, -1) if qi is not None else -2
+                        qs[key] = qs.get(key, 0) + 1
+                    continue
+                pk = self.packet_of.get(b)
+                if pk is not None:
+                    held["packet"] += 1
+                    qi = self.item_q.get(pk)
+                    key = qrow.get(qi, -1) if qi is not None else -2
+                    qs[key] = qs.get(key, 0) + 1
+                    continue
+                if b in lvm.hdata:
+                    held["hdata"] += 1
+                else:
+                    held["other"] += 1
+            sz = (16 + ln + 7) & ~7
+            # serialized Data (partition hash, serializer type id, payload): held by a frame, a HeapData or a Packet, or
+            # its format confirms it (a class name, a text)
+            d = lv_data(head, schemas)
+            if d and not (held["frame"] or held["hdata"] or held["packet"]) and not (d.get("cls") or d.get("text")):
+                d = None
+            g = {"len": ln, "n": len(idx), "same": same, "bytes": sz * len(idx), "held": held,
+                 "msgs": sorted(([nm, n] for nm, n in mtypes.items()), key=lambda x: -x[1])[:4],
+                 "queues": sorted(([k, n] for k, n in qs.items()), key=lambda x: -x[1])[:6],
+                 "ids": ["0x%x" % lvm.b_id[k] for k in idx[:3]], "cmp": "checksum" if lvm.b_off[idx[0]] < 0 else "sampled"}
+            if d:
+                g["data"] = d
+            names = lv_classes(head)
+            if names:
+                g["names"] = names
+            if not d or d.get("text") is None:
+                t = lv_printable(head[8:] if d else head)
+                if t:
+                    g["text"] = t
+            groups.append(g)
+        nq = [q for q in self.pipes if q["items"]]
+        out = {"min": LV_MIN, "thr": [LV_COPIES_ALERT, LV_COPIES_BYTES, LV_QUEUE_ALERT],
+               "arrays": len(lvm.b_id), "abytes": sum(((16 + x + 7) & ~7) for x in lvm.b_len), "groups": groups,
+               "queues": queues, "nqueues": len(nq), "queued": [sum(len(q["items"]) for q in nq), sum(q["bytes"] for q in nq)],
+               "messages": len(lvm.msg_id), "complete": complete and not self.partial and not lvm.capped,
+               "partial": self.partial, "capped": lvm.capped}
+        loose = [i for i in range(len(lvm.msg_id)) if lvm.msg_id[i] not in self.item_q and self.m_bytes[i] >= LV_MIN]
+        if loose:
+            out["loose"] = [len(loose), sum(self.m_bytes[i] for i in loose)]
+        out["alert"] = lv_alert(out, heap_bytes)
+        return out
+
+
+def lv_alert(lv, heap_bytes):
+    """The finding, when there is one: a connection with LV_QUEUE_ALERT bytes or more queued, or LV_COPIES_ALERT copies or
+    more of one large value adding up to LV_COPIES_BYTES or more."""
+    parts = []
+    pct = lambda b: " (%.0f%% of the heap)" % (100.0 * b / heap_bytes) if heap_bytes else ""
+    g = lv["groups"][0] if lv["groups"] else None
+    if g and g["same"] >= LV_COPIES_ALERT and g["same"] * g["len"] >= LV_COPIES_BYTES:
+        what = ""
+        d = g.get("data")
+        if d:
+            what = " (" + d["type"] + (": " + d["cls"] if d.get("cls") else "") + ")"
+        parts.append("%s copies of one %s value%s: %s%s" % (format(g["same"], ","), human_size(g["len"]), what,
+                                                          human_size(g["same"] * g["len"]), pct(g["same"] * g["len"])))
+    q = lv["queues"][0] if lv["queues"] else None
+    if q and q["bytes"] >= LV_QUEUE_ALERT:
+        who = q["remote"] or "a connection"
+        if q.get("type"):
+            who += ", " + q["type"][0] + (" " + q["client"]["name"] if q.get("client") and q["client"].get("name") else "")
+        t = q["types"][0] if q["types"] else None
+        if t and t[1] >= 0.9 * q["n"]:
+            what = "%s %s" % (format(t[1], ","), t[0] + ("s" if t[1] != 1 else "") if re.search(r"(response|request|event|Packet)$", t[0])
+                              else ("message" if t[1] == 1 else "messages") + " (" + t[0] + ")")
+        else:
+            what = "%s messages" % format(q["n"], ",")
+        parts.append("%s%s (%s) queued to %s" % ("" if q["walked"] else "at least ", what, human_size(q["bytes"]), who))
+        tk = [r for r in q["tasks"] if r.get("name")]
+        if tk:
+            r = tk[0]
+            parts.append("its requests still in the heap: %s on %s%s" % (r.get("op", r["cls"]).replace(" request", ""), r["name"],
+                                                                         ", key " + r["key"] if r.get("key") else ""))
+    return "; ".join(parts) if parts else None
+
+
+def lv_text(d):
+    """One line on a heap dump's large values (console summary)."""
+    lv = d["lv"]
+    parts = []
+    if lv["groups"]:
+        g = lv["groups"][0]
+        parts.append("%s byte[] of %s (%s with the same content)" % (format(g["n"], ","), human_size(g["len"]), format(g["same"], ","))
+                     if g["n"] > 1 else "the largest byte[]: %s" % human_size(g["len"]))
+    q = lv["queues"][0] if lv["queues"] else None
+    if q and q["bytes"] >= 1 << 20:
+        parts.append("%s message(s), %s queued to %s" % (format(q["n"], ","), human_size(q["bytes"]), q["remote"] or "a connection"))
+    elif lv["queued"][0]:
+        parts.append("%s message(s) queued, %s" % (format(lv["queued"][0], ","), human_size(lv["queued"][1])))
+    return "; ".join(parts) or "no byte[] of %s or more, nothing queued" % human_size(lv["min"])
 
 
 def name_tokens(name):
@@ -5839,6 +7913,7 @@ def export_dumps(text_files, heap_paths, members, lms, ctx, args, root):
                  "dl": deadlock[:80], "txt": text}
             d.update(a)
             out.append(d)
+    td_hzw_link(out)
     deadline_s = getattr(args, "heap_seconds", 120)
     for path in heap_paths:
         name = os.path.basename(path)
@@ -5848,7 +7923,7 @@ def export_dumps(text_files, heap_paths, members, lms, ctx, args, root):
         h = None
         if deadline_s and deadline_s > 0:
             try:
-                h = read_hprof(path, time.time() + deadline_s)
+                h = read_hprof(path, time.time() + deadline_s, extra_seconds=deadline_s)
             except (OSError, EOFError, struct.error, IndexError, zlib.error) as e:
                 warn("cannot read the heap dump %s: %s" % (path, e))
         if h is None:
@@ -5915,7 +7990,10 @@ def build_arg_parser():
                     "pause, humongous allocations, full GCs and evacuation failures, heap after GC.\n"
                     "Clients' diagnostics and logs get a line of their own, apart from the members. Thread dumps (jstack,\n"
                     "kill -3 output, jcmd) and heap dumps (.hprof) are marked on the time charts, matched to their member\n"
-                    "or client, and get a Dumps tab: same-stack thread groups, locks, deadlocks; a heap class histogram.",
+                    "or client, and get a Dumps tab: same-stack thread groups, locks, deadlocks; a heap class histogram;\n"
+                    "threads parked forever on Hazelcast calls whose future already holds its result (lost wake-ups);\n"
+                    "large values: copies of one value, the connections' outbound queues, their clients and requests.\n"
+                    "Outbound write queues per connection (writeQueuePendingBytes): the ones that grew, linked to the heap dumps.",
         epilog="examples:\n"
                "  %(prog)s /data/diagnostics out/\n"
                "  %(prog)s /data/diagnostics out/ --member 10.0.0.1:5701 --member 10.0.0.2\n"
@@ -5940,8 +8018,10 @@ def build_arg_parser():
                     help="at most about N values for the per-map / per-thread / per-pipeline lines; past it "
                          "those lines get coarser, the rest keeps its resolution (default 8,000,000; 0: no limit)")
     ap.add_argument("--heap-seconds", type=int, default=120, metavar="N",
-                    help="at most N seconds reading each heap dump for its class histogram (default 120; past it the "
-                         "histogram covers what was read; 0: the time it was taken only)")
+                    help="at most N seconds reading each heap dump for its class histogram and large values, and as long "
+                         "again for the extra passes that read what threads waiting on Hazelcast calls wait for and the "
+                         "names of the connections, clients and requests (default 120; past it the histogram covers what was "
+                         "read; 0: the time it was taken only)")
     ap.add_argument("--open", action="store_true", help="open the report in a browser when done")
     ap.add_argument("-q", "--quiet", action="store_true", help="don't print progress")
     ap.add_argument("--version", action="version", version="%(prog)s " + __version__)
@@ -6132,6 +8212,7 @@ def analyze(args):
     stuck = export_stuck(members)               # before the metrics: it adds the per-member stall series
     pools = export_saturation(members)
     transfer = export_transfer(members)
+    writeq = export_writeq(members, transfer)
     mgrid, period = build_grid(units, args.points)
     budget = max(100000, args.budget) if args.budget > 0 else float("inf")
     if mgrid is not None:
@@ -6189,6 +8270,7 @@ def analyze(args):
         "ops": prof["ops"],
         "events": events, "cluster": runs, "lists": lists, "hb": hb, "threads": stuck, "pools": pools, "transfer": transfer,
         "slowops": slowops, "inv": invs, "props": props, "gc": gc, "store": store, "logs": logs, "dumps": dumps,
+        "wq": writeq,
     }
     return Analysis(payload=payload, prof=prof, meta=meta, plist=plist, members=members, lms=lms, col=col, gcfiles=gcfiles,
                     skipped=skipped, uptime_axis=uptime_axis, rng=rng, time_note=time_note, mx=mx, mgrid=mgrid, pnative=pnative,
@@ -6234,6 +8316,13 @@ def run(args):
         p("             + %d GC log(s) not linked to any member: %s" % (len(gconly), ", ".join(gconly)))
     ft = fmt_uptime if uptime_axis else fmt_time
     p("  window   : %s .. %s (%s), %s" % (ft(rng[0]), ft(rng[1]), human_dur((rng[1] - rng[0]) / 1000.0), time_note))
+    for line in hzw_alerts(a.dumps, lms, labels, ft):
+        p("  ALERT    : " + line)
+    for d in a.dumps:                           # large values in a heap dump: copies of one value, a connection's queue
+        if d.get("lv") and d["lv"].get("alert"):
+            p("  ALERT    : heap dump %s (%s): %s; Dumps tab" % (d["f"], labels[d["m"]] if d["m"] >= 0 else "no member matched", d["lv"]["alert"]))
+    for line in wq_alerts(payload.get("wq"), a.dumps, labels, ft):
+        p("  ALERT    : " + line)
     if members:
         nmaps = [r for r in mx["metrics"] if r["c"] == "maps"]
         hidden_maps = set(h for r in nmaps for h in r.get("hidden", []))
@@ -6289,6 +8378,12 @@ def run(args):
              human_size(tin), human_size(tout),
              "; busiest %s <-> %s %s" % (labels[best[0]], transfer["peers"][best[1]][1], human_size(sum(r[1] + r[2] for r in best[4])))
              if best else ""))
+    wq = payload.get("wq")
+    if wq:
+        top = wq["rows"][0] if wq["rows"] else None
+        p("  write q  : %d connection pipeline(s)%s" % (wq["npipes"], "; the most waiting to be written: %s to %s on %s at %s" % (
+            human_size(top["max"]), top["remote"] or "?", labels[top["m"]], ft(top["tmax"])) if top and top["max"] else
+            "; none had %s waiting" % human_size(WQ_MIN)))
     if gcfiles:
         evs = [(col_["m"], k, c_, p_) for col_ in gc["mem"] for k, c_, p_ in zip(col_["k"], col_["c"], col_["p"])]
         hum = sum(1 for e in evs if "Humongous" in gc["causes"][e[2]])
@@ -6390,11 +8485,19 @@ def run(args):
         notable = {}
         for lm in lms:
             for cat, n in lm.ecount.items():
-                if cat not in ("lifecycle", "membership", "oome"):
+                if cat not in ("lifecycle", "membership", "oome") and cat not in OTHER_INDEX:
                     notable[cat] = notable.get(cat, 0) + n
         if notable:
             p("  logs     : " + ", ".join("%s %d" % (LOG_CATS[CAT_INDEX[k]][1].lower(), v)
                                           for k, v in sorted(notable.items(), key=lambda kv: CAT_INDEX[kv[0]])))
+        if col.msgs:
+            ne = sum(g.n for g in col.msgs.values() if g.lv == "E")
+            nw = sum(g.n for g in col.msgs.values() if g.lv == "W")
+            top = sorted((g for g in col.msgs.values() if not g.other), key=lambda g: (g.lv != "E", -g.n, g.lg, g.x))[:3]
+            p("  logs     : %s error(s) and %s warning(s), %d kind(s) of message%s; the most frequent: %s"
+              % (format(ne, ","), format(nw, ","), col.nmsg, " and more (the rarest, counted together)" if col.folded else "",
+                 "; ".join("%s %s x %s: %s" % ("ERROR" if g.lv == "E" else "WARN", format(g.n, ","), short_logger(g.lg) or "?",
+                                                g.x[:90] + ("..." if len(g.x) > 90 else "")) for g in top)))
         cpn = {}
         for lm in lms:
             for kind, b in lm.cpbins.items():
@@ -6422,6 +8525,10 @@ def run(args):
                     "" if d.get("skipped") or d.get("error") else ", %s objects, ~%s shallow%s; biggest: %s" % (
                         format(d["objects"], ","), human_size(d["bytes"]), " (partial)" if d["partial"] else "",
                         ", ".join("%s %s" % (r[0].rsplit(".", 1)[-1], human_size(r[2])) for r in d["top"][:3]))))
+            if d.get("hzw"):
+                p("             Hazelcast waits: " + hzw_text(d, ft))
+            if d.get("lv"):
+                p("             large values: " + lv_text(d))
     p("\nWrote %s (%s; read %s in %.1f s, total %.1f s)" % (report, human_size(size), human_size(total), parsed_s, took))
     if size > 150 * 1024 * 1024:
         p("This report is big and may be slow to open: --points 2000, --from/--to or --member make it smaller.")
@@ -6430,6 +8537,88 @@ def run(args):
         import webbrowser
         webbrowser.open(pathlib.Path(report).resolve().as_uri())
     return 0
+
+
+def wq_heap(dumps, r):
+    """The heap dump of the same member (or of no member) whose outbound queues hold this connection, and that queue."""
+    for d in dumps:
+        if d["k"] != "heap" or not d.get("lv") or (d["m"] >= 0 and d["m"] != r["m"]):
+            continue
+        for q in d["lv"]["queues"]:
+            if q["remote"] and q["remote"] == r["remote"] and (not q["local"] or not r["local"] or q["local"] == r["local"]):
+                return d, q
+    return None, None
+
+
+def wq_alerts(wq, dumps, labels, ft):
+    """The console's alert lines for the connections whose outbound queue went over WQ_ALERT, by member."""
+    out = []
+    if not wq:
+        return out
+    by = {}
+    for r in wq["rows"]:
+        if r["t1"] is not None:
+            by.setdefault(r["m"], []).append(r)
+    for mi, rows in sorted(by.items()):
+        parts = []
+        for r in rows[:5]:
+            d, q = wq_heap(dumps, r)
+            parts.append("%s%s: %s at %s (over %s from %s%s)%s" % (
+                r["remote"] or "?", " (%s)" % r["host"] if r["host"] else "", human_size(r["max"]), ft(r["tmax"]), human_size(WQ_ALERT),
+                ft(r["t1"]), ", then closed" if r["gone"] else "",
+                "; heap dump %s: %s message(s), %s queued to it" % (d["f"], format(q["n"], ","), human_size(q["bytes"])) if d else ""))
+        out.append("%d connection(s) of %s with %s or more waiting to be written (a peer that reads slower than it is sent to): %s%s; "
+                   "Network tab" % (len(rows), labels[mi], human_size(WQ_ALERT), "; ".join(parts), "; ..." if len(rows) > 5 else ""))
+    return out
+
+
+def hzw_text(d, ft):
+    """One line on a dump's threads waiting on Hazelcast calls (console summary)."""
+    w = d["hzw"]
+    pools = ", ".join("%s %d of %d" % tuple(x) for x in (w.get("pools") or w.get("fams") or [])[:3])
+    if d["k"] == "heap":
+        n, stuck = w["n"], w["n"].get("S", 0) + w["n"].get("L", 0)
+        parts = []
+        if stuck:
+            parts.append("%d NEVER WOKEN: parked on a future that already holds its result%s" % (
+                stuck, " (%d interrupted)" % w["intr"] if w["intr"] else ""))
+        if n.get("W"):
+            parts.append("%d waiting for their response%s" % (n["W"], " (%d for 2 minutes or more)" % w["long"] if w["long"] else ""))
+        if n.get("C"):
+            parts.append("%d completing" % n["C"])
+        if n.get("?"):
+            parts.append("%d not known" % n["?"])
+        if w.get("log"):
+            parts.append("logs through " + w["log"][0])
+        return "; ".join(parts) + ("; never woken: " + pools if stuck and pools else "") + ("" if w["complete"] else " (not complete)")
+    still = w.get("still") or 0
+    since = min((r["since"] for r in w["rows"] if r.get("since") is not None), default=None)
+    return "%d in an untimed wait%s%s%s" % (w["n"], " (%s)" % pools if pools else "", ", %d in a timed one" % w["timed"] if w["timed"] else "",
+                                             "; %d STILL in the same wait since %s, no CPU used: never woken" % (still, ft(since)) if still else "")
+
+
+def hzw_alerts(dumps, lms, labels, ft):
+    """The console's alert lines for Hazelcast calls never woken: heap dumps, thread dumps, logs."""
+    out = []
+    for d in dumps:
+        w = d.get("hzw")
+        if not w:
+            continue
+        who = labels[d["m"]] if d["m"] >= 0 else "no member matched"
+        if d["k"] == "heap":
+            k = w["n"].get("S", 0) + w["n"].get("L", 0)
+            if k:
+                out.append("%d thread(s) parked forever on Hazelcast calls whose future already holds its result (lost wake-up): heap dump "
+                           "%s (%s)%s; Dumps tab" % (k, d["f"], who, ", %d with their task interrupted" % w["intr"] if w["intr"] else ""))
+        elif w.get("still"):
+            since = min((r["since"] for r in w["rows"] if r.get("since") is not None), default=None)
+            out.append("%d thread(s) still in the same Hazelcast wait since %s with no CPU used (never woken): thread dump %s (%s); Dumps tab"
+                       % (w["still"], ft(since), d["f"], who))
+    rl = sum(lm.ecount.get("racelost", 0) for lm in lms)
+    if rl:
+        out.append("%d 'Future.complete(Object) on completed future' warning(s) where the response beat an interrupt: each can leave a "
+                   "thread parked forever (logs)" % rl)
+    return out
 
 
 # --------------------------------------------------------------------------- HTML report
@@ -6565,6 +8754,7 @@ input[type="search"] { width: 200px; }
 .cap-r { display: flex; align-items: baseline; gap: 10px; margin-left: auto; }
 .cap h3 { font-size: 14px; font-weight: 600; margin: 0; }
 .cap .note { font-size: 12px; color: var(--muted); }
+.card h4.subhead { font-size: 13px; font-weight: 600; margin: 16px 0 4px; }
 code, .mname { font-family: var(--mono); font-size: 11.5px; color: var(--muted); overflow-wrap: anywhere; }
 .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 8px 0 2px; align-items: center; font-size: 12px; color: var(--ink-2); }
 .lg { display: inline-flex; align-items: center; gap: 6px; background: none; border: 0; padding: 0; font: inherit; color: inherit; cursor: pointer; max-width: 100%; }
@@ -6876,7 +9066,14 @@ details.sect p { color: var(--ink-2); font-size: 13px; margin: 8px 0; }
         Hazelcast's own lines, the ones with its <code>[host]:port [cluster] [version]</code> prefix or a Hazelcast
         logger), the migrations and the CP Subsystem: groups, roles,
         terms, elections, sessions, persistence. Lost partitions and WAN problems are also on the Overview, and WAN
-        problems on the WAN tab. Times are the ones printed in the logs (converted when a line has a zone offset), so
+        problems on the WAN tab. Every warning and error line (WARN, WARNING, ERROR, SEVERE), Hazelcast's or the
+        application's, is counted and grouped by message on the logs Overview (<i>Errors and warnings by message</i>,
+        which the <i>Errors</i> and <i>Warnings</i> tiles open): the lines of one level and logger whose text is the
+        same but for its numbers, ids, addresses and names with a digit or a Kubernetes pod's suffix are one kind,
+        with how many on each member, the first and the last, the exception it carries (its class and stack trace are
+        on the Exceptions tab) and up to 40 of its lines, spread over the log, kept as they are. With more than 500 kinds, the rarest are
+        counted together. The ones of no notable kind are also listed with the notable lines, as <i>Other errors</i>
+        and <i>Other warnings</i>. Times are the ones printed in the logs (converted when a line has a zone offset), so
         they line up with the diagnostics when both were written in the same time zone.</li>
       <li><b>Migrations</b> come from the master's log lines: <code>Repartitioning cluster data. Migration tasks
         count: N</code> starts a plan, <code>Remaining migration tasks</code> follows it, and <code>All migration tasks
@@ -6909,6 +9106,29 @@ details.sect p { color: var(--ink-2); font-size: 13px; margin: 8px 0; }
         8 bytes), not what it keeps alive: for retained sizes and paths to GC roots, open the dump in Eclipse MAT or
         VisualVM. A heap dump is read for at most <code>--heap-seconds</code> (120 by default); the tables then cover the
         part read.</li>
+      <li><b>Large values</b> (heap dumps): every <code>byte[]</code> of 64 KB or more, grouped by length; copies are told
+        apart by their content at their start, middle and end (4 KB each; a checksum of all of it in a <code>.gz</code>
+        dump). What holds each one: a client message's frame (<code>ClientMessage$Frame.content</code>), a member
+        <code>Packet</code>, a <code>HeapData</code> (a serialized key or value), or something else (open it in Eclipse
+        MAT: Path To GC Roots). A value held by a frame or a HeapData is Hazelcast's serialized form: its serializer
+        (Java Serializable and the class, Compact and its type, IdentifiedDataSerializable factory and class id, JSON,
+        String...) is read from its first bytes. Each connection's outbound queue (<code>NioOutboundPipeline</code>:
+        <code>writeQueue</code> and <code>priorityWriteQueue</code>, what this JVM has not written to it yet) is walked:
+        its messages, their type (the client protocol's message type in their first frame: <code>Map.Get
+        response</code>), correlation ids and bytes; the connection (<code>TcpServerConnection</code>: its type and
+        address), the client (<code>ClientEndpointImpl</code>: name, version, uuid) and the requests of that connection
+        still in the heap (message tasks: the data structure's name and the key). Red when one value has 10 copies or
+        more adding up to 64 MB or more, or a connection has 64 MB or more queued. The object addresses go in MAT's
+        OQL (<code>SELECT * FROM OBJECTS 0x…</code>) to see the rest: retained sizes, paths to GC roots.</li>
+      <li><b>Outbound write queues</b> (Network tab): <code>tcp.connection.out.writeQueuePendingBytes</code> and
+        <code>priorityWriteQueuePendingBytes</code> (added up), and <code>writeQueueSize</code>, of each connection
+        (<code>pipelineId=/local-&gt;/remote</code>): what this member has not written to that connection yet. They stay
+        near 0; a connection that had 1 MB (or 1,000 frames) or more waiting at some dump is listed, with its peak and when,
+        when it first went over 64 MB (red, on the Overview and in <i>What happened</i>), its value at its last dump
+        (and whether the connection closed: its metrics stop before the member's). The peer is a member when its address
+        is one, else a client (or another cluster, for a connection this member opened). A heap dump of the same member
+        that has the same connection (local and remote address) in its outbound queues is linked both ways: what is in
+        that queue, and the requests behind it, are on the Dumps tab.</li>
       <li id="limits-note"></li>
     </ul>
     <p class="hint" id="gen-note"></p>
@@ -7160,6 +9380,32 @@ const HASINV = IV.dumps.length > 0;
 const PR = D.props || { secs: [], keys: [], vals: [], rows: [], lives: [], changes: [] };
 const DUMPS = D.dumps || [];
 const HASDUMPS = DUMPS.length > 0;
+// outbound write queues per connection (tcp.connection.out.writeQueuePendingBytes), and the heap dumps that hold the same
+const WQ = D.wq && D.wq.rows ? D.wq : null;
+function wqHeap(r) {                    // [dump index, queue index] of a heap dump of the same member with this connection queued
+  for (let i = 0; i < DUMPS.length; i++) {
+    const d = DUMPS[i];
+    if (d.k !== "heap" || !d.lv || (d.m >= 0 && d.m !== r.m)) continue;
+    const qi = d.lv.queues.findIndex(q => q.remote && q.remote === r.remote && (!q.local || !r.local || q.local === r.local));
+    if (qi >= 0) return [i, qi];
+  }
+  return null;
+}
+function wqRow(d, q) {                  // the diagnostics' row of a heap dump's queue: same member, same connection
+  if (!WQ || !q.remote) return -1;
+  return WQ.rows.findIndex(r => r.remote === q.remote && (d.m < 0 || r.m === d.m) && (!q.local || !r.local || q.local === r.local));
+}
+// bring a card into view, below the bars that stay at the top (and again once the charts that came into view have
+// drawn themselves: their height can change)
+function scrollToCard(c, again) {
+  if (!c) return;
+  const top = $("top"), h = top && getComputedStyle(top).position === "sticky" ? top.getBoundingClientRect().height : 0;
+  const dy = c.getBoundingClientRect().top - h - 10;
+  if (Math.abs(dy) > 1) window.scrollTo(0, Math.max(0, window.scrollY + dy));
+  if (!again) setTimeout(() => scrollToCard(c, true), 150);
+}
+function openWq(i) { state.wqSel = i; setTab("network"); setTimeout(() => scrollToCard($("wq-card")), 0); }
+function openLvQueue(di, qi) { openDump(di); state.lvQ = qi; update(); }
 const HASPROPS = PR.rows.length > 0;
 if (HASGC && HASDIAG) TABS.splice(TABS.findIndex(t => t[0] === "system") + 1, 0, ["gc", "GC"]);
 if (HASSTORE) TABS.splice(TABS.findIndex(t => t[0] === "maps") + 1, 0, ["mapstore", "MapStore"]);
@@ -7179,8 +9425,10 @@ const state = { tab: "overview", member: "all", prof: "both", group: "member", q
   log: true, mapMetric: null, mapSel: null, mapSort: { key: null, dir: -1 },
   evKind: "all", thSel: null, thSort: { key: "a", dir: 1 }, last: {},
   logCat: "all", excSel: null, excSort: { key: "n", dir: -1 }, cpKind: "all", satSort: { key: "a", dir: 1 },
+  logLvl: "all", msgSel: null, msgSort: { key: "n", dir: -1 }, msgAll: false,
   dragMode: "zoom", msel: null, trKind: "all", trSel: null, trSort: { key: "tot", dir: -1 }, wanPub: null, cpGroup: null,
   dumpSel: null, dumpGroup: null, dumpSort: { key: "t0", dir: 1 }, dumpLockSort: { key: "w", dir: -1 }, dumpFamSort: { key: "n", dir: -1 },
+  hzwSel: null, hzwTdSort: { key: "s", dir: 1 }, lvQ: null, lvG: null, wqSel: null, wqSort: { key: "max", dir: -1 },
   lat: { f: 12, s: 19, t: 17 } };      // latency groups: fastest < 4.1 ms, slowest >= 524 ms, slow from 131 ms
 const selMembers = () => state.member === "all" ? MEMBERS.map((m, i) => i) : [+state.member];
 const selSet = () => new Set(selMembers());
@@ -8686,6 +10934,48 @@ function buildOverview(sec) {
       (lonly && dsel.length ? " · " + lonly + " more with member logs only" : "") + (csel && dsel.length ? " · + " + csel + " client" + (csel === 1 ? "" : "s") : "") +
       (gonly && dsel.length ? " · " + gonly + " GC log" + (gonly === 1 ? "" : "s") + " with no member" : ""));
     kpi(kp, "Time range", dur((state.x1 - state.x0) / 1000), span(state.x0, state.x1));
+    {                                   // Hazelcast calls never woken: heap dumps, thread dumps, logs
+      const hd = HASDUMPS ? DUMPS.filter(d => d.hzw && (d.m < 0 || ss.has(d.m)) && (d.t == null || (d.t >= state.x0 && d.t <= state.x1))) : [];
+      const hs = hd.filter(d => hzwStuck(d)), st = hd.filter(d => hzwStill(d));
+      let rl = 0;
+      if (HASLOGS) for (const [ci, mi, , bins] of LOGS.evbins) if (LOGCATS[ci][0] === "racelost" && ss.has(mi)) rl += binsInView(bins);
+      if (hd.some(d => d.k === "heap") || hs.length || st.length || rl) {
+        const top = Math.max(0, ...hs.map(hzwStuck), ...st.map(hzwStill));
+        const parts = hs.map(d => fmtInt(hzwStuck(d)) + " parked on futures that already hold their result (heap dump, " + dumpWho(d) + ")")
+          .concat(st.map(d => fmtInt(hzwStill(d)) + " still in the same wait, no CPU used (thread dumps, " + dumpWho(d) + ")"));
+        if (rl) parts.push(fmtInt(rl) + " interrupted call" + (rl === 1 ? "" : "s") + " whose response won (logs: each can leave a thread stuck)");
+        const k = linkKpi(kpi(kp, "Hazelcast calls never woken", top || !rl ? fmtInt(top) : "?", parts.length ? parts.join(" · ") :
+          "none: the threads waiting on Hazelcast calls in the heap dumps were waiting for their response"), hs.length || st.length || !rl ? "dumps" : "logs",
+          hs.length || st.length || !rl ? "Open the Dumps tab" : "Open the logs");
+        if (top || rl) { k.classList.add("alert"); k.querySelector(".kpi-value").classList.add("bad"); }
+      }
+    }
+    {                                   // large values in the heap dumps: copies of one value, a connection's outbound queue
+      const hd = HASDUMPS ? DUMPS.filter(d => d.k === "heap" && d.lv && (d.m < 0 || ss.has(d.m)) && (d.t == null || (d.t >= state.x0 && d.t <= state.x1))) : [];
+      if (hd.length) {
+        const al = hd.filter(d => d.lv.alert), top = hd.map(d => d.lv.groups[0]).filter(g => g).sort((a, b) => b.same * b.len - a.same * a.len)[0];
+        const k = linkKpi(kpi(kp, "Large values in heap dumps", al.length ? fmtInt(Math.max(...al.map(d => d.lv.groups.length ? d.lv.groups[0].same : 0))) + " copies" :
+          top ? fmtBytes(top.len) : "none", al.length ? al.map(d => lvText(d) + " (" + dumpWho(d) + ")").join(" · ") :
+          top ? "the largest byte[]: " + fmtInt(top.n) + " of " + fmtBytes(top.len) + " · nothing queued that stands out" : "no byte[] of 64 KB or more"), "dumps", "Open the Dumps tab");
+        if (al.length) { k.classList.add("alert"); k.querySelector(".kpi-value").classList.add("bad"); }
+      }
+    }
+    if (WQ && WQ.bytes) {               // outbound write queues: connections whose pending bytes grew
+      const rows = WQ.rows.filter(r => ss.has(r.m) && r.max != null && r.first <= state.x1 && r.last >= state.x0);
+      const over = rows.filter(r => r.t1 != null && r.t1 <= state.x1), top = rows[0];
+      const several = new Set(over.map(r => r.m)).size > 1;
+      const parts = over.slice(0, 2).map(r => (r.remote || "?") + " " + fmtBytes(r.max) + " at " + shortTime(r.tmax) + (several ? " (" + MEMBERS[r.m].label + ")" : ""));
+      if (over.length > 2) parts.push(fmtInt(over.length - 2) + " more");
+      const hp = over.map(r => [r, wqHeap(r)]).filter(x => x[1]).sort((a, b) => DUMPS[b[1][0]].lv.queues[b[1][1]].bytes - DUMPS[a[1][0]].lv.queues[a[1][1]].bytes)[0];
+      if (hp) parts.push("the heap dump at " + shortTime(DUMPS[hp[1][0]].t) + " has " + fmtInt(DUMPS[hp[1][0]].lv.queues[hp[1][1]].n) + " messages (" +
+        fmtBytes(DUMPS[hp[1][0]].lv.queues[hp[1][1]].bytes) + ") queued to " + hp[0].remote);
+      const k = linkKpi(kpi(kp, "Outbound write queues", top ? fmtBytes(top.max) : "0 B", over.length ? fmtInt(over.length) + " connection" + (over.length === 1 ? "" : "s") +
+        " with " + fmtBytes(WQ.thr[1]) + " or more waiting to be written: " + parts.join(" · ") :
+        top ? "the most waiting to be written to one connection: " + (top.remote || "?") + " at " + shortTime(top.tmax) :
+        "no connection had " + fmtBytes(WQ.thr[0]) + " or more waiting (" + fmtInt(WQ.npipes) + " connections)"), "network",
+        "Open the Network tab: the bytes waiting on each connection");
+      if (over.length) { k.classList.add("alert"); k.querySelector(".kpi-value").classList.add("bad"); }
+    }
     const mk = MARKERS.filter(e => e.t >= state.x0 && e.t <= state.x1);
     const left = mk.filter(e => e.kind === "MemberRemoved").length, joined = mk.length - left;
     kpi(kp, "Membership changes", String(mk.length), mk.length ? left + " left, " + joined + " joined" : "none in this range");
@@ -8816,24 +11106,36 @@ function buildOverview(sec) {
       groups.push({ t: e[0], kind: e[2], text: e[3], seen: [e[1]] });
     }
     const nev = groups.length;
+    let nwq = 0;
     for (const d of dumpsInView()) groups.push({ t: d.t, kind: dumpKind(d), text: dumpSummary(d), seen: d.m >= 0 ? [d.m] : [], dump: DUMPS.indexOf(d) });
+    if (WQ) WQ.rows.forEach((r, i) => {
+      if (r.t1 == null || !ss.has(r.m) || r.t1 < state.x0 || r.t1 > state.x1) return;
+      const h = wqHeap(r);
+      nwq++;
+      groups.push({ t: r.t1, kind: "Write queue", wq: i, seen: [r.m], text: (r.remote || "?") + " (" + wqPeer(r) + "): over " + fmtBytes(WQ.thr[1]) +
+        " waiting to be written · peak " + fmtBytes(r.max) + " at " + shortTime(r.tmax) + (r.gone ? " · then the connection closed" : "") +
+        (h ? " · in the heap dump at " + shortTime(DUMPS[h[0]].t) + ": " + fmtInt(DUMPS[h[0]].lv.queues[h[1]].n) + " messages queued to it" : "") });
+    });
     groups.sort((a, b) => a.t - b.t);
-    evNote.textContent = groups.length ? (nev ? fmtInt(nev) + " membership, lifecycle and version events · the Cluster tab lists every event" : "") +
-      (groups.length > nev ? (nev ? " · " : "") + fmtInt(groups.length - nev) + " thread or heap dump" + (groups.length - nev === 1 ? "" : "s") + ": click one to open it" : "") : "";
+    const ndp = groups.length - nev - nwq;
+    evNote.textContent = [nev ? fmtInt(nev) + " membership, lifecycle and version events · the Cluster tab lists every event" : "",
+      ndp ? fmtInt(ndp) + " thread or heap dump" + (ndp === 1 ? "" : "s") + ": click one to open it" : "",
+      nwq ? fmtInt(nwq) + " connection" + (nwq === 1 ? "" : "s") + " whose write queue went over " + fmtBytes(WQ.thr[1]) + ": click one for the Network tab" : ""].filter(x => x).join(" · ");
     if (!groups.length) { el("div", "empty-note", wrap, "No membership or lifecycle events in this range."); return; }
     const t = el("table", null, wrap), hr = el("tr", null, el("thead", null, t));
     ["Time", "Event", "Details", "Seen by"].forEach(h => el("th", null, hr, h));
     const tb = el("tbody", null, t);
     for (const g of groups.slice(0, 200)) {
-      const tr = el("tr", g.dump != null ? "click" : null, tb);
-      el("td", "num", tr, shortTime(g.t)); el("td", g.dump != null && dumpAlert(DUMPS[g.dump]) ? "lvl-E" : null, tr, g.kind); el("td", "wide", tr, g.text);
+      const tr = el("tr", g.dump != null || g.wq != null ? "click" : null, tb);
+      el("td", "num", tr, shortTime(g.t)); el("td", (g.dump != null && dumpAlert(DUMPS[g.dump])) || g.wq != null ? "lvl-E" : null, tr, g.kind); el("td", "wide", tr, g.text);
       const sm = g.seen.filter(isMember);
       el("td", "wide", tr, g.dump != null && !g.seen.length ? "not matched to a member" : sm.length === NDIAG && NDIAG > 1 && sm.length === g.seen.length ? "all members"
         : sm.length === NDIAG && NDIAG > 1 ? "all members, " + g.seen.filter(m => !isMember(m)).map(m => MEMBERS[m].label).join(", ") : g.seen.map(m => MEMBERS[m].label).join(", "));
-      if (g.dump != null) {
-        tr.tabIndex = 0; tr.title = "Open it on the Dumps tab";
-        tr.addEventListener("click", () => openDump(g.dump));
-        tr.addEventListener("keydown", ev => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); openDump(g.dump); } });
+      if (g.dump != null || g.wq != null) {
+        const go = () => g.dump != null ? openDump(g.dump) : openWq(g.wq);
+        tr.tabIndex = 0; tr.title = g.dump != null ? "Open it on the Dumps tab" : "Open it on the Network tab";
+        tr.addEventListener("click", go);
+        tr.addEventListener("keydown", ev => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); go(); } });
       }
     }
     if (groups.length > 200) el("div", "hint", wrap, "First 200 of " + fmtInt(groups.length) + "; zoom in to see the rest.");
@@ -11155,7 +13457,7 @@ function satThen(e) {
   return "still saturated at the last dump";
 }
 // sort orders of the tables that are rebuilt on every update
-const SORTS = { ev: { key: "t0", dir: 1 }, oome: { key: "t0", dir: 1 }, msg: { key: "n", dir: -1 }, cp: { key: "t0", dir: 1 } };
+const SORTS = { ev: { key: "t0", dir: 1 }, oome: { key: "t0", dir: 1 }, msg: { key: "n", dir: -1 }, cp: { key: "t0", dir: 1 }, wel: { key: "t0", dir: 1 } };
 function buildSaturation(sec) {
   if (!POOLS.list.length) return;
   if (!SATS.length) {
@@ -11304,7 +13606,17 @@ function stepRuns(pts, end) {
 
 /* ---------- Member logs: Overview, Health monitor, Exceptions, CP Subsystem */
 const LOGS = D.logs;
-const LOGCATS = HASLOGS ? LOGS.cats : [];
+// the notable kinds of lines, then the other errors and warnings (exported apart: ocats, oevents, oevbins, osampled)
+const LOGCATS = HASLOGS ? LOGS.cats.concat(LOGS.ocats || []) : [];
+const LOGEVBINS = HASLOGS ? LOGS.evbins.concat(LOGS.oevbins || []) : [];
+const LOGEV = (() => {                  // both lists of lines, in time order
+  if (!HASLOGS) return [];
+  const a = LOGS.events, b = LOGS.oevents || [], out = [];
+  let i = 0, j = 0;
+  while (i < a.length || j < b.length)
+    out.push(j >= b.length || (i < a.length && (a[i][0] < b[j][0] || (a[i][0] === b[j][0] && a[i][1] <= b[j][1]))) ? a[i++] : b[j++]);
+  return out;
+})();
 const LVL_NAME = { E: "ERROR", W: "WARN", I: "INFO", D: "DEBUG" };
 const cssVar = (name, dflt) => getComputedStyle(root).getPropertyValue(name).trim() || dflt;
 const warnColor = () => cssVar("--warn", "#c98500");
@@ -11320,7 +13632,7 @@ function logSpan() {
 }
 function logEnd(mi) { const r = HASLOGS ? LOGS.info.find(x => x[0] === mi) : null; return r && r[5] != null ? r[5] : X_MAX; }
 // kinds of lines with more than the report keeps: [member, kind ("cp:..." for the CP Subsystem), lines, kept]
-const SAMPLED = HASLOGS ? (LOGS.sampled || []) : [];
+const SAMPLED = HASLOGS ? (LOGS.sampled || []).concat(LOGS.osampled || []) : [];
 const EV_CAPPED = SAMPLED.some(x => x[1].indexOf("cp:") !== 0), CP_CAPPED = SAMPLED.some(x => x[1].indexOf("cp:") === 0);
 const CAPPED_NOTE = " · some kinds had more lines than the report keeps: 1,000 to 2,000 of each per member, spread over the whole log (counts and charts include them all)";
 function logBanner(sec, what) {
@@ -11393,7 +13705,7 @@ function renderDotLanes(p, rows, o) {
   finish(p);
 }
 function sevLegend(host) {
-  for (const [sev, label] of [[2, "critical"], [1, "warning"], [0, "information"]]) {
+  for (const [sev, label] of [[2, "critical or error"], [1, "warning"], [0, "information"]]) {
     const it = el("span", "lg lg-static", host), s = el("span", "sw", it);
     s.style.background = sevColor(sev); s.style.borderRadius = "50%";
     el("span", null, it, label);
@@ -11427,7 +13739,7 @@ function logLevelSeries(p) {
 // the notable kinds of lines, with their times on the selected members
 function catRows() {
   const ss = selSet(), by = new Map();
-  for (const [ci, mi, , bins] of LOGS.evbins) {
+  for (const [ci, mi, , bins] of LOGEVBINS) {
     if (!ss.has(mi)) continue;
     let r = by.get(ci);
     if (!r) { const c = LOGCATS[ci]; r = { key: c[0], ci, label: c[1], sev: c[2], color: sevColor(c[2]), bins: [], per: new Map() }; by.set(ci, r); }
@@ -11438,9 +13750,98 @@ function catRows() {
   return Array.from(by.values()).filter(r => r.n > 0).sort((a, b) => a.ci - b.ci);
 }
 const perText = r => Array.from(r.per.entries()).filter(x => x[1]).map(x => MEMBERS[x[0]].label + (r.per.size > 1 ? " " + fmtInt(x[1]) : "")).join(", ");
+// a KPI tile that picks something further down the page
+function actKpi(k, title, act) {
+  k.classList.add("link"); k.tabIndex = 0; k.setAttribute("role", "button"); k.title = title;
+  k.addEventListener("click", act);
+  k.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); act(); } });
+  return k;
+}
+// every warning and error line, by message: {lv, lg logger, x the first line, n, f, l, ms [[member, bins]], r kept lines
+// [[t, member, text]], e exception (in LOGX), c notable kind (in LOGCATS), o the ones past the kinds the report tells apart}
+const LOGMSG = HASLOGS ? (LOGS.msgs || []) : [];
+const msgInView = (g, ss) => { let n = 0; for (const [mi, bins] of g.ms) if (ss.has(mi)) n += binsInView(bins); return n; };
+const msgText = g => g.o ? "(more kinds of message than the report tells apart: the rarest ones, counted together)" : g.x || "(no message)";
+const MSG_ROWS = 30;                    // kinds listed until Show all
+function buildLogMsgs(sec) {
+  const card = el("section", "card", sec), cap = el("div", "cap", card);
+  card.id = "log-msgs";
+  el("h3", null, cap, "Errors and warnings by message");
+  const note = el("span", "note", cap);
+  const fl = el("div", "tabctl", card), chips = el("div", "seg", fl);
+  chips.setAttribute("role", "group"); chips.setAttribute("aria-label", "Level");
+  const wrap = el("div", "table-wrap", card);
+  const detail = el("div", null, card);
+  detail.id = "log-msg-detail";
+  const render = () => {
+    clear(chips); clear(wrap); clear(detail);
+    const ss = selSet(), q = findQ();
+    const all = LOGMSG.map((g, i) => ({ g, i, n: msgInView(g, ss) })).filter(x => x.n > 0);
+    let ne = 0, nw = 0;
+    for (const x of all) if (x.g.lv === "E") ne += x.n; else nw += x.n;
+    for (const [k, label, n] of [["all", "All", ne + nw], ["E", "Errors", ne], ["W", "Warnings", nw]]) {
+      const b = el("button", null, chips, label + " " + fmtInt(n));
+      b.type = "button"; b.setAttribute("aria-pressed", String(state.logLvl === k));
+      b.addEventListener("click", () => { state.logLvl = k; update(); });
+    }
+    const per = x => x.g.ms.filter(m => ss.has(m[0])).map(m => [m[0], binsInView(m[1])]).filter(m => m[1]);
+    const exc = g => g.e != null ? LOGX[g.e] : null;
+    const rows = all.filter(x => (state.logLvl === "all" || x.g.lv === state.logLvl) && (!q || msgText(x.g).toLowerCase().indexOf(q) >= 0 ||
+      x.g.lg.toLowerCase().indexOf(q) >= 0 || (exc(x.g) && excTitle(exc(x.g)).toLowerCase().indexOf(q) >= 0) ||
+      per(x).some(m => MEMBERS[m[0]].label.toLowerCase().indexOf(q) >= 0)));
+    note.textContent = fmtInt(rows.length) + " kind" + (rows.length === 1 ? "" : "s") + " of message in this range: the lines alike but for their numbers, ids and addresses, from one logger · click one for its lines";
+    const pick = x => {
+      state.msgSel = state.msgSel === x.i ? null : x.i;
+      update();
+      const h = $("log-msg-detail");                // its lines below the table: in sight
+      if (state.msgSel != null && h && h.getBoundingClientRect().top > window.innerHeight - 160) scrollToCard(h);
+    };
+    sortableTable(wrap, [
+      { key: "lv", label: "Level", val: x => LVL_NAME[x.g.lv] || x.g.lv, lv: x => x.g.lv },
+      { key: "n", label: "Lines", num: true, val: x => x.n, fmt: x => fmtInt(x.n) },
+      { key: "m", label: "Members", val: x => { const ms = per(x); return ms.map(m => MEMBERS[m[0]].label + (ms.length > 1 ? " " + fmtInt(m[1]) : "")).join(", "); }, cls: "wrapcell" },
+      { key: "f", label: "First", num: true, val: x => x.g.f, fmt: x => shortTime(x.g.f) },
+      { key: "l", label: "Last", num: true, val: x => x.g.l, fmt: x => shortTime(x.g.l) },
+      { key: "lg", label: "Logger", val: x => shortCls(x.g.lg) || "–", title: x => x.g.lg },
+      { key: "x", label: "Message (the first one)", val: x => msgText(x.g), cls: "msg" },
+      { key: "e", label: "Exception", val: x => exc(x.g) ? excLabel(exc(x.g)) : "", title: x => exc(x.g) ? excTitle(exc(x.g)) : "", cls: "wrapcell" }
+    ], rows, state.msgSort, render, pick, "No warning or error in this selection.", x => x.i === state.msgSel, state.msgAll ? 100000 : MSG_ROWS);
+    const more = rows.length > MSG_ROWS ? wrap.querySelector(".hint") : null;
+    if (more || (state.msgAll && rows.length > MSG_ROWS)) {
+      const line = more || el("div", "hint", wrap, "All " + fmtInt(rows.length) + " kinds.");
+      line.appendChild(document.createTextNode(" "));
+      const b = el("button", "btn btn-s", line, state.msgAll ? "Show the first " + MSG_ROWS : "Show all " + fmtInt(rows.length));
+      b.type = "button";
+      b.addEventListener("click", () => { state.msgAll = !state.msgAll; update(); });
+    }
+    const sel = state.msgSel != null ? LOGMSG[state.msgSel] : null;
+    if (!sel) return;
+    el("h4", "subhead", detail, (sel.o ? "The rarest kinds of " + (sel.lv === "E" ? "error" : "warning") + ", counted together" : (LVL_NAME[sel.lv] || sel.lv) + (sel.lg ? " from " + shortCls(sel.lg) : "")) +
+      ": " + fmtInt(sel.n) + " line" + (sel.n === 1 ? "" : "s") + " in all");
+    const lead = el("p", "lead", detail, (sel.lg && sel.lg !== shortCls(sel.lg) ? sel.lg + " · " : "") + span(sel.f, sel.l) + " · " +
+      sel.ms.map(m => MEMBERS[m[0]].label + " " + fmtInt(m[1].reduce((a, b) => a + b[1], 0))).join(", ") +
+      (sel.c != null ? " · with the notable lines as " + LOGCATS[sel.c][1] : "") + " ");
+    const ex = exc(sel);
+    if (ex) {
+      const b = el("button", "btn btn-s", lead, "Its exception: " + excLabel(ex) + " →"); b.type = "button";
+      b.title = "Open it on the Exceptions tab: its messages and the first stack trace";
+      b.addEventListener("click", () => { state.excSel = sel.e; setTab("logs-exceptions"); setTimeout(() => scrollToCard($("exc-detail")), 0); });
+    }
+    const lines = sel.r.filter(r => ss.has(r[1]) && inView(r[0]));
+    if (sel.r.length < sel.n) el("p", "hint", detail, "The report keeps " + fmtInt(sel.r.length) + " of its " + fmtInt(sel.n) + " lines here, spread over the whole log.");
+    const w2 = el("div", "table-wrap", detail);
+    sortableTable(w2, [
+      { key: "t0", label: "Time", num: true, val: r => r[0], fmt: r => shortTime(r[0]) },
+      { key: "m", label: "Member", val: r => MEMBERS[r[1]].label },
+      { key: "x", label: "Line", val: r => r[2], cls: "msg" }
+    ], lines, SORTS.wel, render, null, "None of the lines kept is in this selection.");
+  };
+  tabUpdaters.push(Object.assign(render, { tab: "logs" }));
+}
 function buildLogsOverview(sec) {
   logBanner(sec, "what " + LOGWHO + " logged");
   const kp = el("div", "kpis", sec);
+  const pickLevel = lv => { state.logLvl = lv; state.msgSel = null; update(); scrollToCard($("log-msgs")); };
   const renderK = () => {
     clear(kp);
     const ss = selSet();
@@ -11453,16 +13854,13 @@ function buildLogsOverview(sec) {
     linkKpi(kpi(kp, "Exceptions", fmtInt(nx), fmtInt(kinds) + " kind" + (kinds === 1 ? "" : "s") + " · see Exceptions"), "logs-exceptions", "Open the Exceptions tab");
     let we = 0, ee = 0;
     for (const [mi, rows, st] of LOGS.levels) if (ss.has(mi)) for (const r of rows) if (levelIn(r[0], st)) { we += r[1]; ee += r[2]; }
-    const k3 = kpi(kp, "Errors", fmtInt(ee), "ERROR and SEVERE lines");
-    if (ee) k3.querySelector(".kpi-value").classList.add("bad");
-    kpi(kp, "Warnings", fmtInt(we), "WARN and WARNING lines");
+    const k3 = kpi(kp, "Errors", fmtInt(ee), "ERROR and SEVERE lines" + (ee ? " · by message below" : ""));
+    if (ee) { k3.querySelector(".kpi-value").classList.add("bad"); actKpi(k3, "List them by message below", () => pickLevel("E")); }
+    const k4 = kpi(kp, "Warnings", fmtInt(we), "WARN and WARNING lines" + (we ? " · by message below" : ""));
+    if (we) actKpi(k4, "List them by message below", () => pickLevel("W"));
     for (const r of catRows()) {
-      if (r.sev < 1 || r.key === "oome") continue;
-      const k = kpi(kp, r.label, fmtInt(r.n), perText(r));
-      k.classList.add("link"); k.tabIndex = 0; k.setAttribute("role", "button"); k.title = "List these lines below";
-      const pick = () => { state.logCat = r.key; update(); const t = $("log-lines"); if (t) t.scrollIntoView({ block: "start" }); };
-      k.addEventListener("click", pick);
-      k.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(); } });
+      if (r.sev < 1 || r.key === "oome" || r.key === "error" || r.key === "warning") continue;
+      const k = actKpi(kpi(kp, r.label, fmtInt(r.n), perText(r)), "List these lines below", () => { state.logCat = r.key; update(); scrollToCard($("log-lines")); });
       if (r.sev >= 2) { k.classList.add("alert"); k.querySelector(".kpi-value").classList.add("bad"); }
     }
   };
@@ -11490,6 +13888,8 @@ function buildLogsOverview(sec) {
     } });
     ms.fixed = true;
   }
+  // the warnings and errors, by message
+  if (LOGMSG.length) buildLogMsgs(sec);
   // the lines themselves
   const card = el("section", "card", sec), cap = el("div", "cap", card);
   card.id = "log-lines";
@@ -11508,7 +13908,7 @@ function buildLogsOverview(sec) {
       b.type = "button"; b.setAttribute("aria-pressed", String(state.logCat === k));
       b.addEventListener("click", () => { state.logCat = k; update(); });
     }
-    const rows = LOGS.events.filter(e => ss.has(e[1]) && inView(e[0]) && (state.logCat === "all" || LOGCATS[e[2]][0] === state.logCat) &&
+    const rows = LOGEV.filter(e => ss.has(e[1]) && inView(e[0]) && (state.logCat === "all" || LOGCATS[e[2]][0] === state.logCat) &&
       (!q || e[5].toLowerCase().indexOf(q) >= 0 || e[4].toLowerCase().indexOf(q) >= 0 || MEMBERS[e[1]].label.toLowerCase().indexOf(q) >= 0 || LOGCATS[e[2]][1].toLowerCase().indexOf(q) >= 0));
     note.textContent = fmtInt(rows.length) + " line" + (rows.length === 1 ? "" : "s") + " in this range" + (EV_CAPPED ? CAPPED_NOTE : "");
     sortableTable(wrap, [
@@ -11675,6 +14075,7 @@ function buildLogsExceptions(sec) {
   const note = el("span", "note", cap);
   const wrap = el("div", "table-wrap", card);
   const detail = el("div", null, sec);
+  detail.id = "exc-detail";
   const render = () => {
     clear(wrap); clear(detail);
     const q = findQ(), ss = selSet();
@@ -12769,16 +15170,34 @@ function dumpSummary(d) {
   if (d.k === "heap") {
     if (d.skipped) return fmtBytes(d.size) + " file · not read (--heap-seconds 0): its time only";
     if (d.error) return fmtBytes(d.size) + " file · " + d.error;
-    return fmtBytes(d.size) + " file · " + fmtInt(d.objects) + " objects, about " + fmtBytes(d.bytes) + (d.partial ? " (the part read)" : "") + " · " +
+    const hs = hzwStuck(d);
+    return (hs ? fmtInt(hs) + " thread" + (hs === 1 ? "" : "s") + " NEVER WOKEN from a Hazelcast call (the future holds its result) · " : "") +
+      (lvAlert(d) ? "LARGE VALUES: " + lvText(d) + " · " : "") +
+      fmtBytes(d.size) + " file · " + fmtInt(d.objects) + " objects, about " + fmtBytes(d.bytes) + (d.partial ? " (the part read)" : "") + " · " +
       fmtInt(d.threads) + " threads · biggest class " + (d.top[0] ? shortCls(d.top[0][0]) + " " + fmtBytes(d.top[0][2]) : "-");
   }
-  const busy = d.groups.filter(g => !g.idle && g.state !== "JVM").sort((a, b) => b.n - a.n)[0];
-  return (d.deadlock.length ? "DEADLOCK between " + d.deadlock.length + " threads · " : "") + fmtInt(d.n) + " threads: " + tdStates(d) +
-    (busy ? " · most: " + fmtInt(busy.n) + " " + tdStateName(busy.state) + (busy.where ? " in " + busy.where : "") : "");
+  const busy = d.groups.filter(g => !g.idle && g.state !== "JVM").sort((a, b) => b.n - a.n)[0], st = hzwStill(d);
+  return (d.deadlock.length ? "DEADLOCK between " + d.deadlock.length + " threads · " : "") +
+    (st ? fmtInt(st) + " thread" + (st === 1 ? "" : "s") + " STILL in the same Hazelcast wait since " + shortTime(hzwSince(d)) + ", no CPU used · " : "") +
+    fmtInt(d.n) + " threads: " + tdStates(d) +
+    (busy ? " · most: " + fmtInt(busy.n) + " " + tdStateName(busy.state) + (busy.where ? " in " + busy.where : "") : "") +
+    (d.hzw && !st ? " · " + fmtInt(d.hzw.n) + " waiting on Hazelcast calls" : "");
 }
-const dumpAlert = d => d.k === "thread" && (d.deadlock.length > 0 || (d.states.BLOCKED || 0) > 0);
+// threads waiting on Hazelcast calls (AbstractInvocationFuture.get / join / joinInternal); never woken: a lost wake-up
+const HZW_ST = { S: "never woken", L: "never woken (timed)", "?": "not known", C: "completing", R: "running in the wait", W: "waiting for its response" };
+const HZW_TIP = { S: "parked in an untimed wait on a future that already holds its result: nothing will wake it",
+  L: "parked in a timed wait on a future that already holds its result: it gets it only when its timeout ends",
+  "?": "its future's state was not read (time limit): cannot tell",
+  C: "its result came in just before the dump (no interrupt, the call under 5 s old): it was being woken",
+  R: "in the wait but not parked when the dump was taken", W: "its future has no result yet: it is waiting for the response" };
+const hzwStuck = d => d.k === "heap" && d.hzw ? (d.hzw.n.S || 0) + (d.hzw.n.L || 0) : 0;
+const hzwStill = d => d.k === "thread" && d.hzw ? d.hzw.still || 0 : 0;
+const hzwSince = d => d.hzw ? Math.min(...d.hzw.rows.filter(r => r.since != null).map(r => r.since)) : Infinity;
+const hzwPools = pools => pools.map(p => p[0] + " " + fmtInt(p[1]) + " of " + fmtInt(p[2])).join(", ");
+const lvAlert = d => d.k === "heap" && d.lv && d.lv.alert ? 1 : 0;
+const dumpAlert = d => (d.k === "thread" && (d.deadlock.length > 0 || (d.states.BLOCKED || 0) > 0)) || hzwStuck(d) > 0 || hzwStill(d) > 0 || lvAlert(d) > 0;
 // open a dump on the Dumps tab
-function openDump(i) { state.dumpSel = i; state.dumpGroup = null; setTab("dumps"); }
+function openDump(i) { state.dumpSel = i; state.dumpGroup = null; state.hzwSel = null; state.lvQ = null; state.lvG = null; setTab("dumps"); }
 function buildDumps(sec) {
   el("p", "lead", sec, "Thread dumps (jstack, kill -3 in a console output, jcmd Thread.print or Thread.dump_to_file, or written by an application) and heap dumps " +
     "(HPROF) found with the logs: when each was taken (its date line, the time in a heap dump, or a date in its file name), whose it is (the names of its threads, else its " +
@@ -12809,6 +15228,20 @@ function buildDumps(sec) {
     const k2 = kpi(kp, "Blocked threads", fmtInt(bl), "waiting for a monitor another thread holds");
     if (bl) k2.querySelector(".kpi-value").classList.add("bad");
     kpi(kp, "Heap dumps", fmtInt(hd.length), hd.length ? hd.map(x => fmtBytes(x.d.size) + " " + dumpWho(x.d)).join(" · ") : "none in this selection");
+    if (rows.some(x => x.d.hzw)) {
+      const hs = rows.filter(x => hzwStuck(x.d)), st = rows.filter(x => hzwStill(x.d));
+      const top = Math.max(0, ...hs.map(x => hzwStuck(x.d)), ...st.map(x => hzwStill(x.d)));
+      const k3 = kpi(kp, "Hazelcast calls never woken", fmtInt(top), hs.length || st.length ? hs.map(x => fmtInt(hzwStuck(x.d)) + " in the heap dump at " + shortTime(x.d.t) + " (" + dumpWho(x.d) + ")")
+        .concat(st.map(x => fmtInt(hzwStill(x.d)) + " still waiting in the thread dump at " + shortTime(x.d.t) + " (" + dumpWho(x.d) + ")")).join(" · ") :
+        "none: the threads in Hazelcast waits were waiting for their response");
+      if (top) { k3.classList.add("alert"); k3.querySelector(".kpi-value").classList.add("bad"); }
+    }
+    if (hd.some(x => x.d.lv)) {
+      const al = hd.filter(x => lvAlert(x.d));
+      const k4 = kpi(kp, "Large values", fmtInt(al.length), al.length ? al.map(x => lvText(x.d) + " (heap dump at " + shortTime(x.d.t) + ", " + dumpWho(x.d) + ")").join(" · ") :
+        "in the heap dumps: no copies of one large value, no big outbound queue");
+      if (al.length) { k4.classList.add("alert"); k4.querySelector(".kpi-value").classList.add("bad"); }
+    }
     note.textContent = fmtInt(rows.length) + " of " + fmtInt(DUMPS.length) + " · the selected members, the time range in view and Find · click one for the details";
     sortableTable(wrap, [
       { key: "t0", label: "Time", num: true, val: x => x.d.t == null ? Infinity : x.d.t, fmt: x => x.d.t == null ? "no time" : x.d.t < X_MIN || x.d.t > X_MAX ? logTime(x.d.t) : shortTime(x.d.t),
@@ -12822,7 +15255,7 @@ function buildDumps(sec) {
     let sel = state.dumpSel != null ? DUMPS[state.dumpSel] : null;
     if (!sel && rows.length === 1) sel = rows[0].d;
     if (!sel) return;
-    if (sel.k === "thread") threadDumpDetail(detail, sel, render); else heapDumpDetail(detail, sel);
+    if (sel.k === "thread") threadDumpDetail(detail, sel, render); else heapDumpDetail(detail, sel, render);
   };
   tabUpdaters.push(Object.assign(render, { tab: "dumps" }));
 }
@@ -12853,6 +15286,7 @@ function threadDumpDetail(host, d, rerender) {
     k3.classList.add("alert"); k3.querySelector(".kpi-value").classList.add("bad");
     textCard(host, "Deadlock", d.dl.length ? "as the JVM reported it" : "found from the monitors each thread holds and waits for", d.dl.length ? d.dl : d.deadlock.map(n => "\"" + n + "\""), true);
   }
+  if (d.hzw) hzwThreadCard(host, d, rerender);
   // the threads grouped by the same stack
   const c = el("section", "card", host), cp = el("div", "cap", c);
   el("h3", null, cp, "Threads with the same stack");
@@ -12919,9 +15353,11 @@ function threadDumpDetail(host, d, rerender) {
   sum.title = "As it is in " + d.f;
   det.addEventListener("toggle", () => { if (det.open && !det.querySelector("pre")) el("pre", "sample tall", det, d.txt); });
 }
-function heapDumpDetail(host, d) {
+function heapDumpDetail(host, d, rerender) {
   dumpHead(host, d);
   if (d.skipped || d.error) { el("p", "lead", host, d.skipped ? "Not read: --heap-seconds 0 keeps only the time it was taken." : "Could not read it: " + d.error); return; }
+  if (d.hzw) hzwHeapCard(host, d, rerender);
+  if (d.lv) lvHeapCard(host, d, rerender);
   el("p", "lead", host, "Shallow sizes (an object's own size, not what it keeps alive), estimated for a 64-bit JVM" + (d.compressed ? " with compressed references (the heap sits below 32 GB)" : "") +
     ". What an object keeps alive (retained size) needs the whole object graph: open the dump in Eclipse MAT or VisualVM for that." +
     (d.partial ? " Only part of the dump was read" + (d.read ? " (" + fmtBytes(d.read) + " of " + fmtBytes(d.size) + ")" : "") + " within --heap-seconds: the counts are for that part." : ""));
@@ -12954,6 +15390,255 @@ function heapDumpDetail(host, d) {
   if (roots.length) el("p", "hint", host, "GC roots: " + roots.map(k => fmtInt(d.roots[k]) + " " + k).join(", ") + " · " + d.format + ", " + d.ids + "-byte object ids.");
 }
 
+// a heap dump: the threads parked in a Hazelcast call, what each waits for, and whether its future already holds the result
+function hzwHeapCard(host, d, rerender) {
+  const w = d.hzw, n = w.n, stuck = hzwStuck(d), rows = w.rows;
+  const c = el("section", "card" + (stuck ? " alert" : ""), host), cp = el("div", "cap", c);
+  el("h3", null, cp, stuck ? "Hazelcast calls never woken" : "Threads waiting on Hazelcast calls");
+  el("span", "note", cp, fmtInt(w.nrows) + " thread" + (w.nrows === 1 ? "" : "s") + " parked in AbstractInvocationFuture.get / join / joinInternal" +
+    (w.nrows > rows.length ? ", the first " + fmtInt(rows.length) : "") + " · never woken first · click one for its stack");
+  el("p", "lead", c, stuck ? fmtInt(stuck) + " thread" + (stuck === 1 ? " is" : "s are") + " parked waiting on a Hazelcast call whose future already holds its result. " +
+    "A call whose result has come in returns within microseconds: nothing will wake " + (stuck === 1 ? "it" : "them") + " (a lost wake-up), and each one holds its pool thread for good. " +
+    "Hazelcast 5.x: an interrupt (Reactor cancelling a subscribeOn task calls Future.cancel(true)) races with the response; the response completes the future and unparks the " +
+    "thread while it is awake, the thread's own completion fails and it logs \"Future.complete(Object) on completed future\", that logging call parks on a lock and uses up the " +
+    "wake-up, and get() parks again without checking isDone(). The interrupt mark below (the task the thread runs, cancelled with an interrupt) shows the first step." :
+    "Each one's future has no result yet (or got it just before the dump): " + (n.W ? "they are waiting for their response" : "none is stuck") +
+    ". A thread parked on a future that already holds its result would be listed first, as never woken.");
+  const kp = el("div", "kpis", c);
+  const k1 = kpi(kp, "Never woken", fmtInt(stuck), stuck ? (n.L ? fmtInt(n.L) + " in a timed wait (they get the result at their timeout) · " : "") +
+    fmtInt(w.intr) + " interrupted (their task cancelled with an interrupt)" : "no thread parked on a future that holds its result");
+  if (stuck) { k1.classList.add("alert"); k1.querySelector(".kpi-value").classList.add("bad"); }
+  kpi(kp, "Waiting for their response", fmtInt(n.W || 0), (w.long ? fmtInt(w.long) + " for 2 minutes or more · " : "") + (n.C ? fmtInt(n.C) + " more completing (result just in)" : "the futures have no result yet"));
+  if (w.pools.length) kpi(kp, "Pool threads held", fmtInt(w.pools[0][1]) + " of " + fmtInt(w.pools[0][2]), "never woken, of the threads named " + w.pools[0][0] +
+    (w.pools.length > 1 ? " · " + hzwPools(w.pools.slice(1)) : ""));
+  kpi(kp, "Hazelcast logs through", w.log ? w.log[0] : "not read", w.log && w.log[1] ? "logger " + w.log[1] + " (it logs the warning that comes before a lost wake-up)" : "the futures' logger");
+  const startT = r => r.age != null && d.t != null ? d.t - r.age : r.t0;
+  const wrap = el("div", "table-wrap", c), t = el("table", null, wrap), hr = el("tr", null, el("thead", null, t));
+  const H = ["Thread", "Status", "Call", "The future holds", "Started", "Waiting", "Tries", "Its task", "Correlation id", "Called from"];
+  H.forEach((h, i) => el("th", i === 5 || i === 6 ? "num" : null, hr, h));
+  const tb = el("tbody", null, t);
+  rows.forEach((r, ri) => {
+    const tr = el("tr", "click" + (state.hzwSel === ri ? " sel" : ""), tb);
+    if (r.st === "W" || r.st === "C" || r.st === "R") tr.style.color = "var(--muted)";
+    el("td", "wrapcell", tr, r.th);
+    const ts = el("td", r.st === "S" || r.st === "L" ? "lvl-E" : r.st === "W" && r.age >= 120000 ? "lvl-W" : null, tr, HZW_ST[r.st] || r.st);
+    ts.title = HZW_TIP[r.st] || "";
+    el("td", "wrapcell", tr, [r.op || r.fut, r.obj, r.pt != null && r.pt >= 0 ? "partition " + r.pt : ""].filter(x => x).join(" · "));
+    el("td", "wrapcell", tr, r.res || "");
+    el("td", null, tr, startT(r) != null ? logTime(startT(r)) : "–");
+    el("td", "num", tr, r.age != null ? dur(r.age / 1000) : "–");
+    el("td", "num", tr, r.tries != null ? fmtInt(r.tries) : "–");
+    const tk = el("td", r.task && (r.task[0] === "INTERRUPTED" || r.task[0] === "INTERRUPTING") || r.fi ? "lvl-W" : null, tr,
+      r.task ? r.task[0] : r.fi ? "interrupted" : "–");
+    tk.title = r.task ? r.task[1] + " that runs the call: " + (r.task[0] === "INTERRUPTED" ? "cancelled with an interrupt (Future.cancel(true)) while it ran" : "state " + r.task[0]) :
+      r.fi ? "the future recorded an interrupt" : "no task found for this thread";
+    el("td", null, tr, r.cid != null ? String(r.cid) : "–");
+    el("td", "wrapcell", tr, [r.api, r.app].filter(x => x).join(" ← "));
+    tr.tabIndex = 0;
+    const pick = () => { state.hzwSel = state.hzwSel === ri ? null : ri; rerender(); };
+    tr.addEventListener("click", pick);
+    tr.addEventListener("keydown", ev => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); pick(); } });
+    if (state.hzwSel === ri) {
+      const tr2 = el("tr", null, tb), td2 = el("td", null, tr2);
+      td2.colSpan = H.length;
+      el("pre", "sample", td2, r.fr.map(f => "at " + f).join("\n") + (r.fr.length >= 40 ? "\n..." : ""));
+    }
+  });
+  el("p", "hint", c, (stuck ? "What to do: a thread that waits on a Hazelcast call must not be interrupted while it waits (do not run sync Hazelcast calls in a subscribeOn task that " +
+    "can be cancelled, or use the async API with a timeout); keeping that logger above WARNING avoids the trigger; the fix belongs in AbstractInvocationFuture " +
+    "(check isDone() before every park). In the logs, the warning that comes before each one carries its correlation id. " : "") +
+    "Read in " + fmtInt(w.passes) + " pass" + (w.passes === 1 ? "" : "es") + " over the dump" + (w.complete ? "" : " (not complete: the time limit or the part of the dump read; some details are missing)") + ".");
+}
+// a heap dump: the large values (byte[] of 64 KB and more, by size and content), what holds them, the connections' outbound queues
+const lvData = x => x ? x.type + (x.cls ? ": " + x.cls : "") + (x.text ? " \u201c" + trimText(x.text, 90) + "\u201d" : "") : "";
+const lvPlural = (n, t) => fmtInt(n) + " " + (/(response|request|event|Packet)$/.test(t) ? t + (n === 1 ? "" : "s") : (n === 1 ? "message" : "messages") + " (" + t + ")");
+// the finding in a few words (long: what the value is, the requests still in the heap)
+function lvText(d, long) {
+  const lv = d.lv, thr = lv.thr, g = lv.groups[0], q = lv.queues[0], parts = [];
+  const pct = v => d.bytes ? " (" + Math.round(100 * v / d.bytes) + "% of the heap)" : "";
+  if (g && g.same >= thr[0] && g.same * g.len >= thr[1])
+    parts.push(fmtInt(g.same) + " copies of one " + fmtBytes(g.len) + " value" + (long && g.data ? " (" + lvData(g.data) + ")" : "") + ": " + fmtBytes(g.same * g.len) + pct(g.same * g.len));
+  if (q && q.bytes >= thr[2]) {
+    const t = q.types[0];
+    parts.push((q.walked ? "" : "at least ") + (t && t[1] >= 0.9 * q.n ? lvPlural(t[1], t[0]) : fmtInt(q.n) + " messages") + " (" + fmtBytes(q.bytes) + ") queued to " + (q.remote || "a connection") +
+      (q.type ? ", " + q.type[0] + (q.client && q.client.name ? " " + q.client.name : "") : ""));
+    const tk = long ? q.tasks.filter(r => r.name)[0] : null;
+    if (tk) parts.push("its requests still in the heap: " + (tk.op || tk.cls).replace(" request", "") + " on " + tk.name + (tk.key ? ", key " + tk.key : ""));
+  }
+  return parts.join("; ");
+}
+function lvHeld(g) {
+  const h = g.held, out = [];
+  if (h.frame) out.push(fmtInt(h.frame) + " in client message frames" + (g.msgs.length ? " (" + g.msgs.map(m => lvPlural(m[1], m[0])).join(", ") + ")" : ""));
+  if (h.packet) out.push(fmtInt(h.packet) + " in member Packets");
+  if (h.hdata) out.push(fmtInt(h.hdata) + " in a HeapData (a serialized key or value: a stored entry, an operation's...)");
+  if (h.other) out.push(fmtInt(h.other) + " held by something else");
+  return out.join(" · ");
+}
+function lvHeapCard(host, d, rerender) {
+  const lv = d.lv, g0 = lv.groups[0], q0 = lv.queues[0], thr = lv.thr;
+  const pct = v => { const x = d.bytes ? 100 * v / d.bytes : null; return x == null ? "" : (x >= 1 ? Math.round(x) : x.toFixed(1)) + "%"; };
+  const qname = k => k >= 0 && lv.queues[k] ? lv.queues[k].remote || "a connection" : k === -1 ? "another connection" : "no outbound queue";
+  const c = el("section", "card" + (lv.alert ? " alert" : ""), host), cp = el("div", "cap", c);
+  el("h3", null, cp, "Large values");
+  el("span", "note", cp, fmtInt(lv.arrays) + " byte[] of " + fmtBytes(lv.min) + " or more (" + fmtBytes(lv.abytes) + ") · " + fmtInt(lv.queued[0]) + " message" +
+    (lv.queued[0] === 1 ? "" : "s") + " in " + fmtInt(lv.nqueues) + " outbound queue" + (lv.nqueues === 1 ? "" : "s") + " · click a row for its objects");
+  const al = lv.alert ? lvText(d, true) : "";
+  el("p", "lead", c, (al ? al.charAt(0).toUpperCase() + al.slice(1) + ". " : "") +
+    "What this JVM has to send to a connection waits in that connection's outbound queue until it is written: a client that reads slower than it asks, " +
+    "or many calls for one large value at once, fill the heap with copies of it (each response carries its own copy of the value's bytes). " +
+    (lv.alert ? "" : "Nothing stands out here: no " + fmtInt(thr[0]) + " copies of one large value adding up to " + fmtBytes(thr[1]) + ", no connection with " + fmtBytes(thr[2]) + " queued."));
+  const kp = el("div", "kpis", c);
+  const kc = kpi(kp, "Copies of one value", g0 ? fmtInt(g0.same) : "0", g0 ? fmtBytes(g0.len) + " each · " + fmtBytes(g0.same * g0.len) + " (" + pct(g0.same * g0.len) + " of the heap)" +
+    (g0.data ? " · " + lvData(g0.data) : "") : "no byte[] of " + fmtBytes(lv.min) + " or more");
+  if (g0 && g0.same >= thr[0] && g0.same * g0.len >= thr[1]) { kc.classList.add("alert"); kc.querySelector(".kpi-value").classList.add("bad"); }
+  const kq = kpi(kp, "Queued to one connection", q0 ? fmtBytes(q0.bytes) : "0", q0 ? fmtInt(q0.n) + " message" + (q0.n === 1 ? "" : "s") + " to " + (q0.remote || "a connection") +
+    (q0.type ? " · " + q0.type[0] + (q0.client && q0.client.name ? " " + q0.client.name : "") : "") : "nothing queued to any connection");
+  if (q0 && q0.bytes >= thr[2]) { kq.classList.add("alert"); kq.querySelector(".kpi-value").classList.add("bad"); }
+  kpi(kp, "Large byte[]", fmtInt(lv.arrays), fmtBytes(lv.abytes) + " (" + pct(lv.abytes) + " of the heap) · " + fmtInt(lv.groups.length) + " size" + (lv.groups.length === 1 ? "" : "s") + " listed");
+  const table = (title, noteText, H, rows, cells, isSel, pick, detail) => {
+    if (!rows.length) return;
+    el("h4", "subhead", c, title).title = noteText || "";
+    const wrap = el("div", "table-wrap", c), t = el("table", null, wrap), hr = el("tr", null, el("thead", null, t));
+    H.forEach(h => el("th", h[1] ? "num" : null, hr, h[0]));
+    const tb = el("tbody", null, t);
+    rows.forEach((r, ri) => {
+      const tr = el("tr", "click" + (isSel(ri) ? " sel" : ""), tb);
+      cells(r, ri).forEach((x, i) => { const td = el("td", H[i][1] ? "num" : "wrapcell", tr, x[0]); if (x[1]) td.title = x[1]; if (x[2]) td.classList.add(x[2]); });
+      tr.tabIndex = 0;
+      const go = () => { pick(ri); rerender(); };
+      tr.addEventListener("click", go);
+      tr.addEventListener("keydown", ev => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); go(); } });
+      if (isSel(ri)) { const tr2 = el("tr", null, tb), td2 = el("td", null, tr2); td2.colSpan = H.length; detail(td2, r); }
+    });
+  };
+  table("Values of the same size", "byte[] of " + fmtBytes(lv.min) + " and more, grouped by length; copies are compared at their start, middle and end (or by a checksum of all their bytes in a .gz dump)",
+    [["Size", 1], ["Copies", 1], ["Same content", 1], ["Total", 1], ["Of the heap", 1], ["What it is"], ["Held by"], ["Queued to"]], lv.groups,
+    g => [[fmtBytes(g.len), fmtInt(g.len) + " bytes"], [fmtInt(g.n)], [g.n === 1 ? "–" : g.same === g.n ? "all" : fmtInt(g.same) + " of " + fmtInt(g.n),
+      g.cmp === "checksum" ? "a checksum of all their bytes" : "compared at their start, middle and end (4 KB each)", g.same >= thr[0] && g.same * g.len >= thr[1] ? "lvl-E" : null],
+      [fmtBytes(g.bytes)], [pct(g.bytes)], [[lvData(g.data), g.names && g.names.length && !(g.data && g.data.cls === g.names[0]) ? "names in it: " + g.names.join(", ") : "", g.text && !g.data ? "\u201c" + trimText(g.text, 90) + "\u201d" : ""].filter(x => x).join(" · ") || "–"],
+      [lvHeld(g)], [g.queues.map(x => fmtInt(x[1]) + " to " + qname(x[0])).join(", ") || "–"]],
+    ri => state.lvG === ri, ri => { state.lvG = state.lvG === ri ? null : ri; },
+    (td, g) => el("pre", "sample", td, "byte[] of " + fmtInt(g.len) + " bytes: " + g.ids.join(", ") + (g.n > g.ids.length ? ", ..." : "") +
+      "\n\nIn Eclipse MAT (OQL):\nSELECT b.@objectAddress, b.@length FROM byte[] b WHERE b.@length = " + g.len +
+      "\nSELECT * FROM OBJECTS " + g.ids[0] + "    (then Path To GC Roots: what holds it)"));
+  table("Outbound queues", "what this JVM has not written to each connection yet (NioOutboundPipeline: writeQueue and priorityWriteQueue), the biggest first",
+    [["Connection"], ["Type"], ["Client"], ["Messages", 1], ["Bytes", 1], ["What is queued"], ["Correlation ids"], ["Requests in the heap", 1], ["In the diagnostics"]], lv.queues,
+    q => [[q.remote || "?", q.local ? "from " + q.local : ""], [q.type ? q.type[0] : "–", q.type ? "connectionType " + q.type[1] : ""],
+      [q.client ? (q.client.name || "?") + (q.client.ver ? " " + q.client.ver : "") : "–", q.client && q.client.uuid ? "uuid " + q.client.uuid : ""],
+      [(q.walked ? "" : "≥ ") + fmtInt(q.n) + (q.pri ? " (" + fmtInt(q.pri) + " priority)" : ""), q.walked ? "" : "at least: not all of its queue could be read (too many objects to keep, or the part of the dump read)"],
+      [fmtBytes(q.bytes) + (q.unknown ? "+" : ""), q.unknown ? fmtInt(q.unknown) + " small frame(s) of unknown size not counted" : "", q.bytes >= thr[2] ? "lvl-E" : null],
+      [q.types.map(t => lvPlural(t[1], t[0]) + (t[2] ? " (" + fmtBytes(t[2]) + ")" : "")).join(", ")],
+      [q.corr ? fmtInt(q.corr[0]) + (q.corr[1] !== q.corr[0] ? " – " + fmtInt(q.corr[1]) : "") : "–"],
+      [q.tasks.length ? fmtInt(q.ntasks || q.tasks.length) : "–", "message tasks of this connection still in the heap (requests being processed, or done but not yet collected)"],
+      [(() => { const k = wqRow(d, q); return k < 0 ? "–" : "peak " + fmtBytes(WQ.rows[k].max) + " at " + shortTime(WQ.rows[k].tmax); })(),
+        WQ ? "tcp.connection.out.writeQueuePendingBytes of this connection in the diagnostics (Network tab)" : "no write queue metrics in the diagnostics"]],
+    ri => state.lvQ === ri, ri => { state.lvQ = state.lvQ === ri ? null : ri; },
+    (td, q) => {
+      const k = wqRow(d, q);
+      if (k >= 0) {
+        const r = WQ.rows[k], line = el("p", "hint", td, "In the diagnostics: " + fmtBytes(r.max) + " waiting to be written to this connection at " + shortTime(r.tmax) +
+          (r.t1 != null ? ", over " + fmtBytes(WQ.thr[1]) + " from " + shortTime(r.t1) : "") + " (tcp.connection.out.writeQueuePendingBytes). ");
+        const b = el("button", "btn btn-s", line, "Show it on the Network tab");
+        b.type = "button";
+        b.addEventListener("click", ev => { ev.stopPropagation(); openWq(k); });
+      }
+      if (q.tasks.length) {
+        const t = el("table", null, el("div", "table-wrap", td)), hr = el("tr", null, el("thead", null, t));
+        ["Task", "Call", "Name", "Key", "Partition", "Correlation id", "Its response"].forEach(h => el("th", null, hr, h));
+        const tb = el("tbody", null, t);
+        for (const r of q.tasks) {
+          const tr = el("tr", null, tb);
+          [r.cls, r.op || "–", r.name || "–", r.key || "–", r.pt != null ? String(r.pt) : "–", r.corr != null ? String(r.corr) : "–",
+            r.queued ? "queued, in this queue" : r.corr != null ? "not in the queue (being processed, or written)" : "–"].forEach(x => el("td", "wrapcell", tr, x));
+        }
+      }
+      el("pre", "sample", td, ["pipeline " + q.pipe, q.conn ? "connection " + q.conn : "", q.client ? "client endpoint " + q.client.ep : ""].filter(x => x).join(", ") +
+        "\n\nIn Eclipse MAT (OQL):\nSELECT * FROM OBJECTS " + q.pipe + "    (its writeQueue: the messages)" + (q.conn ? "\nSELECT * FROM OBJECTS " + q.conn : "") +
+        (q.tasks.length ? "\nSELECT * FROM OBJECTS " + q.tasks[0].id + "    (a request's task: parameters, clientMessage)" : ""));
+    });
+  el("p", "hint", c, "A client protocol message is a chain of frames: the first holds the message type and correlation id, the next ones its values (a response's value is the serialized entry). " +
+    "Read in " + fmtInt(lv.passes || 1) + " pass" + (lv.passes === 1 ? "" : "es") + " over the dump" + (lv.complete ? "" : " (not complete: " +
+    (lv.partial ? "only part of the dump was read" : lv.capped ? "too many objects to keep them all" : "the time limit: some names or headers are missing") + ")") +
+    ". Sizes are shallow; for what keeps what alive, open the dump in Eclipse MAT with the object addresses above.");
+}
+// a thread dump: the threads parked in a Hazelcast call; the ones already in the same wait in an earlier dump of the same JVM
+function hzwThreadCard(host, d, rerender) {
+  const w = d.hzw, still = w.still || 0;
+  const c = el("section", "card" + (still ? " alert" : ""), host), cp = el("div", "cap", c);
+  el("h3", null, cp, still ? "Threads still in the same Hazelcast wait" : "Threads waiting on Hazelcast calls");
+  el("span", "note", cp, fmtInt(w.n) + " in an untimed wait" + (w.timed ? ", " + fmtInt(w.timed) + " in a timed one" : "") + " (AbstractInvocationFuture.get / join / joinInternal)" +
+    (w.fams.length ? " · " + hzwPools(w.fams) : ""));
+  el("p", "lead", c, still ? fmtInt(still) + " thread" + (still === 1 ? " was" : "s were") + " already in this same untimed Hazelcast wait in an earlier dump of this JVM (since " +
+    shortTime(hzwSince(d)) + ") and used no CPU since: they never got their result. A heap dump shows whether their futures already hold it (a lost wake-up)." :
+    "A thread dump cannot tell whether a future already holds its result. Under load, threads waiting here is normal; the same thread still in the same wait in a later " +
+    "dump of the same JVM, with no CPU used in between, is not (and a heap dump tells for sure).");
+  const wrap = el("div", "table-wrap", c);
+  sortableTable(wrap, [
+    { key: "n", label: "Thread", val: r => r.name, cls: "wrapcell" },
+    { key: "s", label: "Since", val: r => r.since != null ? r.since : Infinity, fmt: r => r.since != null ? "still waiting since " + shortTime(r.since) : r.timed ? "timed wait" : "",
+      lv: r => r.since != null ? "E" : "", title: r => r.since != null ? "in the same wait in " + r.sincef + ", with the same CPU time" : "" },
+    { key: "c", label: "CPU", num: true, val: r => r.cpu == null ? -1 : r.cpu, fmt: r => r.cpu == null ? "–" : fmtMs(r.cpu) },
+    { key: "e", label: "Thread alive", num: true, val: r => r.el == null ? -1 : r.el, fmt: r => r.el == null ? "–" : dur(r.el),
+      title: () => "elapsed= in the dump: an upper bound on how long it can have been waiting" },
+    { key: "a", label: "Call", val: r => r.api || "", cls: "wrapcell" },
+    { key: "p", label: "Called from", val: r => r.app || "", cls: "wrapcell" }
+  ], w.rows, state.hzwTdSort, rerender, null, "");
+}
+
+/* ---------- Network: the outbound write queues, per connection */
+const wqPeer = r => r.kind === "member" ? "member " + r.peer : r.kind === "client" ? (r.ctype || "client") : r.kind === "wan" ? "another cluster" : r.kind === "other" ? "not a member" : r.kind;
+function buildWriteQueues(sec) {
+  const thr = WQ.thr;
+  const rowsIn = () => { const ss = selSet(); return WQ.rows.filter(r => ss.has(r.m) && r.first <= state.x1 && r.last >= state.x0); };
+  if (WQ.bytes && WQ.rows.some(r => r.pts)) {
+    const pnl = addPanel("network", sec, { title: "Bytes waiting to be written, per connection", code: "tcp.connection.out.writeQueuePendingBytes + priorityWriteQueuePendingBytes", render: p => {
+      const ss = selSet(), series = [];
+      WQ.rows.forEach((r, i) => {
+        if (!r.pts || !ss.has(r.m)) return;
+        series.push({ key: "wq:" + i, label: (r.remote || "?") + (NDIAG > 1 ? " · " + MEMBERS[r.m].label : ""), color: i < 8 ? catColor(i) : null, faint: i >= 8,
+          pts: r.pts, join: 3 * 60000 });
+      });
+      drawTS(p, { series, unit: "bytes", note: "at each dump · the " + fmtInt(series.length) + " connections with the most", legendAlways: true });
+    } });
+    pnl.fixed = true;
+  }
+  const card = el("section", "card", sec), cap = el("div", "cap", card);
+  card.id = "wq-card";
+  el("h3", null, cap, "Outbound write queues");
+  const note = el("span", "note", cap);
+  const lead = el("p", "lead", card);
+  const wrap = el("div", "table-wrap", card);
+  const render = () => {
+    clear(wrap);
+    const rows = rowsIn().map(r => ({ r, i: WQ.rows.indexOf(r) })), over = rows.filter(x => x.r.t1 != null);
+    card.classList.toggle("alert", over.length > 0);
+    note.textContent = fmtInt(rows.length) + " of " + fmtInt(WQ.npipes) + " connections: the ones with " + fmtBytes(thr[0]) + " (or 1,000 frames) or more waiting at some dump · click one for its heap dump";
+    lead.textContent = (over.length ? fmtInt(over.length) + " connection" + (over.length === 1 ? " has" : "s have") + " had " + fmtBytes(thr[1]) + " or more waiting to be written while the others stay near 0. " : "") +
+      "What a member has not written to a connection yet waits in that connection's outbound queue (tcp.connection.out.writeQueuePendingBytes, writeQueueSize): it stays near 0 and clears within a dump. " +
+      "Growing on a few connections means those peers read slower than they are sent to (a client asking for large values faster than it reads them, a stuck consumer), and the member keeps all of it on its heap. " +
+      "A heap dump of that member shows what is queued: the message type, the client, the requests behind it.";
+    sortableTable(wrap, [
+      { key: "m", label: "Member", val: x => MEMBERS[x.r.m].label },
+      { key: "remote", label: "Connection", val: x => x.r.remote || "?", title: x => x.r.pid + (x.r.host ? " · " + x.r.host : ""), cls: "wrapcell",
+        fmt: x => (x.r.remote || "?") + (x.r.host ? " (" + x.r.host + ")" : "") },
+      { key: "peer", label: "Peer", val: x => wqPeer(x.r) },
+      { key: "max", label: "Peak", num: true, val: x => x.r.max == null ? -1 : x.r.max, fmt: x => x.r.max == null ? "–" : fmtBytes(x.r.max), lv: x => x.r.t1 != null ? "E" : "" },
+      { key: "tmax", label: "At", num: true, val: x => x.r.tmax || 0, fmt: x => x.r.tmax ? shortTime(x.r.tmax) : "–" },
+      { key: "t1", label: "Over " + fmtBytes(thr[1]) + " from", num: true, val: x => x.r.t1 == null ? Infinity : x.r.t1, fmt: x => x.r.t1 == null ? "–" : shortTime(x.r.t1) },
+      { key: "lastv", label: "At its last dump", num: true, val: x => x.r.lastv == null ? -1 : x.r.lastv,
+        fmt: x => (x.r.lastv == null ? "–" : fmtBytes(x.r.lastv)) + " at " + shortTime(x.r.last) + (x.r.gone ? ", then closed" : ""),
+        title: x => x.r.gone ? "the connection's metrics end before the member's: it closed" : "" },
+      { key: "cmax", label: "Frames", num: true, val: x => x.r.cmax, fmt: x => fmtInt(x.r.cmax), title: () => "the most in its queues at a dump (writeQueueSize)" },
+      { key: "heap", label: "In a heap dump", val: x => { const h = wqHeap(x.r); return h ? DUMPS[h[0]].lv.queues[h[1]].bytes : -1; }, cls: "wrapcell",
+        fmt: x => { const h = wqHeap(x.r); if (!h) return "–"; const d = DUMPS[h[0]], q = d.lv.queues[h[1]];
+          return (q.types.length ? lvPlural(q.types[0][1], q.types[0][0]) : fmtInt(q.n) + " messages") + " (" + fmtBytes(q.bytes) + ") at " + shortTime(d.t); } }
+    ], rows, state.wqSort, render, x => { const h = wqHeap(x.r); if (h) openLvQueue(h[0], h[1]); else { state.wqSel = state.wqSel === x.i ? null : x.i; update(); } },
+      "No connection had " + fmtBytes(thr[0]) + " waiting in this selection.", x => x.i === state.wqSel);
+  };
+  tabUpdaters.push(Object.assign(render, { tab: "network" }));
+}
+
 /* ---------- build everything */
 buildHeader();
 buildTabs();
@@ -12968,6 +15653,7 @@ buildGeneric("operations", sections.operations, [["operation.queueSize"], ["oper
   ["operation.responseQueueSize"], ["operation.invocations.pending"], ["operation.invocations.usedPercentage"], ["operation.completedCount"],
   ["executor.internal.queueSize"], ["executor.internal.poolSize"], ["event.eventQueueSize"]], null);
 buildThreads(sections.threads);
+if (WQ) buildWriteQueues(sections.network);
 buildGeneric("network", sections.network, [["tcp.bytesReceived"], ["tcp.bytesSend"],
   ["tcp.connection.activeCount"], ["tcp.connection.clientCount"], ["tcp.connection.count"],
   ["tcp.connection.in.bytesRead"], ["tcp.connection.out.bytesWritten"], ["tcp.connection.out.writeQueueSize"]],
